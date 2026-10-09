@@ -8,6 +8,7 @@ struct Uniforms {
     resolution: vec2<f32>,
     seed: f32,                 // per-session: every launch gets a new sheet
     scale: f32,                // physical pixels per logical pixel
+    extra: vec4<f32>,          // x: water-stain strength
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -107,7 +108,10 @@ fn washi(px_in: vec2<f32>, uv: vec2<f32>) -> vec3<f32> {
     let clouds = fbm(px * 0.006);
     let mottle = noise(px * 0.05) * 0.6 + noise(px * 0.13) * 0.4;
     let grain = hash(px) - 0.5;
-    var shade = clouds * 0.3 + mottle * 0.12 + grain * 0.08;
+    // `texture` scales the paper itself; `stains` the water marks below.
+    let texture = u.surface_shade.w;
+    let stains = u.extra.x;
+    var shade = (clouds * 0.3 + mottle * 0.12 + grain * 0.08) * texture;
     if (!dark_sheet) {
         // Parchment browns heavily towards the corners, as in the paintings.
         shade += vignette(uv) * 0.75;
@@ -121,17 +125,17 @@ fn washi(px_in: vec2<f32>, uv: vec2<f32>) -> vec3<f32> {
         let level = 0.58 + f32(k) * 0.045;
         let inside = field - level;
         let edge = smoothstep(-0.002, 0.0, inside);
-        shade += edge * (0.06 + 0.5 * exp(-max(inside, 0.0) * 260.0));
+        shade += edge * (0.06 + 0.5 * exp(-max(inside, 0.0) * 260.0)) * stains;
     }
 
-    var color = mix(u.surface.rgb, u.surface_shade.rgb, clamp(shade * u.surface_shade.w, 0.0, 1.0));
+    var color = mix(u.surface.rgb, u.surface_shade.rgb, clamp(shade, 0.0, 1.0));
 
     // Relief: light the tooth from the top left so the sheet reads as rough.
     let e = 0.75;
     let dx = tooth(px + vec2<f32>(e, 0.0)) - tooth(px - vec2<f32>(e, 0.0));
     let dy = tooth(px + vec2<f32>(0.0, e)) - tooth(px - vec2<f32>(0.0, e));
     let lit = clamp(-(dx + dy) * 1.6, -1.0, 1.0);
-    color = color * (1.0 + lit * select(0.11, 0.55, dark_sheet));
+    color = color * (1.0 + lit * select(0.11, 0.55, dark_sheet) * texture);
     if (dark_sheet) {
         color = color * (1.0 - vignette(uv) * 0.35);
     }
@@ -141,9 +145,9 @@ fn washi(px_in: vec2<f32>, uv: vec2<f32>) -> vec3<f32> {
     for (var k = 0; k < 3; k++) {
         light += fiber(px, 0.5 + f32(k) * 1.9, f32(k) * 21.0);
     }
-    color = mix(color, mix(color, vec3<f32>(1.0), select(0.1, 0.07, dark_sheet)), clamp(light, 0.0, 1.0));
+    color = mix(color, mix(color, vec3<f32>(1.0), select(0.1, 0.07, dark_sheet)), clamp(light * texture, 0.0, 1.0));
     let dark = fiber(px, 2.4, 57.0);
-    color = mix(color, u.surface_shade.rgb * 0.8, dark * select(0.2, 0.18, dark_sheet));
+    color = mix(color, u.surface_shade.rgb * 0.8, clamp(dark * select(0.2, 0.18, dark_sheet) * texture, 0.0, 1.0));
 
     // A few flicks of ink splatter in the top-right corner, well away from
     // where the text starts.

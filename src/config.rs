@@ -48,6 +48,12 @@ pub struct ThemeOverride {
     pub grain: Option<f32>,
     pub edge: Option<f32>,
     pub nib: Option<f32>,
+    /// Paper texture strength (mottling, relief, fibers): 1 built-in, 0 flat.
+    pub texture: Option<f32>,
+    /// Water-stain strength: 1 built-in, 0 none.
+    pub stains: Option<f32>,
+    /// Ink splatter in the corner: 1 built-in, 0 none.
+    pub splatter: Option<f32>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -114,13 +120,17 @@ harmonize_colors = true
 #   nib    brush nib length: thick-and-thin strokes (pixels, 0 = off)
 #   grain  dry-brush streaks, 0..1
 #   edge   pigment pooling at stroke rims, 0..1
+#   texture   paper texture (mottling, relief, fibers): 1 built-in, 0 flat, up to 3
+#   stains    water-stain tide lines: 1 built-in, 0 none, up to 3
+#   splatter  ink flecks in the top-right corner: 1 built-in, 0 none, up to 3
 "#,
     );
     for theme in &themes {
         let ink = theme.ink_style;
         out += &format!(
             "\n[themes.{key}]\nfont_family = \"{family}\"\nfont_size = {size}\nfont_weight = {weight}\n\
-             line_height = {line}\nbleed = {bleed}\nnib = {nib}\ngrain = {grain}\nedge = {edge}\n",
+             line_height = {line}\nbleed = {bleed}\nnib = {nib}\ngrain = {grain}\nedge = {edge}\n\
+             texture = {texture}\nstains = {stains}\nsplatter = {splatter}\n",
             key = key(theme.name),
             family = theme.font_family,
             size = theme.font_size,
@@ -130,6 +140,9 @@ harmonize_colors = true
             nib = ink.nib,
             grain = ink.grain,
             edge = ink.edge,
+            texture = theme.texture_strength,
+            stains = theme.stains,
+            splatter = theme.splatter.1,
         );
     }
     out
@@ -180,6 +193,10 @@ impl Config {
         if let Some(size) = sizes.into_iter().find(|s| !(4.0..=96.0).contains(s)) {
             return Err(format!("font_size {size} is out of range (4 to 96)"));
         }
+        let paper = self.themes.values().flat_map(|o| [o.texture, o.stains, o.splatter]).flatten();
+        if let Some(v) = paper.into_iter().find(|v| !(0.0..=3.0).contains(v)) {
+            return Err(format!("texture / stains / splatter {v} is out of range (0 to 3)"));
+        }
         if let Some(speed) = self.animation_speed
             && !(0.1..=10.0).contains(&speed)
         {
@@ -215,6 +232,9 @@ impl Config {
             if let Some(v) = o.line_height {
                 theme.line_height = v;
             }
+            theme.texture_strength = o.texture.unwrap_or(theme.texture_strength);
+            theme.stains = o.stains.unwrap_or(theme.stains);
+            theme.splatter.1 = o.splatter.unwrap_or(theme.splatter.1);
             let ink = &mut theme.ink_style;
             ink.bleed = o.bleed.unwrap_or(ink.bleed);
             ink.grain = o.grain.unwrap_or(ink.grain);
@@ -312,6 +332,14 @@ mod tests {
             assert_eq!((x.bleed, x.nib, x.grain, x.edge), (y.bleed, y.nib, y.grain, y.edge));
         }
         assert_eq!(config.appearance, Appearance::System);
+    }
+
+    #[test]
+    fn paper_strengths_are_settable() {
+        let config = Config::parse("[themes.tsushima-light]\ntexture = 0.5\nstains = 0\nsplatter = 2").unwrap();
+        let light = config.themes().into_iter().find(|t| !t.dark).unwrap();
+        assert_eq!((light.texture_strength, light.stains, light.splatter.1), (0.5, 0.0, 2.0));
+        assert!(Config::parse("[themes.tsushima-light]\nstains = 5").unwrap_err().contains("out of range"));
     }
 
     #[test]

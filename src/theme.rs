@@ -64,8 +64,10 @@ pub struct Theme {
     pub surface: [f32; 3],
     /// Darker tone the texture mixes towards in fibers, smudges and edges.
     pub surface_shade: [f32; 3],
-    /// How strong the texture is, 0 = flat.
+    /// How strong the paper texture is (mottling, relief, fibers), 0 = flat.
     pub texture_strength: f32,
+    /// How strong the water-stain tide lines are (washi), 0 = none.
+    pub stains: f32,
     /// Default text colour (sRGB).
     pub ink: [u8; 3],
     pub cursor: [u8; 3],
@@ -105,6 +107,7 @@ pub fn builtin() -> Vec<Theme> {
             surface: [0.886, 0.769, 0.557],
             surface_shade: [0.36, 0.26, 0.14],
             texture_strength: 1.0,
+            stains: 1.0,
             ink: [18, 13, 9],
             cursor: [158, 28, 32],
             selection: ([196, 64, 60], 0.22),
@@ -146,6 +149,7 @@ pub fn builtin() -> Vec<Theme> {
             surface: [0.024, 0.019, 0.016],
             surface_shade: [0.2, 0.158, 0.115],
             texture_strength: 1.0,
+            stains: 1.0,
             ink: [222, 196, 148],
             cursor: [196, 44, 46],
             selection: ([196, 64, 60], 0.3),

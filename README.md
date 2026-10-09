@@ -116,10 +116,11 @@ harmonize_colors = true       # program-chosen colours as inks on the sheet
 option_as_meta = "left"       # left | both | none
 seed = 11                     # pin the paper; unset = new sheet each session
 
-[themes.tsushima-dark]        # each variant: fonts, line_height, bleed, nib, grain, edge
-font_family = "Courier New"
+[themes.tsushima-light]       # each variant: fonts, line_height, bleed, nib, grain, edge,
+font_family = "Courier New"   # and the paper: texture, stains, splatter (1 = built-in, 0 = off)
 font_weight = 700
-nib = 1.2
+texture = 0.6
+stains = 0
 ```
 
 The file starts with both variants' built-in values as active lines, so editing a number

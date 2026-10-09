@@ -51,6 +51,8 @@ struct Uniforms {
     resolution: [f32; 2],
     seed: f32,
     scale: f32,
+    /// x: water-stain strength.
+    extra: [f32; 4],
 }
 
 #[repr(C)]
@@ -1386,6 +1388,7 @@ impl Renderer {
             resolution: [w as f32, h as f32],
             seed: self.seed,
             scale,
+            extra: [theme.stains, 0.0, 0.0, 0.0],
         };
         self.queue
             .write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&uniforms));
