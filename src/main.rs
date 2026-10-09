@@ -17,6 +17,7 @@ mod chrome;
 mod color;
 mod config;
 mod input;
+mod menu;
 mod renderer;
 mod terminal;
 mod theme;
@@ -36,6 +37,7 @@ use winit::window::{Window, WindowId};
 
 use chrome::Control;
 use config::{Config, OptionAsMeta};
+use menu::Action;
 use renderer::{Notice, Renderer};
 use terminal::{TabId, Terminal, UserEvent};
 use theme::Theme;
@@ -57,6 +59,9 @@ struct App {
     tabs: Vec<Tab>,
     active: usize,
     next_tab: TabId,
+    /// The tab name being edited in the strip.
+    renaming: Option<Rename>,
+    menu: Option<menu::ContextMenu>,
     themes: Vec<Theme>,
     current: usize,
     mods: ModifiersState,
@@ -79,11 +84,21 @@ struct App {
     startup_error: Option<String>,
 }
 
+/// A tab name being typed: which tab, the text so far, and whether all of
+/// it is selected (typing then replaces it, as in any text field).
+struct Rename {
+    index: usize,
+    text: String,
+    all: bool,
+}
+
 struct Tab {
     id: TabId,
     terminal: Terminal,
     /// Set by the program running in it (OSC 0/2).
     title: Option<String>,
+    /// Given by the user (Rename Tab); wins over the title.
+    name: Option<String>,
 }
 
 #[derive(Default)]
@@ -103,6 +118,8 @@ struct Mouse {
     pressed_control: Option<Control>,
     /// Last press in the title strip, for double-click to zoom.
     last_strip_click: Option<Instant>,
+    /// Last click on a tab, for double-click to rename.
+    last_tab_click: Option<(Instant, usize)>,
 }
 
 /// Clicks closer together than this count as a double/triple click.
@@ -137,7 +154,7 @@ impl App {
         let id = self.next_tab;
         self.next_tab += 1;
         let terminal = Terminal::spawn(self.proxy.clone(), id, renderer.grid_size(&theme), self.command.clone())?;
-        self.tabs.push(Tab { id, terminal, title: None });
+        self.tabs.push(Tab { id, terminal, title: None, name: None });
         self.switch_tab(self.tabs.len() - 1);
         Ok(())
     }
@@ -147,6 +164,7 @@ impl App {
         if index >= self.tabs.len() {
             return;
         }
+        self.finish_rename(true);
         if let Some(old) = self.tabs.get(self.active).filter(|_| self.active != index) {
             old.terminal.set_focused(false);
         }
@@ -174,6 +192,7 @@ impl App {
         if index >= self.tabs.len() {
             return true;
         }
+        self.renaming = None;
         self.tabs.remove(index);
         if self.tabs.is_empty() {
             return false;
@@ -184,16 +203,189 @@ impl App {
         true
     }
 
-    /// Tells the renderer the tab labels and sets the window title.
+    /// Tells the renderer the tab labels and sets the window title. Labels
+    /// show with several tabs, or with one that has a name (or is getting one).
     fn update_tabs(&mut self) {
-        let labels: Vec<String> = self.tabs.iter().enumerate().map(|(i, t)| tab_label(t, i)).collect();
+        let mut labels: Vec<String> = self.tabs.iter().enumerate().map(|(i, t)| tab_label(t, i)).collect();
+        let editing = self.renaming.as_ref().map(|r| (r.index, r.all));
+        if let Some(rename) = &self.renaming
+            && let Some(label) = labels.get_mut(rename.index)
+        {
+            label.clone_from(&rename.text);
+        }
+        let show = labels.len() > 1 || editing.is_some() || self.tabs.iter().any(|t| t.name.is_some());
         if let Some(r) = self.renderer.as_mut() {
-            if let Some(label) = labels.get(self.active) {
-                r.window().set_title(label);
+            if let Some(tab) = self.tabs.get(self.active) {
+                r.window().set_title(&tab_label(tab, self.active));
             }
-            r.set_tabs(if labels.len() > 1 { labels } else { Vec::new() }, self.active);
+            r.set_tabs(if show { labels } else { Vec::new() }, self.active, editing);
             r.window().request_redraw();
         }
+    }
+
+    /// Starts editing tab `index`'s name in the strip.
+    fn start_rename(&mut self, index: usize) {
+        let Some(tab) = self.tabs.get(index) else { return };
+        let text = tab.name.clone().unwrap_or_else(|| tab_label(tab, index));
+        // Starts with the whole name selected, as renaming in Finder does.
+        self.renaming = Some(Rename { index, text, all: true });
+        self.update_tabs();
+    }
+
+    /// Ends editing: keeps the name (an empty one goes back to the
+    /// automatic title) or drops the edit.
+    fn finish_rename(&mut self, keep: bool) {
+        let Some(Rename { index, text, .. }) = self.renaming.take() else { return };
+        if keep && let Some(tab) = self.tabs.get_mut(index) {
+            let text = text.trim();
+            tab.name = (!text.is_empty()).then(|| text.to_string());
+        }
+        self.update_tabs();
+    }
+
+    /// Keys while a tab name is being edited. Text editing keys (Cmd+A, C,
+    /// X, V included) act on the name; returns false for other Cmd
+    /// shortcuts, which keep the name and then go on to the usual handling.
+    fn rename_key(&mut self, event: &KeyEvent) -> bool {
+        use winit::keyboard::NamedKey;
+        let Some(rename) = self.renaming.as_mut() else { return false };
+        if self.mods.super_key() {
+            let key = match &event.logical_key {
+                Key::Character(c) => c.to_lowercase(),
+                _ => String::new(),
+            };
+            match key.as_str() {
+                "a" => rename.all = true,
+                "c" | "x" => {
+                    let _ = arboard::Clipboard::new().and_then(|mut c| c.set_text(rename.text.clone()));
+                    if key == "x" && rename.all {
+                        rename.text.clear();
+                        rename.all = false;
+                    }
+                }
+                "v" => {
+                    if let Ok(pasted) = arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+                        if rename.all {
+                            rename.text.clear();
+                            rename.all = false;
+                        }
+                        // One line: newlines and tabs become spaces.
+                        rename.text.extend(pasted.chars().map(|c| if c.is_control() { ' ' } else { c }));
+                    }
+                }
+                _ => {
+                    self.finish_rename(true);
+                    return false;
+                }
+            }
+            self.update_tabs();
+            return true;
+        }
+        match &event.logical_key {
+            Key::Named(NamedKey::Enter | NamedKey::Escape) => {
+                let keep = event.logical_key == Key::Named(NamedKey::Enter);
+                self.finish_rename(keep);
+                return true;
+            }
+            Key::Named(NamedKey::Backspace) => {
+                if rename.all {
+                    rename.text.clear();
+                } else {
+                    rename.text.pop();
+                }
+                rename.all = false;
+            }
+            // The caret stays at the end; moving it just drops the selection.
+            Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight | NamedKey::Home | NamedKey::End) => rename.all = false,
+            _ => {
+                if let Some(typed) = event.text.as_deref().filter(|t| !t.chars().any(char::is_control)) {
+                    if rename.all {
+                        rename.text.clear();
+                        rename.all = false;
+                    }
+                    rename.text.push_str(typed);
+                }
+            }
+        }
+        self.update_tabs();
+        true
+    }
+
+    /// Shows the right-click menu at the pointer.
+    fn show_menu(&mut self) {
+        let state = menu::State {
+            has_selection: self.terminal().and_then(|t| t.selection_text()).is_some(),
+            dark: self.themes[self.current].dark,
+            tabs: self.tabs.len(),
+        };
+        if let (Some(m), Some(r)) = (&self.menu, &self.renderer) {
+            m.show(r.window(), state);
+        }
+    }
+
+    /// Carries out a menu item or its shortcut.
+    fn menu_action(&mut self, action: Action) {
+        match action {
+            Action::Copy => {
+                if let Some(text) = self.terminal().and_then(|t| t.selection_text()) {
+                    let _ = arboard::Clipboard::new().and_then(|mut c| c.set_text(text));
+                }
+            }
+            Action::Paste => {
+                let text = arboard::Clipboard::new().and_then(|mut c| c.get_text());
+                if let (Ok(text), Some(t)) = (text, self.terminal()) {
+                    t.paste(&text);
+                }
+            }
+            Action::SelectAll => {
+                if let Some(rename) = self.renaming.as_mut() {
+                    rename.all = true;
+                    self.update_tabs();
+                } else if let Some(t) = self.terminal() {
+                    t.select_all();
+                }
+            }
+            Action::Clear => {
+                if let Some(t) = self.terminal() {
+                    t.clear();
+                }
+                if let Some(r) = self.renderer.as_mut() {
+                    r.reset_writing();
+                }
+            }
+            Action::NewTab => {
+                if let Err(err) = self.new_tab() {
+                    self.show_notice(format!("could not open a tab: {err}"), true);
+                }
+            }
+            Action::NewWindow => self.new_window(),
+            Action::RenameTab => self.start_rename(self.active),
+            Action::CloseTab => {
+                if !self.close_tab(self.active) {
+                    self.close_requested = true;
+                }
+            }
+            Action::Bigger | Action::Smaller | Action::ActualSize => {
+                if let Some(r) = self.renderer.as_mut() {
+                    match action {
+                        Action::Bigger => r.zoom_by(1.1),
+                        Action::Smaller => r.zoom_by(1.0 / 1.1),
+                        _ => r.reset_zoom(),
+                    }
+                }
+                self.relayout();
+            }
+            Action::FlipAppearance => {
+                self.flip = Some(!self.themes[self.current].dark);
+                self.select_theme();
+            }
+            Action::Settings => {
+                if let Err(err) = config::open_in_editor(&self.config_path) {
+                    self.show_notice(format!("could not open settings: {err}"), true);
+                }
+            }
+        }
+        self.redraw();
     }
 
     /// Opens another window: a separate oneprompt, a little down and to the
@@ -230,18 +422,27 @@ impl App {
             return false;
         };
         let shift = self.mods.shift_key();
-        match key.as_str() {
+        let action = match key.as_str() {
             // Flip between the light and dark variant for this session.
-            "l" | "L" if shift => {
-                self.flip = Some(!self.themes[self.current].dark);
-                self.select_theme();
-            }
-            "t" => {
-                if let Err(err) = self.new_tab() {
-                    self.show_notice(format!("could not open a tab: {err}"), true);
-                }
-            }
-            "n" => self.new_window(),
+            "l" | "L" if shift => Some(Action::FlipAppearance),
+            "t" => Some(Action::NewTab),
+            "n" => Some(Action::NewWindow),
+            "=" | "+" => Some(Action::Bigger),
+            "-" => Some(Action::Smaller),
+            "0" => Some(Action::ActualSize),
+            "," => Some(Action::Settings),
+            "w" => Some(Action::CloseTab),
+            "c" => Some(Action::Copy),
+            "v" => Some(Action::Paste),
+            "a" => Some(Action::SelectAll),
+            "k" => Some(Action::Clear),
+            _ => None,
+        };
+        if let Some(action) = action {
+            self.menu_action(action);
+            return true;
+        }
+        match key.as_str() {
             // Next / previous tab (Shift+] and Shift+[ arrive as braces).
             "}" | "]" if shift => {
                 let n = self.tabs.len();
@@ -257,42 +458,9 @@ impl App {
                 let index = if n == 9 { self.tabs.len().saturating_sub(1) } else { n - 1 };
                 self.switch_tab(index);
             }
-            "=" | "+" => {
-                if let Some(r) = self.renderer.as_mut() {
-                    r.zoom_by(1.1);
-                }
-                self.relayout();
-            }
-            "-" => {
-                if let Some(r) = self.renderer.as_mut() {
-                    r.zoom_by(1.0 / 1.1);
-                }
-                self.relayout();
-            }
-            "," => {
-                if let Err(err) = config::open_in_editor(&self.config_path) {
-                    self.show_notice(format!("could not open settings: {err}"), true);
-                }
-            }
-            "w" => {
-                if !self.close_tab(self.active) {
-                    self.close_requested = true;
-                }
-            }
             "m" => {
                 if let Some(r) = &self.renderer {
                     r.window().set_minimized(true);
-                }
-            }
-            "c" => {
-                if let Some(text) = self.terminal().and_then(|t| t.selection_text()) {
-                    let _ = arboard::Clipboard::new().and_then(|mut c| c.set_text(text));
-                }
-            }
-            "v" => {
-                let text = arboard::Clipboard::new().and_then(|mut c| c.get_text());
-                if let (Ok(text), Some(t)) = (text, self.terminal()) {
-                    t.paste(&text);
                 }
             }
             _ => return false,
@@ -398,6 +566,12 @@ impl App {
             + 16 * self.mods.control_key() as u8
     }
 
+    /// The pointer is over the title strip.
+    fn in_strip(&self) -> bool {
+        let scale = self.renderer.as_ref().map_or(1.0, |r| r.window().scale_factor());
+        self.mouse.y < renderer::TITLE_STRIP as f64 * scale
+    }
+
     fn pointer_cell(&self) -> Option<(usize, usize, bool)> {
         let (r, t) = (self.renderer.as_ref()?, self.terminal()?);
         Some(r.cell_at(self.mouse.x, self.mouse.y, t.size()))
@@ -430,7 +604,16 @@ impl App {
         }
         if self.mouse.y < renderer::TITLE_STRIP as f64 * scale as f64 {
             if let Some(index) = r.tab_at(self.mouse.x) {
+                let now = Instant::now();
+                let double = self.mouse.last_tab_click.is_some_and(|(at, i)| i == index && now - at < MULTI_CLICK);
+                self.mouse.last_tab_click = Some((now, index));
+                if self.renaming.as_ref().is_some_and(|r| r.index == index) {
+                    return true;
+                }
                 self.switch_tab(index);
+                if double {
+                    self.start_rename(index);
+                }
                 return true;
             }
             let now = Instant::now();
@@ -448,8 +631,29 @@ impl App {
 
     fn on_mouse_button(&mut self, state: ElementState, button: MouseButton) {
         let pressed = state == ElementState::Pressed;
+        // A click anywhere else keeps a name being edited.
+        if pressed && self.renaming.is_some() {
+            let on_tab = self.renderer.as_ref().and_then(|r| r.tab_at(self.mouse.x));
+            if !self.in_strip() || on_tab != self.renaming.as_ref().map(|r| r.index) {
+                self.finish_rename(true);
+            }
+        }
         if self.on_chrome_button(pressed, button) {
             return;
+        }
+        // Right-click opens the menu, unless the program wants the mouse
+        // (Shift+right-click still opens it then). On a tab, for that tab.
+        if button == MouseButton::Right {
+            let program_wants = self.terminal().is_some_and(|t| t.mouse_mode()) && !self.mods.shift_key();
+            if self.in_strip() || !program_wants {
+                if pressed {
+                    if let Some(index) = self.renderer.as_ref().and_then(|r| r.tab_at(self.mouse.x)).filter(|_| self.in_strip()) {
+                        self.switch_tab(index);
+                    }
+                    self.show_menu();
+                }
+                return;
+            }
         }
         let Some((col, line, right_half)) = self.pointer_cell() else { return };
         let Some(t) = self.tabs.get(self.active).map(|t| &t.terminal) else { return };
@@ -473,7 +677,11 @@ impl App {
             return;
         }
         if !pressed {
+            // A click without a drag selects nothing: drop it, so it does
+            // not linger as a one-cell selection.
             self.mouse.selecting = false;
+            t.drop_empty_selection();
+            self.redraw();
             return;
         }
         let now = Instant::now();
@@ -563,7 +771,7 @@ impl ApplicationHandler<UserEvent> for App {
         let id = self.next_tab;
         self.next_tab += 1;
         match Terminal::spawn(self.proxy.clone(), id, size, self.command.clone()) {
-            Ok(terminal) => self.tabs.push(Tab { id, terminal, title: None }),
+            Ok(terminal) => self.tabs.push(Tab { id, terminal, title: None, name: None }),
             Err(err) => {
                 eprintln!("oneprompt: could not start shell: {err}");
                 event_loop.exit();
@@ -572,6 +780,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         renderer.window().request_redraw();
         self.renderer = Some(renderer);
+        self.menu = Some(menu::ContextMenu::new(self.proxy.clone()));
         self.update_tabs();
         // Seed, notices and the system's light/dark mode need the window.
         self.system_dark = self.renderer.as_ref().and_then(|r| r.window().theme())
@@ -646,6 +855,12 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::ConfigChanged => self.reload_config(),
+            UserEvent::Menu(action) => {
+                self.menu_action(action);
+                if self.close_requested {
+                    event_loop.exit();
+                }
+            }
             // Tell programs the theme's real colours, so the ones that check
             // (to choose a light or dark palette) see the sheet they are on.
             UserEvent::ColorRequest(id, index, reply) => {
@@ -685,6 +900,9 @@ impl ApplicationHandler<UserEvent> for App {
                 self.redraw();
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                if self.renaming.is_some() && self.rename_key(&event) {
+                    return;
+                }
                 if self.shortcut(&event) {
                     if self.close_requested {
                         event_loop.exit();
@@ -774,6 +992,9 @@ impl ApplicationHandler<UserEvent> for App {
 
 /// A tab's name in the strip: what its program called it, else the shell's.
 fn tab_label(tab: &Tab, index: usize) -> String {
+    if let Some(name) = &tab.name {
+        return name.clone();
+    }
     if let Some(title) = tab.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
         return title.to_string();
     }
@@ -834,6 +1055,8 @@ fn main() {
         tabs: Vec::new(),
         active: 0,
         next_tab: 0,
+        renaming: None,
+        menu: None,
         themes,
         current,
         mods: ModifiersState::empty(),

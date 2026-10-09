@@ -14,7 +14,7 @@ use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::tty;
-use alacritty_terminal::vte::ansi::Rgb;
+use alacritty_terminal::vte::ansi::{ClearMode, Handler, Rgb};
 use winit::event_loop::EventLoopProxy;
 
 /// Answers a colour query: formats the reply for a given colour.
@@ -38,6 +38,8 @@ pub enum UserEvent {
     /// A program asked for a colour (OSC 4/10/11/12): palette index, or
     /// 256/257/258 for foreground, background, cursor.
     ColorRequest(TabId, usize, ColorReply),
+    /// An item was chosen in the right-click menu.
+    Menu(crate::menu::Action),
 }
 
 #[derive(Clone)]
@@ -206,12 +208,51 @@ impl Terminal {
         }
     }
 
+    /// Selects everything: the scrollback and the screen.
+    pub fn select_all(&self) {
+        let mut term = self.term.lock();
+        let (top, bottom) = (term.grid().topmost_line(), term.grid().bottommost_line());
+        let last = term.grid().last_column();
+        let mut selection = Selection::new(SelectionType::Lines, Point::new(top, Column(0)), Side::Left);
+        selection.update(Point::new(bottom, last), Side::Right);
+        term.selection = Some(selection);
+    }
+
+    /// Clears the screen and the scrollback (Cmd+K). The shell is sent
+    /// Ctrl+L so it draws its prompt again; full-screen apps keep their
+    /// screen and only lose the scrollback.
+    pub fn clear(&self) {
+        let mut term = self.term.lock();
+        term.selection = None;
+        term.scroll_display(Scroll::Bottom);
+        if term.mode().contains(TermMode::ALT_SCREEN) {
+            term.clear_screen(ClearMode::Saved);
+            return;
+        }
+        term.clear_screen(ClearMode::All);
+        term.clear_screen(ClearMode::Saved);
+        drop(term);
+        self.write(&b"\x0c"[..]);
+    }
+
+    /// Forgets a selection that covers nothing (a click without a drag).
+    pub fn drop_empty_selection(&self) {
+        let mut term = self.term.lock();
+        if term.selection.as_ref().is_some_and(|s| s.is_empty()) {
+            term.selection = None;
+        }
+    }
+
     pub fn clear_selection(&self) {
         self.term.lock().selection = None;
     }
 
     pub fn selection_text(&self) -> Option<String> {
-        self.term.lock().selection_to_string().filter(|s| !s.is_empty())
+        let term = self.term.lock();
+        if term.selection.as_ref().is_some_and(|s| s.is_empty()) {
+            return None;
+        }
+        term.selection_to_string().filter(|s| !s.is_empty())
     }
 
     /// Whether the running program wants mouse events (vim, htop, tmux, ...).

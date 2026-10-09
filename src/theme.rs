@@ -77,7 +77,8 @@ pub struct Theme {
     /// Default text colour (sRGB).
     pub ink: [u8; 3],
     pub cursor: [u8; 3],
-    /// Selection colour and opacity, drawn under the text like a highlighter.
+    /// Selection block colour and opacity; selected text is drawn on it in
+    /// the surface colour, reversed out of the ink.
     pub selection: ([u8; 3], f32),
     /// The 16 ANSI colours, re-imagined for this surface. On paper "white"
     /// has to stay dark enough to read, so these are inks, not screen colours.
@@ -116,7 +117,7 @@ pub fn builtin() -> Vec<Theme> {
             stains: 1.0,
             ink: [18, 13, 9],
             cursor: [158, 28, 32],
-            selection: ([196, 64, 60], 0.22),
+            selection: ([30, 22, 15], 0.9),
             palette: [
                 [22, 20, 18],    // black: sumi
                 [158, 28, 32],   // red: crimson seal
@@ -158,7 +159,7 @@ pub fn builtin() -> Vec<Theme> {
             stains: 1.0,
             ink: [222, 196, 148],
             cursor: [196, 44, 46],
-            selection: ([196, 64, 60], 0.3),
+            selection: ([222, 196, 148], 0.88),
             palette: [
                 [104, 90, 72],   // black: thin parchment, still visible on ink
                 [206, 72, 58],   // red: crimson seal

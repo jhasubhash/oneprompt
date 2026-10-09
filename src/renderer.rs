@@ -340,6 +340,9 @@ pub struct Renderer {
     /// one, a buffer per label, and where each sits: text corner and slot.
     tabs: Vec<String>,
     active_tab: usize,
+    /// The tab whose name is being typed (drawn with a caret), and whether
+    /// all of it is selected.
+    editing_tab: Option<(usize, bool)>,
     tab_text: Vec<Buffer>,
     tab_slots: Vec<TabSlot>,
 
@@ -705,6 +708,7 @@ impl Renderer {
             notice_text,
             tabs: Vec::new(),
             active_tab: 0,
+            editing_tab: None,
             tab_text: Vec::new(),
             tab_slots: Vec::new(),
             zoom: 1.0,
@@ -996,9 +1000,10 @@ impl Renderer {
     }
 
     /// The tabs to show in the title strip; none when there is only one.
-    pub fn set_tabs(&mut self, labels: Vec<String>, active: usize) {
+    pub fn set_tabs(&mut self, labels: Vec<String>, active: usize, editing: Option<(usize, bool)>) {
         self.tabs = labels;
         self.active_tab = active;
+        self.editing_tab = editing;
     }
 
     /// The tab whose label is at `x` in the title strip, if any.
@@ -1043,6 +1048,10 @@ impl Renderer {
         let col = (fx as usize).min(size.columns - 1);
         let line = (fy as usize).min(size.lines - 1);
         (col, line, fx.fract() >= 0.5)
+    }
+
+    pub fn reset_zoom(&mut self) {
+        self.zoom = 1.0;
     }
 
     pub fn zoom_by(&mut self, factor: f32) {
@@ -1240,7 +1249,9 @@ impl Renderer {
             shape => shape,
         };
         let block_cursor = cursor_shape == CursorShape::Block && cursor_line >= 0;
-        let selection = content.selection;
+        // An empty selection (a click without a drag) still reports one
+        // cell; nothing is selected.
+        let selection = if term.selection.as_ref().is_some_and(|s| s.is_empty()) { None } else { content.selection };
 
         // What each cell shows, for the writing animation, and the pen path
         // (atlas slot) to write it with.
@@ -1327,6 +1338,13 @@ impl Renderer {
             if flags.contains(Flags::DIM) {
                 fg = mix(fg, bg.unwrap_or(theme.surface_rgb()), 0.4);
             }
+            // Selected text is reversed out of a block of ink: the letters
+            // take the paper's colour.
+            let selected = selection.is_some_and(|s| s.contains(indexed.point));
+            if selected {
+                fg = theme.surface_rgb();
+                bg = Some(theme.selection.0);
+            }
             let is_cursor = block_cursor && line as i32 == cursor_line && col == cursor_col;
             if is_cursor {
                 fg = bg.unwrap_or(theme.surface_rgb());
@@ -1335,11 +1353,8 @@ impl Renderer {
             let width = if flags.contains(Flags::WIDE_CHAR) { 2.0 } else { 1.0 };
             let (x, y) = (cell_x(col), cell_y(line));
             if let Some(bg) = bg {
-                self.rects.push(Rect::new(x, y, cw * width, ch, bg, bg_alpha));
-            }
-            if selection.is_some_and(|s| s.contains(indexed.point)) {
-                let (rgb, alpha) = theme.selection;
-                self.rects.push(Rect::new(x, y, cw * width, ch, rgb, alpha));
+                let alpha = if selected { theme.selection.1 } else { bg_alpha };
+                self.rects.push(Rect::new(x, y, cw * width, ch, bg, alpha));
             }
             if flags.contains(Flags::UNDERLINE) {
                 let y = y + ch * 0.86;
@@ -1527,7 +1542,14 @@ impl Renderer {
         let weight = self.weight_for(&theme.font_family, theme.font_weight);
         for (i, label) in self.tabs.iter().enumerate() {
             let active = i == self.active_tab;
-            let [r, g, b] = if active { theme.ink } else { theme.palette[8] };
+            let all_selected = self.editing_tab == Some((i, true));
+            let [r, g, b] = if all_selected {
+                theme.surface_rgb()
+            } else if active {
+                theme.ink
+            } else {
+                theme.palette[8]
+            };
             let attrs =
                 Attrs::new().family(Family::Name(&theme.font_family)).weight(Weight(weight)).color(Color::rgb(r, g, b));
             let mut buffer = self.tab_text[i].borrow_with(&mut self.font_system);
@@ -1540,10 +1562,24 @@ impl Renderer {
             let margin = 8.0 * scale;
             // Centred in its slot; long titles start at the slot's edge and are clipped.
             let text_x = (slot_left + (slot_w - width) / 2.0).max(slot_left + margin);
-            if active {
+            let editing = self.editing_tab.is_some_and(|(e, _)| e == i);
+            // While a name is typed, it starts at the slot's edge so the end
+            // (where the caret is) stays in view, and the caret follows it.
+            let text_x = if editing { text_x.min(slot_left + slot_w - margin - width - 4.0 * scale) } else { text_x };
+            if all_selected && width > 0.0 {
+                let (rgb, alpha) = theme.selection;
+                let x0 = text_x.max(slot_left + margin) - 2.0 * scale;
+                let w = width.min(slot_w - 2.0 * margin) + 4.0 * scale;
+                self.rects.push(Rect::new(x0, text_y - 1.0 * scale, w, 19.0 * scale, rgb, alpha));
+            }
+            if editing {
+                let caret_x = (text_x + width + 1.5 * scale).min(slot_left + slot_w - margin);
+                self.ink_rects.push(Rect::new(caret_x, text_y + 1.0 * scale, 1.6 * scale, 15.0 * scale, theme.cursor, 1.0));
+            }
+            if active || editing {
                 let w = width.min(slot_w - 2.0 * margin) + 6.0 * scale;
                 let y = text_y + 17.0 * scale;
-                self.ink_rects.push(Rect::new(text_x - 3.0 * scale, y, w, 1.8 * scale, theme.cursor, 0.9));
+                self.ink_rects.push(Rect::new(text_x.max(slot_left + margin) - 3.0 * scale, y, w, 1.8 * scale, theme.cursor, 0.9));
             }
             self.tab_slots.push(TabSlot {
                 left: slot_left,

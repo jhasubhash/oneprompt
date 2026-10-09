@@ -86,14 +86,16 @@ Milestone 1, a working terminal:
 | Key | Action |
 |---|---|
 | Cmd+, | open settings |
-| Cmd+T | new tab (tabs show in the title strip; click one to switch) |
+| Cmd+T | new tab (tabs show in the title strip; click one to switch, double-click to rename) |
 | Cmd+1 … Cmd+9 | go to tab 1 … 8, Cmd+9 the last |
 | Cmd+Shift+] / Cmd+Shift+[ | next / previous tab |
 | Cmd+N | new window |
 | Cmd+Shift+L | flip between light and dark |
 | Cmd+W / Cmd+M | close tab (the window with the last one) / minimize; the theme's controls, top left, close or minimize the window |
 | drag top strip | move the window; double-click it to zoom |
-| Cmd+= / Cmd+- | bigger / smaller text |
+| Cmd+= / Cmd+- / Cmd+0 | bigger / smaller / actual-size text |
+| Cmd+A / Cmd+K | select all (scrollback too) / clear screen and scrollback |
+| right-click | menu: copy, paste, select all, clear, tabs, text size, light / dark, settings (Shift+right-click when an app has the mouse) |
 | Cmd+C | copy selection |
 | Cmd+V | paste (bracketed when the app asks for it) |
 | drag / double / triple click | select text / word / line |
