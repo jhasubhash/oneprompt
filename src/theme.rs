@@ -95,16 +95,17 @@ impl Theme {
 
 pub fn builtin() -> Vec<Theme> {
     vec![
-        // Inspired by the ink-wash look of Ghost of Tsushima: rough washi with
-        // water stains, bold sumi ink that bleeds a little, a crimson seal.
+        // After the ink-painting cutscenes of Ghost of Tsushima / Yotei: golden
+        // parchment darkening to brown at the edges, near-black sumi that
+        // bleeds a little, a crimson seal.
         Theme {
             name: "Tsushima Light",
             dark: false,
             texture: Texture::Washi,
-            surface: [0.86, 0.81, 0.72],
-            surface_shade: [0.52, 0.42, 0.30],
+            surface: [0.886, 0.769, 0.557],
+            surface_shade: [0.36, 0.26, 0.14],
             texture_strength: 1.0,
-            ink: [22, 20, 18],
+            ink: [18, 13, 9],
             cursor: [158, 28, 32],
             selection: ([196, 64, 60], 0.22),
             palette: [
@@ -136,36 +137,35 @@ pub fn builtin() -> Vec<Theme> {
                 colors: [[158, 28, 32], [70, 64, 58], [70, 64, 58]],
             },
         },
-        // The same island at night, after konshi: indigo-black dyed paper that
-        // sutras were written on in gold and white pigment. Pale gofun ink, the
-        // same crimson seal, stains that dry lighter than the sheet.
+        // The same scenes inverted, as the cutscenes do: a field of ink, with
+        // the drawing showing through in parchment, and the crimson seal.
         Theme {
             name: "Tsushima Dark",
             dark: true,
             texture: Texture::Washi,
-            surface: [0.085, 0.095, 0.14],
-            surface_shade: [0.22, 0.225, 0.27],
+            surface: [0.024, 0.019, 0.016],
+            surface_shade: [0.115, 0.09, 0.066],
             texture_strength: 1.0,
-            ink: [232, 222, 198],
+            ink: [222, 196, 148],
             cursor: [196, 44, 46],
             selection: ([196, 64, 60], 0.3),
             palette: [
-                [96, 94, 100],   // black: wet slate, still visible on the sheet
-                [210, 70, 64],   // red: crimson seal
-                [140, 170, 116], // green: young moss
-                [214, 172, 92],  // yellow: gold leaf
-                [128, 156, 206], // blue: pale indigo
-                [196, 122, 160], // magenta: plum blossom
-                [116, 176, 176], // cyan: river teal
-                [214, 206, 188], // white: gofun
-                [130, 128, 134],
-                [232, 96, 86],
-                [166, 196, 140],
-                [234, 196, 120],
-                [160, 186, 230],
-                [222, 150, 186],
-                [146, 204, 202],
-                [244, 238, 222],
+                [104, 90, 72],   // black: thin parchment, still visible on ink
+                [206, 72, 58],   // red: crimson seal
+                [154, 164, 104], // green: dry moss
+                [226, 182, 104], // yellow: gold leaf
+                [140, 152, 174], // blue: river mist
+                [190, 120, 124], // magenta: dried petal
+                [132, 168, 150], // cyan: weathered bronze
+                [214, 192, 150], // white: parchment
+                [132, 116, 94],
+                [228, 98, 80],
+                [178, 188, 126],
+                [240, 204, 132],
+                [168, 180, 200],
+                [214, 148, 150],
+                [160, 194, 176],
+                [240, 222, 184],
             ],
             font_family: "Courier New".into(),
             font_size: 17.0,

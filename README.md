@@ -11,16 +11,27 @@ an ink colour and a typeface.
 ## Theme
 
 A theme is the whole look: surface texture, ink behaviour, palette, font and the
-window controls. There is one for now, **Tsushima**, after the ink-wash look of
-*Ghost of Tsushima*, in two variants:
+window controls. There is one for now, **Tsushima**, after the ink-painting cutscenes of
+*Ghost of Tsushima* and *Ghost of Yotei*, in two variants:
 
-- **Light**: rough washi with relief-lit tooth, hard-edged water-stain tide lines, fibers
-  and a flick of crimson splatter; bold sumi ink swept with a slanted brush nib
-  (thick-and-thin strokes, dry-brush streaks, varying pressure) whose ragged edges bleed in
-  patches along the fibers; a crimson seal for the cursor and close control.
-- **Dark**: after *konshi*, the indigo-black dyed paper sutras were written on in gold and
-  white pigment: the same brushwork in pale gofun ink, stains that dried lighter than the
-  sheet, the same crimson seal.
+- **Light**: golden parchment browning heavily towards the edges, with relief-lit tooth,
+  water-stain tide lines, fibers and a flick of crimson splatter; bold near-black sumi swept
+  with a slanted brush nib (thick-and-thin strokes, dry-brush streaks, varying pressure)
+  whose ragged edges bleed in patches along the fibers; a crimson seal for the cursor and
+  close control.
+- **Dark**: the cutscenes inverted: a field of ink with the drawing showing through in
+  parchment, the same brushwork, the same crimson seal.
+
+### Ink animation
+
+- **Writing**: new characters are brushed in, a ragged sweep uncovering each one along the
+  brush, then their bleed spreads as the ink dries. Scrolled text keeps its age, and big
+  repaints (`clear`, a full-screen app redrawing) appear at once.
+- **Reveals**: the window opens like the cutscenes, parchment torn out of a sheet of ink
+  (light) or ink flooding over parchment (dark), and switching light / dark brushes the new
+  look in over the old one.
+- `animation = false` turns it off, `animation_speed` scales it. The app only redraws while
+  something is moving.
 
 The variant follows macOS light / dark mode and switches with it; Cmd+T flips it for the
 session, and `appearance` in the settings pins one. Every session gets a new sheet of paper
@@ -83,6 +94,8 @@ settings.
 
 ```toml
 appearance = "system"         # system | light | dark
+animation = true              # brushed-in text, window reveals
+animation_speed = 1.0
 option_as_meta = "left"       # left | both | none
 seed = 11                     # pin the paper; unset = new sheet each session
 
@@ -108,11 +121,13 @@ src/input.rs                key presses -> xterm byte sequences
 src/boxdraw.rs              box-drawing and block characters as rectangles
 src/chrome.rs               theme-drawn window controls: layout and hit testing
 src/config.rs               settings file: parsing, theme overrides, live reload
-src/renderer.rs             ink pass (text, line art, controls) + main pass (surface, cells, ink composite)
+src/renderer.rs             ink pass (text, line art, controls), main pass (surface, cells, ink composite), present pass
+src/animation.rs            per-cell write times (scroll-aware) and window reveal transitions
 src/theme.rs                themes as plain data
 src/shaders/background.wgsl procedural textures
 src/shaders/rect.wgsl       rectangles, brush discs, rings and crosses
-src/shaders/ink.wgsl        ink-on-surface composite: bleed, grain, pooled rims
+src/shaders/ink.wgsl        ink-on-surface composite: nib, bleed, grain, pooled rims, write-in
+src/shaders/present.wgsl    window reveal through a growing brush shape
 ```
 
 ## Roadmap

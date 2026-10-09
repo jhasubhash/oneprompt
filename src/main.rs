@@ -10,6 +10,7 @@
 //!   oneprompt --default-config   print the settings file Cmd+, would create
 //!   ONEPROMPT_SNAPSHOT=dir    render every theme to dir/<theme>.png and exit
 
+mod animation;
 mod boxdraw;
 mod chrome;
 mod config;
@@ -191,6 +192,10 @@ impl App {
     fn select_theme(&mut self) {
         let index = self.config.theme_index(&self.themes, self.system_dark, self.flip);
         if index != self.current {
+            // Brush the new look in over the old one, rising from the bottom.
+            if let Some(r) = self.renderer.as_mut() {
+                r.start_transition([0.5, 1.0]);
+            }
             self.current = index;
             self.relayout();
             self.check_font();
@@ -204,6 +209,11 @@ impl App {
             self.flip = None;
         }
         self.themes = config.themes();
+        // Snapshots must be deterministic, so they never animate.
+        let (enabled, speed) = config.animation();
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_animation(enabled && self.snapshot_dir.is_none(), speed);
+        }
         // ONEPROMPT_SEED (used for screenshots) wins over the file.
         if std::env::var_os("ONEPROMPT_SEED").is_none()
             && let Some(r) = self.renderer.as_mut()
@@ -423,6 +433,17 @@ impl ApplicationHandler<UserEvent> for App {
             == Some(winit::window::Theme::Dark);
         let config = self.config.clone();
         self.apply_config(config);
+        // Open the window like the ink paintings it imitates: light paper is
+        // uncovered from a sheet of ink, dark ink floods over the paper.
+        let theme = &self.themes[self.current];
+        let from = if theme.dark {
+            self.themes.iter().find(|t| !t.dark).map_or([226, 196, 142], |t| t.surface_rgb())
+        } else {
+            theme.ink
+        };
+        if let Some(r) = self.renderer.as_mut() {
+            r.start_intro(from, [0.5, 1.0]);
+        }
         if let Some(err) = self.startup_error.take() {
             self.show_notice(format!("settings not applied: {err}"), true);
         } else {
@@ -566,6 +587,12 @@ impl ApplicationHandler<UserEvent> for App {
                 if let (Some(r), Some(t)) = (self.renderer.as_mut(), &self.terminal) {
                     let term = t.term.lock();
                     r.render(&theme, &term);
+                    drop(term);
+                    // Keep drawing while ink is still being brushed in or a
+                    // reveal is running; vsync paces it, idle costs nothing.
+                    if r.is_animating() {
+                        r.window().request_redraw();
+                    }
                 }
             }
             _ => {}

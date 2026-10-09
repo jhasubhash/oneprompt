@@ -58,6 +58,10 @@ pub struct Config {
     /// Pin the paper pattern; unset gives a new sheet every session.
     pub seed: Option<f32>,
     pub option_as_meta: OptionAsMeta,
+    /// Ink animations: characters brushed in, window reveals. Default on.
+    pub animation: Option<bool>,
+    /// 1 = normal, 2 = twice as fast, 0.5 = half speed.
+    pub animation_speed: Option<f32>,
     /// Font settings for every theme (per-theme sections win).
     pub font_family: Option<String>,
     pub font_size: Option<f32>,
@@ -84,6 +88,11 @@ appearance = "system"
 
 # Which Option key acts as Meta (Alt+B, Alt+F, ...): "left", "both" or "none".
 option_as_meta = "left"
+
+# Ink animations: new characters are brushed in and dry, the window is
+# revealed with a brush when it opens and when light / dark switches.
+animation = true
+animation_speed = 1.0        # 2 = twice as fast, 0.5 = half speed
 
 # The light and dark variants, set to their built-in values; change any of them.
 # Fonts must be monospace. font_weight snaps to the weights the font has
@@ -158,7 +167,16 @@ impl Config {
         if let Some(size) = sizes.into_iter().find(|s| !(4.0..=96.0).contains(s)) {
             return Err(format!("font_size {size} is out of range (4 to 96)"));
         }
+        if let Some(speed) = self.animation_speed
+            && !(0.1..=10.0).contains(&speed)
+        {
+            return Err(format!("animation_speed {speed} is out of range (0.1 to 10)"));
+        }
         Ok(())
+    }
+
+    pub fn animation(&self) -> (bool, f32) {
+        (self.animation.unwrap_or(true), self.animation_speed.unwrap_or(1.0))
     }
 
     /// The built-in themes with this config's overrides applied.
@@ -326,6 +344,8 @@ mod tests {
         assert!(Config::parse("colour = 1").is_err());
         assert!(Config::parse("[themes.tsushima-dark]\nnibb = 1").is_err());
         assert!(Config::parse("option_as_meta = \"both\"").is_ok());
+        assert!(Config::parse("animation_speed = 0").unwrap_err().contains("out of range"));
+        assert_eq!(Config::parse("animation = false").unwrap().animation(), (false, 1.0));
     }
 
     #[test]

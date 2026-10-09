@@ -109,7 +109,8 @@ fn washi(px_in: vec2<f32>, uv: vec2<f32>) -> vec3<f32> {
     let grain = hash(px) - 0.5;
     var shade = clouds * 0.3 + mottle * 0.12 + grain * 0.08;
     if (!dark_sheet) {
-        shade += vignette(uv) * 0.4;
+        // Parchment browns heavily towards the corners, as in the paintings.
+        shade += vignette(uv) * 0.75;
     }
 
     // Water stains: regions of a slow noise field. Pigment collects at the

@@ -1,12 +1,16 @@
 //! GPU side. Each frame is built in two passes:
 //! 1. Ink pass, into an offscreen "ink layer": everything drawn *with ink*
 //!    (text via glyphon, underlines, box drawing, the window controls).
-//! 2. Main pass, onto the window: the procedural surface (paper, washi,
-//!    chalkboard, ...), cell backgrounds / selection / cursor, then the ink
-//!    layer composited by `ink.wgsl`, which makes it bleed into the surface.
+//! 2. Main pass, into the offscreen scene: the procedural surface (paper,
+//!    washi, chalkboard, ...), cell backgrounds / selection / cursor, then the
+//!    ink layer composited by `ink.wgsl`, which makes it bleed into the
+//!    surface and brushes new characters in.
+//! 3. Present pass, onto the window: copies the scene, or during a
+//!    transition reveals it through a growing brush shape (`present.wgsl`).
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::term::cell::Flags;
@@ -18,6 +22,7 @@ use glyphon::{
 };
 use winit::window::Window;
 
+use crate::animation::{self, TextAnimator, Transition};
 use crate::boxdraw;
 use crate::chrome::{self, Control};
 use crate::terminal::GridSize;
@@ -51,8 +56,30 @@ struct InkParams {
     edge: f32,
     seed: f32,
     nib: f32,
+    time: f32,
+    grid_origin: [f32; 2],
+    cell: [f32; 2],
+    grid_size: [f32; 2],
+    write_time: f32,
     _pad: f32,
 }
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct PresentParams {
+    resolution: [f32; 2],
+    origin: [f32; 2],
+    from_color: [f32; 4],
+    progress: f32,
+    seed: f32,
+    _pad: [f32; 2],
+}
+
+/// Seconds to brush one character in, at animation speed 1.
+const WRITE_TIME: f32 = 0.22;
+/// Window reveal on startup and between light and dark, at speed 1.
+const INTRO_TIME: f32 = 1.6;
+const SWITCH_TIME: f32 = 1.1;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -128,10 +155,87 @@ pub struct Notice {
     pub is_error: bool,
 }
 
-/// Offscreen target that ink is drawn into before compositing.
-struct InkLayer {
-    view: wgpu::TextureView,
-    bind_group: wgpu::BindGroup,
+/// Everything sized by the window or the grid, rebuilt together.
+struct Targets {
+    /// Ink is drawn here before it is composited onto the surface.
+    ink_view: wgpu::TextureView,
+    ink_bind_group: wgpu::BindGroup,
+    /// The finished frame, before the present pass copies it to the window.
+    scene: wgpu::Texture,
+    scene_view: wgpu::TextureView,
+    /// The frame a light/dark transition reveals the new look over.
+    previous: wgpu::Texture,
+    present_bind_group: wgpu::BindGroup,
+    /// Per-cell birth times for the writing animation (R32Float).
+    births: wgpu::Texture,
+    grid: (u32, u32),
+}
+
+impl Targets {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        device: &wgpu::Device,
+        ink_layout: &wgpu::BindGroupLayout,
+        ink_params: &wgpu::Buffer,
+        ink_sampler: &wgpu::Sampler,
+        present_layout: &wgpu::BindGroupLayout,
+        present_params: &wgpu::Buffer,
+        config: &wgpu::SurfaceConfiguration,
+        grid: (u32, u32),
+    ) -> Self {
+        let size = wgpu::Extent3d { width: config.width, height: config.height, depth_or_array_layers: 1 };
+        let texture = |label, usage| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: config.format,
+                usage,
+                view_formats: &[],
+            })
+        };
+        use wgpu::TextureUsages as U;
+        let ink = texture("ink layer", U::RENDER_ATTACHMENT | U::TEXTURE_BINDING);
+        let scene = texture("scene", U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_SRC);
+        let previous = texture("previous frame", U::TEXTURE_BINDING | U::COPY_DST);
+        let births = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cell births"),
+            size: wgpu::Extent3d { width: grid.0.max(1), height: grid.1.max(1), depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Float,
+            usage: U::TEXTURE_BINDING | U::COPY_DST,
+            view_formats: &[],
+        });
+        let ink_view = ink.create_view(&Default::default());
+        let scene_view = scene.create_view(&Default::default());
+        let previous_view = previous.create_view(&Default::default());
+        let births_view = births.create_view(&Default::default());
+        let view = wgpu::BindingResource::TextureView;
+        let ink_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ink layer"),
+            layout: ink_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: ink_params.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: view(&ink_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(ink_sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: view(&births_view) },
+            ],
+        });
+        let present_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("present"),
+            layout: present_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: present_params.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: view(&scene_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: view(&previous_view) },
+            ],
+        });
+        Self { ink_view, ink_bind_group, scene, scene_view, previous, present_bind_group, births, grid }
+    }
 }
 
 pub struct Renderer {
@@ -160,7 +264,17 @@ pub struct Renderer {
     ink_layout: wgpu::BindGroupLayout,
     ink_params: wgpu::Buffer,
     ink_sampler: wgpu::Sampler,
-    ink_layer: InkLayer,
+    present_pipeline: wgpu::RenderPipeline,
+    present_layout: wgpu::BindGroupLayout,
+    present_params: wgpu::Buffer,
+    targets: Targets,
+
+    /// Animation clock: births and transitions are measured on it.
+    clock: Instant,
+    /// Animations on, and their speed (1 = normal, 2 = twice as fast).
+    animation: (bool, f32),
+    animator: TextAnimator,
+    transition: Option<Transition>,
 
     /// Pointer is over the window controls: show their symbols.
     controls_hover: bool,
@@ -351,6 +465,7 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                Self::plain_texture_entry(3),
             ],
         });
         let ink_params = device.create_buffer(&wgpu::BufferDescriptor {
@@ -397,8 +512,66 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
-        let ink_layer =
-            Self::create_ink_layer(&device, &ink_layout, &ink_params, &ink_sampler, &config);
+        let present_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("present layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                Self::plain_texture_entry(1),
+                Self::plain_texture_entry(2),
+            ],
+        });
+        let present_params = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("present params"),
+            size: std::mem::size_of::<PresentParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let present_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/present.wgsl"));
+        let present_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("present pipeline layout"),
+            bind_group_layouts: &[Some(&present_layout)],
+            immediate_size: 0,
+        });
+        let present_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("present"),
+            layout: Some(&present_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &present_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &present_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(format.into())],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let targets = Targets::new(
+            &device,
+            &ink_layout,
+            &ink_params,
+            &ink_sampler,
+            &present_layout,
+            &present_params,
+            &config,
+            (1, 1),
+        );
 
         let mut font_system = FontSystem::new();
         let swash_cache = SwashCache::new();
@@ -432,7 +605,14 @@ impl Renderer {
             ink_layout,
             ink_params,
             ink_sampler,
-            ink_layer,
+            present_pipeline,
+            present_layout,
+            present_params,
+            targets,
+            clock: Instant::now(),
+            animation: (true, 1.0),
+            animator: TextAnimator::default(),
+            transition: None,
             controls_hover: false,
             font_system,
             swash_cache,
@@ -458,38 +638,82 @@ impl Renderer {
         })
     }
 
-    fn create_ink_layer(
-        device: &wgpu::Device,
-        layout: &wgpu::BindGroupLayout,
-        params: &wgpu::Buffer,
-        sampler: &wgpu::Sampler,
-        config: &wgpu::SurfaceConfiguration,
-    ) -> InkLayer {
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("ink layer"),
-            size: wgpu::Extent3d {
-                width: config.width,
-                height: config.height,
-                depth_or_array_layers: 1,
+    /// A texture read with `textureLoad` (no filtering) in a fragment shader.
+    fn plain_texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+        wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
             },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: config.format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
+            count: None,
+        }
+    }
+
+    /// Rebuilds the window- and grid-sized targets.
+    fn rebuild_targets(&mut self, grid: (u32, u32)) {
+        self.targets = Targets::new(
+            &self.device,
+            &self.ink_layout,
+            &self.ink_params,
+            &self.ink_sampler,
+            &self.present_layout,
+            &self.present_params,
+            &self.config,
+            grid,
+        );
+    }
+
+    fn now(&self) -> f32 {
+        self.clock.elapsed().as_secs_f32()
+    }
+
+    pub fn set_animation(&mut self, enabled: bool, speed: f32) {
+        self.animation = (enabled, speed.clamp(0.1, 10.0));
+    }
+
+    /// Reveals the first frame over a solid colour (the window opening).
+    pub fn start_intro(&mut self, from: [u8; 3], origin: [f32; 2]) {
+        if !self.animation.0 {
+            return;
+        }
+        let color = from.map(|c| c as f32 / 255.0);
+        self.transition = Some(Transition {
+            start: self.now(),
+            duration: INTRO_TIME / self.animation.1,
+            origin,
+            from: animation::From::Color(color),
         });
-        let view = texture.create_view(&Default::default());
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("ink layer"),
-            layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: params.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(sampler) },
-            ],
+    }
+
+    /// Reveals the next frames over the last one shown (light / dark switch).
+    pub fn start_transition(&mut self, origin: [f32; 2]) {
+        if !self.animation.0 {
+            return;
+        }
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_texture(
+            self.targets.scene.as_image_copy(),
+            self.targets.previous.as_image_copy(),
+            wgpu::Extent3d { width: self.config.width, height: self.config.height, depth_or_array_layers: 1 },
+        );
+        self.queue.submit(Some(encoder.finish()));
+        self.transition = Some(Transition {
+            start: self.now(),
+            duration: SWITCH_TIME / self.animation.1,
+            origin,
+            from: animation::From::PreviousFrame,
         });
-        InkLayer { view, bind_group }
+    }
+
+    /// Whether something is still moving, so the app keeps redrawing.
+    pub fn is_animating(&self) -> bool {
+        let now = self.now();
+        let write_time = WRITE_TIME / self.animation.1;
+        self.transition.is_some_and(|t| !t.done(now))
+            || (self.animation.0 && now - self.animator.latest_birth() < write_time * 4.0)
     }
 
     pub fn window(&self) -> &Window {
@@ -500,13 +724,12 @@ impl Renderer {
         self.config.width = width.max(1);
         self.config.height = height.max(1);
         configure_surface(&self.surface, &self.device, &self.config);
-        self.ink_layer = Self::create_ink_layer(
-            &self.device,
-            &self.ink_layout,
-            &self.ink_params,
-            &self.ink_sampler,
-            &self.config,
-        );
+        let grid = self.targets.grid;
+        self.rebuild_targets(grid);
+        // A resized window cannot reveal over a frame of the old size.
+        if self.transition.is_some_and(|t| t.from == animation::From::PreviousFrame) {
+            self.transition = None;
+        }
     }
 
     fn family_info(&mut self, family: &str) -> Option<FamilyInfo> {
@@ -622,12 +845,17 @@ impl Renderer {
         let (pad, top) = self.padding();
         let usable_w = self.config.width as f32 - 2.0 * pad;
         let usable_h = self.config.height as f32 - top - pad;
-        GridSize {
+        let size = GridSize {
             columns: ((usable_w / self.cell_width) as usize).max(2),
             lines: ((usable_h / self.cell_height) as usize).max(1),
             cell_width: self.cell_width,
             cell_height: self.cell_height,
+        };
+        let grid = (size.columns as u32, size.lines as u32);
+        if grid != self.targets.grid {
+            self.rebuild_targets(grid);
         }
+        size
     }
 
     pub fn render<L: EventListener>(&mut self, theme: &Theme, term: &Term<L>) {
@@ -748,6 +976,10 @@ impl Renderer {
         let block_cursor = cursor_shape == CursorShape::Block && cursor_line >= 0;
         let selection = content.selection;
 
+        // What each cell shows, for the writing animation.
+        let (columns, lines) = (self.targets.grid.0 as usize, self.targets.grid.1 as usize);
+        let mut chars = vec![' '; columns * lines];
+
         // Collect runs of identically styled text: (line, text, color, flags).
         let mut runs: Vec<(usize, String, [u8; 3], Flags)> = Vec::new();
         // Decorations drawn in ink: underlines, box drawing.
@@ -760,6 +992,9 @@ impl Renderer {
             let flags = indexed.cell.flags;
             if flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
                 continue;
+            }
+            if line < lines && col < columns && !flags.contains(Flags::HIDDEN) {
+                chars[line * columns + col] = cell_char(indexed.cell.c);
             }
 
             let mut fg = resolve(theme, indexed.cell.fg, theme.ink);
@@ -853,6 +1088,21 @@ impl Renderer {
         self.ink_rects.extend(overlay);
         self.layout_controls(theme, term.is_focused);
         self.layout_notice(theme);
+
+        let now = self.now();
+        let births = self.animator.update(columns, &chars, now, self.animation.0);
+        if births.len() == columns * lines {
+            self.queue.write_texture(
+                self.targets.births.as_image_copy(),
+                bytemuck::cast_slice(&births),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(columns as u32 * 4),
+                    rows_per_image: Some(lines as u32),
+                },
+                wgpu::Extent3d { width: columns as u32, height: lines as u32, depth_or_array_layers: 1 },
+            );
+        }
 
         let regular = self.weight_for(&theme.font_family, theme.font_weight);
         // Bold cells use the bold face; a theme that is already bold has no
@@ -972,10 +1222,46 @@ impl Renderer {
             edge: theme.ink_style.edge,
             seed: self.seed,
             nib: theme.ink_style.nib * scale,
+            time: self.now(),
+            grid_origin: {
+                let (pad, top) = self.padding();
+                [pad, top]
+            },
+            cell: [self.cell_width, self.cell_height],
+            grid_size: [self.targets.grid.0 as f32, self.targets.grid.1 as f32],
+            write_time: if self.animation.0 { WRITE_TIME / self.animation.1 } else { 0.0 },
             _pad: 0.0,
         };
         self.queue
             .write_buffer(&self.ink_params, 0, bytemuck::bytes_of(&ink));
+
+        let now = self.now();
+        if self.transition.is_some_and(|t| t.done(now)) {
+            self.transition = None;
+        }
+        let present = match self.transition {
+            Some(t) => PresentParams {
+                resolution: [w as f32, h as f32],
+                origin: t.origin,
+                from_color: match t.from {
+                    animation::From::Color([r, g, b]) => [r, g, b, 1.0],
+                    animation::From::PreviousFrame => [0.0; 4],
+                },
+                progress: t.progress(now).min(0.999),
+                seed: self.seed,
+                _pad: [0.0; 2],
+            },
+            None => PresentParams {
+                resolution: [w as f32, h as f32],
+                origin: [0.5, 0.5],
+                from_color: [0.0; 4],
+                progress: 1.0,
+                seed: self.seed,
+                _pad: [0.0; 2],
+            },
+        };
+        self.queue
+            .write_buffer(&self.present_params, 0, bytemuck::bytes_of(&present));
 
         // Both rect lists share one buffer: surface rects, then ink rects.
         let surface_count = self.rects.len() as u32;
@@ -1042,7 +1328,7 @@ impl Renderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("ink pass"),
                 color_attachments: &[attachment(
-                    &self.ink_layer.view,
+                    &self.targets.ink_view,
                     wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                 )],
                 depth_stencil_attachment: None,
@@ -1063,7 +1349,10 @@ impl Renderer {
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main pass"),
-                color_attachments: &[attachment(view, wgpu::LoadOp::Clear(wgpu::Color::BLACK))],
+                color_attachments: &[attachment(
+                    &self.targets.scene_view,
+                    wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                )],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
@@ -1081,7 +1370,20 @@ impl Renderer {
             }
 
             pass.set_pipeline(&self.ink_pipeline);
-            pass.set_bind_group(0, &self.ink_layer.bind_group, &[]);
+            pass.set_bind_group(0, &self.targets.ink_bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("present pass"),
+                color_attachments: &[attachment(view, wgpu::LoadOp::Clear(wgpu::Color::BLACK))],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.present_pipeline);
+            pass.set_bind_group(0, &self.targets.present_bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
         self.queue.submit(Some(encoder.finish()));

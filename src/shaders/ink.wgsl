@@ -6,20 +6,29 @@
 //            out thick and strokes along it thin, with pressure varying
 //   grain  - dry-brush streaks: the core of a stroke is not perfectly solid
 //   edge   - pigment pools where a stroke dries, darkening its rim
+//   write  - new characters are brushed in: a ragged sweep uncovers each one
+//            along the brush, then its bleed spreads as the ink dries
 
 struct Params {
     resolution: vec2<f32>,
-    bleed: f32,   // reach of the bleed in physical pixels
-    grain: f32,   // 0..1
-    edge: f32,    // 0..1
-    seed: f32,    // per-session, matches the paper
-    nib: f32,     // length of the brush nib in physical pixels
+    bleed: f32,       // reach of the bleed in physical pixels
+    grain: f32,       // 0..1
+    edge: f32,        // 0..1
+    seed: f32,        // per-session, matches the paper
+    nib: f32,         // length of the brush nib in physical pixels
+    time: f32,        // seconds since start, same clock as the births
+    grid_origin: vec2<f32>, // top-left of the terminal grid, pixels
+    cell: vec2<f32>,        // cell size, pixels
+    grid_size: vec2<f32>,   // columns, rows
+    write_time: f32,        // seconds to brush one character in; 0 = off
     _pad: f32,
 };
 
 @group(0) @binding(0) var<uniform> u: Params;
 @group(0) @binding(1) var ink: texture_2d<f32>;
 @group(0) @binding(2) var ink_sampler: sampler;
+// When each grid cell was last written (seconds), one texel per cell.
+@group(0) @binding(3) var births: texture_2d<f32>;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -62,6 +71,21 @@ fn rotate(v: vec2<f32>, a: f32) -> vec2<f32> {
     let c = cos(a);
     let s = sin(a);
     return vec2<f32>(c * v.x - s * v.y, s * v.x + c * v.y);
+}
+
+// Age of the ink at this pixel: seconds since its cell was written. Pixels
+// outside the grid (window controls, notices) are old, i.e. dry.
+fn ink_age(px: vec2<f32>) -> vec2<f32> {
+    let g = (px - u.grid_origin) / u.cell;
+    if (u.write_time <= 0.0 || any(g < vec2<f32>(0.0)) || any(g >= u.grid_size)) {
+        return vec2<f32>(1.0e6, 0.5);
+    }
+    let birth = textureLoad(births, vec2<i32>(g), 0).r;
+    // Second value: position of the pixel along the brush stroke through its
+    // cell, left to right and slightly rising, 0..1.
+    let local = fract(g) - 0.5;
+    let along = dot(local, vec2<f32>(0.94, -0.34)) + 0.5;
+    return vec2<f32>(u.time - birth, along);
 }
 
 @fragment
@@ -113,6 +137,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // of a smooth glow.
     let capillary = smoothstep(0.35, 0.75, noise(rotate(sp, fiber_angle) * vec2<f32>(0.25, 1.1)));
     let wick = halo.a * mix(0.15, 1.0, capillary) * (0.35 + 0.65 * amount);
+    // (The halo's spread is applied below, once `spread` is known.)
 
     // Ink soaks in: antialiased edges of thin strokes saturate towards solid;
     // the load of ink varies a little, and dry-brush grain thins it in places.
@@ -120,12 +145,32 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let streak = noise(rotate(sp, -NIB_ANGLE) * vec2<f32>(0.15, 1.3) + 3.1);
     let grain = 1.0 - u.grain * smoothstep(0.4, 0.95, streak * 0.75 + hash(px) * 0.25);
     let load = 0.9 + 0.1 * noise(sp * 0.02 + 5.0);
-    let body = clamp(core.a * 1.3, 0.0, 1.0) * grain * load;
+    var body = clamp(core.a * 1.3, 0.0, 1.0) * grain * load;
+
+    // Writing: a ragged brush front sweeps through each new character, then
+    // the bleed spreads and the wet ink settles over a few write times.
+    let aged = ink_age(px);
+    let age = aged.x;
+    var spread = 1.0;
+    var wet = 0.0;
+    if (age < u.write_time * 4.0) {
+        let stroke = clamp(age / max(u.write_time, 1e-3), 0.0, 1.0);
+        let ragged = aged.y + (noise(sp * 0.4) - 0.5) * 0.35
+            + (noise(rotate(sp, 0.35) * vec2<f32>(0.08, 0.9)) - 0.5) * 0.25;
+        body *= clamp((stroke * 1.45 - ragged) * 9.0, 0.0, 1.0);
+        spread = smoothstep(0.0, 1.0, age / (u.write_time * 3.0));
+        wet = 1.0 - clamp(age / (u.write_time * 4.0), 0.0, 1.0);
+    }
 
     // Pigment pools at the rim: strongest where the halo is half covered.
     let rim = clamp(halo.a * (1.0 - halo.a) * 4.0, 0.0, 1.0) * u.edge;
 
-    let alpha = clamp(max(body, wick * 0.85) + rim * 0.2 * (1.0 - body), 0.0, 1.0);
+    // Wet ink is a touch heavier and its bleed is still creeping outwards.
+    let alpha = clamp(
+        max(body * (1.0 + 0.25 * wet), wick * 0.85 * spread) + rim * 0.2 * spread * (1.0 - body),
+        0.0,
+        1.0,
+    );
     // Colour: the stroke's own colour, or the spread colour in the halo.
     var rgb = halo.rgb / max(halo.a, 1e-4);
     if (core.a > 0.02) {
