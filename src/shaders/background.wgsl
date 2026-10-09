@@ -131,7 +131,7 @@ fn washi(px_in: vec2<f32>, uv: vec2<f32>) -> vec3<f32> {
     let dx = tooth(px + vec2<f32>(e, 0.0)) - tooth(px - vec2<f32>(e, 0.0));
     let dy = tooth(px + vec2<f32>(0.0, e)) - tooth(px - vec2<f32>(0.0, e));
     let lit = clamp(-(dx + dy) * 1.6, -1.0, 1.0);
-    color = color * (1.0 + lit * select(0.11, 0.3, dark_sheet));
+    color = color * (1.0 + lit * select(0.11, 0.55, dark_sheet));
     if (dark_sheet) {
         color = color * (1.0 - vignette(uv) * 0.35);
     }
@@ -141,9 +141,9 @@ fn washi(px_in: vec2<f32>, uv: vec2<f32>) -> vec3<f32> {
     for (var k = 0; k < 3; k++) {
         light += fiber(px, 0.5 + f32(k) * 1.9, f32(k) * 21.0);
     }
-    color = mix(color, mix(color, vec3<f32>(1.0), select(0.1, 0.045, dark_sheet)), clamp(light, 0.0, 1.0));
+    color = mix(color, mix(color, vec3<f32>(1.0), select(0.1, 0.07, dark_sheet)), clamp(light, 0.0, 1.0));
     let dark = fiber(px, 2.4, 57.0);
-    color = mix(color, u.surface_shade.rgb * 0.8, dark * select(0.2, 0.08, dark_sheet));
+    color = mix(color, u.surface_shade.rgb * 0.8, dark * select(0.2, 0.18, dark_sheet));
 
     // A few flicks of ink splatter in the top-right corner, well away from
     // where the text starts.

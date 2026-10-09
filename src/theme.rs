@@ -144,7 +144,7 @@ pub fn builtin() -> Vec<Theme> {
             dark: true,
             texture: Texture::Washi,
             surface: [0.024, 0.019, 0.016],
-            surface_shade: [0.115, 0.09, 0.066],
+            surface_shade: [0.2, 0.158, 0.115],
             texture_strength: 1.0,
             ink: [222, 196, 148],
             cursor: [196, 44, 46],
