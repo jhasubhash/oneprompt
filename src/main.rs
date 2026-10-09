@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use alacritty_terminal::term::TermMode;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, KeyEvent, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState};
 use winit::window::{Window, WindowId};
@@ -45,6 +45,7 @@ struct App {
     mods: ModifiersState,
     /// Leftover trackpad scroll, in pixels, below one line.
     scroll_px: f64,
+    cursor_y: f64,
 }
 
 impl App {
@@ -128,6 +129,19 @@ impl ApplicationHandler<UserEvent> for App {
         let attrs = Window::default_attributes()
             .with_title("oneprompt")
             .with_inner_size(winit::dpi::LogicalSize::new(960.0, 600.0));
+        // No visible title bar: the surface runs to the top edge. On macOS the
+        // native title bar stays (transparent) so dragging, double-click zoom
+        // and the window buttons keep working; elsewhere we drag ourselves.
+        #[cfg(target_os = "macos")]
+        let attrs = {
+            use winit::platform::macos::WindowAttributesExtMacOS;
+            attrs
+                .with_titlebar_transparent(true)
+                .with_title_hidden(true)
+                .with_fullsize_content_view(true)
+        };
+        #[cfg(not(target_os = "macos"))]
+        let attrs = attrs.with_decorations(false);
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         let mut renderer = Renderer::new(window);
         let size = renderer.grid_size(self.theme());
@@ -181,6 +195,18 @@ impl ApplicationHandler<UserEvent> for App {
                 let app_cursor = t.mode().contains(TermMode::APP_CURSOR);
                 if let Some(bytes) = input::key_to_bytes(&event, self.mods, app_cursor) {
                     t.input(bytes);
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => self.cursor_y = position.y,
+            // macOS drags through its (transparent) native title bar.
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. }
+                if !cfg!(target_os = "macos") =>
+            {
+                if let Some(r) = &self.renderer {
+                    let strip = renderer::TITLE_STRIP as f64 * r.window().scale_factor();
+                    if self.cursor_y < strip {
+                        let _ = r.window().drag_window();
+                    }
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -251,6 +277,7 @@ fn main() {
         current: 0,
         mods: ModifiersState::empty(),
         scroll_px: 0.0,
+        cursor_y: 0.0,
     };
     event_loop.run_app(&mut app).expect("run event loop");
 }

@@ -21,6 +21,9 @@ use crate::theme::Theme;
 
 /// Margin around the grid, in logical pixels.
 const PADDING: f32 = 24.0;
+/// Height of the drag area at the top of the window, in logical pixels. The
+/// window has no visible title bar; this strip is just more of the surface.
+pub const TITLE_STRIP: f32 = 30.0;
 /// Opacity of coloured cell backgrounds, so the texture still shows through.
 const CELL_BG_ALPHA: f32 = 0.85;
 
@@ -289,8 +292,10 @@ impl Renderer {
         self.zoom = (self.zoom * factor).clamp(0.5, 3.0);
     }
 
-    fn padding(&self) -> f32 {
-        PADDING * self.window.scale_factor() as f32
+    /// Left/right and top margins of the grid, in physical pixels.
+    fn padding(&self) -> (f32, f32) {
+        let scale = self.window.scale_factor() as f32;
+        (PADDING * scale, (TITLE_STRIP + PADDING * 0.5) * scale)
     }
 
     fn metrics(&self, theme: &Theme) -> Metrics {
@@ -317,9 +322,9 @@ impl Renderer {
         self.cell_width = width;
         self.cell_height = metrics.line_height;
 
-        let pad = self.padding();
+        let (pad, top) = self.padding();
         let usable_w = self.config.width as f32 - 2.0 * pad;
-        let usable_h = self.config.height as f32 - 2.0 * pad;
+        let usable_h = self.config.height as f32 - top - pad;
         GridSize {
             columns: ((usable_w / self.cell_width) as usize).max(2),
             lines: ((usable_h / self.cell_height) as usize).max(1),
@@ -430,10 +435,10 @@ impl Renderer {
     /// rectangles for backgrounds, decorations and the cursor.
     fn layout<L: EventListener>(&mut self, theme: &Theme, term: &Term<L>) {
         let content = term.renderable_content();
-        let pad = self.padding();
+        let (pad, top) = self.padding();
         let (cw, ch) = (self.cell_width, self.cell_height);
         let cell_x = |col: usize| pad + col as f32 * cw;
-        let cell_y = |line: usize| pad + line as f32 * ch;
+        let cell_y = |line: usize| top + line as f32 * ch;
 
         let cursor = content.cursor;
         let cursor_line = cursor.point.line.0 + content.display_offset as i32;
@@ -568,7 +573,7 @@ impl Renderer {
         }
 
         self.viewport.update(&self.queue, Resolution { width: w, height: h });
-        let pad = self.padding();
+        let (pad, top) = self.padding();
         self.text_renderer
             .prepare(
                 &self.device,
@@ -579,7 +584,7 @@ impl Renderer {
                 [TextArea {
                     buffer: &self.text,
                     left: pad,
-                    top: pad,
+                    top,
                     scale: 1.0,
                     bounds: TextBounds {
                         left: 0,
