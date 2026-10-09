@@ -157,6 +157,37 @@ harmonize_colors = true
     out
 }
 
+/// Settings that belong to a variant, under `[themes.<name>]`.
+const THEME_SETTINGS: [&str; 13] = [
+    "font_family",
+    "font_size",
+    "font_weight",
+    "line_height",
+    "bleed",
+    "bleed_variation",
+    "bleed_time",
+    "nib",
+    "grain",
+    "edge",
+    "texture",
+    "stains",
+    "splatter",
+];
+
+/// A parse error in words that say how to fix it. The most common mistake
+/// is a per-theme setting outside its section, which toml reports as an
+/// unknown field followed by the whole list of valid ones.
+fn explain(message: &str) -> String {
+    let Some(name) = message.strip_prefix("unknown field `").and_then(|rest| rest.split('`').next()) else {
+        return message.trim().to_string();
+    };
+    if THEME_SETTINGS.contains(&name) {
+        let sections: Vec<String> = crate::theme::builtin().iter().map(|t| format!("[themes.{}]", key(t.name))).collect();
+        return format!("`{name}` is set per theme: put it under {}", sections.join(" or "));
+    }
+    format!("unknown setting `{name}`")
+}
+
 /// `~/.config/oneprompt/config.toml`, honouring `$XDG_CONFIG_HOME`.
 /// `ONEPROMPT_CONFIG` points somewhere else (tests, screenshots).
 pub fn path() -> PathBuf {
@@ -177,7 +208,7 @@ pub fn key(name: &str) -> String {
 
 impl Config {
     pub fn parse(text: &str) -> Result<Self, String> {
-        let config: Config = toml::from_str(text).map_err(|e| e.message().to_string())?;
+        let config: Config = toml::from_str(text).map_err(|e| explain(e.message()))?;
         config.validate()?;
         Ok(config)
     }
@@ -357,6 +388,13 @@ mod tests {
         let light = config.themes().into_iter().find(|t| !t.dark).unwrap();
         assert_eq!((light.texture_strength, light.stains, light.splatter.1), (0.5, 0.0, 2.0));
         assert!(Config::parse("[themes.tsushima-light]\nstains = 5").unwrap_err().contains("out of range"));
+    }
+
+    #[test]
+    fn misplaced_theme_settings_say_where_they_go() {
+        let err = Config::parse("bleed = 1.7").unwrap_err();
+        assert!(err.contains("[themes.tsushima-light]") && err.len() < 120, "{err}");
+        assert_eq!(Config::parse("blead = 1").unwrap_err(), "unknown setting `blead`");
     }
 
     #[test]

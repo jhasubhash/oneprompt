@@ -125,8 +125,8 @@ splits.
 ## Settings
 
 Cmd+, opens `~/.config/oneprompt/config.toml` in your default text editor, creating it
-with every option documented and commented out. Saving applies changes immediately; a
-note in the title strip confirms it, or says what is wrong and keeps the previous
+with every option set to its built-in value. Saving applies changes immediately; a
+note at the bottom of the window confirms it, or says what is wrong and keeps the previous
 settings.
 
 ```toml
@@ -152,7 +152,7 @@ just works (`oneprompt --default-config` prints it). Top-level `font_family`, `f
 and `font_weight` also exist and apply to any variant whose section doesn't set them.
 Font weights snap to the faces the font has (Courier New: 400 and 700); the text engine
 would otherwise fall back to a different, proportional font. A font that is missing or not
-monospace gets a warning in the title strip. `ONEPROMPT_CONFIG=<path>` uses a different file.
+monospace gets a warning at the bottom of the window. `ONEPROMPT_CONFIG=<path>` uses a different file.
 
 ## Layout
 

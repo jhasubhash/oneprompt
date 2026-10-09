@@ -140,7 +140,7 @@ pub fn builtin() -> Vec<Theme> {
             font_size: 17.0,
             font_weight: 700,
             line_height: 24.0,
-            ink_style: Ink { bleed: 1.3, grain: 0.22, edge: 0.7, nib: 1.2, bleed_variation: 0.35, bleed_time: 2.5 },
+            ink_style: Ink { bleed: 0.7, grain: 0.22, edge: 0.7, nib: 1.2, bleed_variation: 0.35, bleed_time: 2.5 },
             splatter: ([168, 30, 36], 1.0),
             controls: Controls {
                 style: ControlStyle::Brush,
@@ -182,7 +182,7 @@ pub fn builtin() -> Vec<Theme> {
             font_size: 17.0,
             font_weight: 700,
             line_height: 24.0,
-            ink_style: Ink { bleed: 1.1, grain: 0.25, edge: 0.6, nib: 1.2, bleed_variation: 0.35, bleed_time: 2.5 },
+            ink_style: Ink { bleed: 0.7, grain: 0.25, edge: 0.6, nib: 1.2, bleed_variation: 0.35, bleed_time: 2.5 },
             splatter: ([186, 40, 44], 1.0),
             controls: Controls {
                 style: ControlStyle::Brush,

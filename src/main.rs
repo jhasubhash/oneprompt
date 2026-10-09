@@ -69,7 +69,7 @@ struct App {
     option_keys: (bool, bool),
     config_path: PathBuf,
     config: Config,
-    /// When the title-strip notice should disappear.
+    /// When the notice should disappear.
     notice_until: Option<Instant>,
     /// macOS is in dark mode.
     system_dark: bool,
@@ -532,7 +532,7 @@ impl App {
         self.relayout();
     }
 
-    /// Warns (in the title strip) when the current theme's font would break
+    /// Warns (in a notice) when the current theme's font would break
     /// the grid: not installed, or not monospace. Returns true if it warned.
     fn check_font(&mut self) -> bool {
         let family = self.themes[self.current].font_family.clone();

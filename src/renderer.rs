@@ -202,7 +202,7 @@ fn snap_weight(weights: &[u16], wanted: u16) -> u16 {
         .unwrap_or(wanted)
 }
 
-/// A short message shown in the title strip, next to the window controls.
+/// A short message shown in the margin below the text.
 pub struct Notice {
     pub text: String,
     pub is_error: bool,
@@ -1526,7 +1526,7 @@ impl Renderer {
         }
     }
 
-    /// The notice, set in the theme's font, small, in the title strip.
+    /// The notice, set in the theme's font, small, in the bottom margin.
     fn layout_notice(&mut self, theme: &Theme) {
         let Some(notice) = &self.notice else { return };
         let scale = self.window.scale_factor() as f32;
@@ -1542,21 +1542,18 @@ impl Renderer {
         buffer.shape_until_scroll(false);
     }
 
-    /// Tab labels, evenly spread over the strip right of the controls (and of
-    /// a notice, while one shows), the active one in ink and underlined with
-    /// a stroke of the brush, the others in a quiet ink.
+    /// Tab labels, evenly spread over the strip right of the controls, the
+    /// active one in ink and underlined with a stroke of the brush, the
+    /// others in a quiet ink.
     fn layout_tabs(&mut self, theme: &Theme) {
         self.tab_slots.clear();
         if self.tabs.is_empty() {
             return;
         }
         let scale = self.window.scale_factor() as f32;
-        let (notice_x, text_y) = self.notice_origin();
-        let mut left = notice_x;
-        if self.notice.is_some() {
-            let width = self.notice_text.layout_runs().map(|run| run.line_w).fold(0.0, f32::max);
-            left += width + 20.0 * scale;
-        }
+        let (x, _, r) = chrome::geometry(Control::Zoom, scale);
+        let left = x + r + 14.0 * scale;
+        let text_y = self.strip_text_y();
         let right = self.config.width as f32 - 16.0 * scale;
         let n = self.tabs.len();
         let slot_w = ((right - left) / n as f32).min(220.0 * scale);
@@ -1620,11 +1617,19 @@ impl Renderer {
         }
     }
 
-    /// Top-left corner of the notice, just right of the window controls.
+    /// Top-left corner of the notice: in the margin below the text, lined
+    /// up with it, where it does not cover anything.
     fn notice_origin(&self) -> (f32, f32) {
         let scale = self.window.scale_factor() as f32;
-        let (x, cy, r) = chrome::geometry(Control::Zoom, scale);
-        (x + r + 14.0 * scale, cy - 8.0 * scale)
+        let (pad, _) = self.padding();
+        (pad, self.config.height as f32 - (pad + 16.0 * scale) / 2.0)
+    }
+
+    /// Where tab labels sit vertically: centred on the window controls.
+    fn strip_text_y(&self) -> f32 {
+        let scale = self.window.scale_factor() as f32;
+        let (_, cy, _) = chrome::geometry(Control::Zoom, scale);
+        cy - 8.0 * scale
     }
 
     /// The window's close / minimize / zoom controls, in the theme's style.
@@ -1777,12 +1782,14 @@ impl Renderer {
         }
         if self.notice.is_some() {
             let (left, top) = self.notice_origin();
+            // Long messages are cut at the right margin.
+            let right = (w as f32 - left) as i32;
             areas.push(TextArea {
                 buffer: &self.notice_text,
                 left,
                 top,
                 scale: 1.0,
-                bounds,
+                bounds: TextBounds { right, ..bounds },
                 default_color: Color::rgb(r, g, b),
                 custom_glyphs: &[],
             });
