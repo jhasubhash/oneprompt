@@ -472,7 +472,14 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::Wakeup => self.redraw(),
+            UserEvent::Wakeup => {
+                // Full-screen apps get room for at least 80x24 cells.
+                let full_screen = self.terminal.as_ref().is_some_and(|t| t.mode().contains(TermMode::ALT_SCREEN));
+                if self.renderer.as_mut().is_some_and(|r| r.set_full_screen(full_screen)) {
+                    self.relayout();
+                }
+                self.redraw();
+            }
             UserEvent::Title(title) => {
                 if let Some(r) = &self.renderer {
                     r.window().set_title(&title);

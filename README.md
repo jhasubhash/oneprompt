@@ -75,6 +75,9 @@ Milestone 1, a working terminal:
 - Bold, italic, underline, strikeout, inverse, dim; block, beam and underline cursors (outlined when unfocused)
 - Mouse selection drawn as a per-theme highlighter; double-click selects a word, triple-click a line
 - Mouse reporting for full-screen apps (vim, htop, tmux): clicks, drags, wheel, SGR and legacy encodings
+- Full-screen apps always get at least 80x24 cells: if the window is too small at the chosen
+  font size (btop would refuse to draw), the text shrinks while the app runs (down to half
+  size) and returns to normal when it exits
 - Box-drawing and block characters drawn as shapes, so borders and bars join without seams
 - Focus reporting, left Option as Meta (right Option still types é, €, ...)
 - Procedural backgrounds in WGSL (`src/shaders/background.wgsl`): paper fibers and grain, chalkboard smudges and dust, flat

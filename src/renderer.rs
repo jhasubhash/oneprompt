@@ -13,7 +13,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use alacritty_terminal::event::EventListener;
-use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::grid::Indexed;
+use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::{Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor};
 use glyphon::{
@@ -32,6 +33,12 @@ use crate::theme::{ControlStyle, Theme};
 
 /// Margin around the grid, in logical pixels.
 const PADDING: f32 = 24.0;
+/// The grid full-screen apps (btop, vim, ...) get at least: the classic
+/// terminal size most of them are designed for. While one runs in a window
+/// too small for it at the chosen font size, the text shrinks to fit.
+const FULL_SCREEN_MIN: (usize, usize) = (80, 24);
+/// Text shrinks to no less than this share of its size.
+const MIN_FIT: f32 = 0.5;
 /// Height of the drag area at the top of the window, in logical pixels. The
 /// window has no visible title bar; this strip is just more of the surface.
 pub const TITLE_STRIP: f32 = 30.0;
@@ -322,6 +329,9 @@ pub struct Renderer {
 
     /// Text size multiplier (Cmd + / Cmd -).
     zoom: f32,
+    /// Whether a full-screen app is running, and the shrink applied for it.
+    fit_full_screen: bool,
+    fit: f32,
     cell_width: f32,
     cell_height: f32,
 }
@@ -673,6 +683,8 @@ impl Renderer {
             notice: None,
             notice_text,
             zoom: 1.0,
+            fit_full_screen: false,
+            fit: 1.0,
             cell_width: 8.0,
             cell_height: 16.0,
         }
@@ -956,6 +968,14 @@ impl Renderer {
         self.zoom = (self.zoom * factor).clamp(0.5, 3.0);
     }
 
+    /// A full-screen app started or ended; returns true if the grid has to
+    /// be recomputed.
+    pub fn set_full_screen(&mut self, on: bool) -> bool {
+        let changed = self.fit_full_screen != on;
+        self.fit_full_screen = on;
+        changed
+    }
+
     /// Left/right and top margins of the grid, in physical pixels.
     fn padding(&self) -> (f32, f32) {
         let scale = self.window.scale_factor() as f32;
@@ -963,12 +983,33 @@ impl Renderer {
     }
 
     fn metrics(&self, theme: &Theme) -> Metrics {
-        let scale = self.window.scale_factor() as f32 * self.zoom;
+        let scale = self.window.scale_factor() as f32 * self.zoom * self.fit;
         Metrics::new(theme.font_size * scale, (theme.line_height * scale).round())
     }
 
-    /// Measures the theme's font and returns how many cells fit the window.
+    /// How many cells fit the window. While a full-screen app runs, the
+    /// text shrinks (down to `MIN_FIT`) until the grid is at least
+    /// `FULL_SCREEN_MIN`.
     pub fn grid_size(&mut self, theme: &Theme) -> GridSize {
+        self.fit = 1.0;
+        let mut size = self.measure(theme);
+        let (columns, lines) = FULL_SCREEN_MIN;
+        // Cell size scales with the font, apart from rounding: aim for the
+        // ratio, then step down a little until it fits.
+        for _ in 0..12 {
+            if !self.fit_full_screen || (size.columns >= columns && size.lines >= lines) || self.fit <= MIN_FIT {
+                break;
+            }
+            let ratio = (size.columns as f32 / columns as f32).min(size.lines as f32 / lines as f32);
+            self.fit = (self.fit * ratio.min(0.97)).max(MIN_FIT);
+            size = self.measure(theme);
+        }
+        size
+    }
+
+    /// Measures the theme's font at the current size and returns how many
+    /// cells fit the window.
+    fn measure(&mut self, theme: &Theme) -> GridSize {
         let metrics = self.metrics(theme);
         let mut probe = Buffer::new(&mut self.font_system, metrics);
         {
@@ -1137,7 +1178,9 @@ impl Renderer {
         let mut overlay: Vec<Rect> = Vec::new();
         self.rects.clear();
         self.ink_rects.clear();
-        for indexed in content.display_iter {
+        let cells: Vec<_> = content.display_iter.collect();
+        let canvas = if self.harmonize { canvas_color(&cells, columns * lines) } else { None };
+        for indexed in cells {
             let line = (indexed.point.line.0 + content.display_offset as i32) as usize;
             let col = indexed.point.column.0;
             let flags = indexed.cell.flags;
@@ -1168,6 +1211,8 @@ impl Renderer {
             let mut fg = resolve(theme, indexed.cell.fg, theme.ink);
             let mut bg = match indexed.cell.bg {
                 AnsiColor::Named(NamedColor::Background) => None,
+                // The app's own canvas: the sheet is the canvas here.
+                color if Some(color) == canvas && !flags.contains(Flags::INVERSE) => None,
                 color => Some(resolve(theme, color, theme.surface_rgb())),
             };
             // Colours the program picked itself were chosen for a plain
@@ -1653,6 +1698,30 @@ fn session_seed() -> f32 {
 /// therefore drawn as blanks.
 fn cell_char(c: char) -> char {
     if c.is_control() { ' ' } else { c }
+}
+
+/// Share of the screen one background colour must cover to count as the
+/// program's canvas.
+const CANVAS_SHARE: f32 = 0.5;
+
+/// The background a full-screen app paints everywhere (btop, themed TUIs):
+/// it stands for "the screen", so it is drawn as the bare sheet rather than
+/// tinting the whole window. Only colours set explicitly count.
+fn canvas_color(cells: &[Indexed<&Cell>], screen: usize) -> Option<AnsiColor> {
+    let mut counts: Vec<(AnsiColor, usize)> = Vec::new();
+    for cell in cells {
+        let bg = cell.cell.bg;
+        if bg == AnsiColor::Named(NamedColor::Background) || cell.cell.flags.contains(Flags::INVERSE) {
+            continue;
+        }
+        if let Some((_, n)) = counts.iter_mut().find(|(c, _)| *c == bg) {
+            *n += 1;
+        } else if counts.len() < 64 {
+            counts.push((bg, 1));
+        }
+    }
+    let (color, n) = counts.into_iter().max_by_key(|&(_, n)| n)?;
+    (n as f32 >= screen as f32 * CANVAS_SHARE).then_some(color)
 }
 
 /// True-colour and 256-colour values: picked by the program, not the theme.
