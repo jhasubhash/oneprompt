@@ -90,7 +90,8 @@ struct PresentParams {
     from_color: [f32; 4],
     progress: f32,
     seed: f32,
-    _pad: [f32; 2],
+    style: f32,
+    shape: f32,
 }
 
 /// Seconds to brush one character in, at animation speed 1.
@@ -305,6 +306,7 @@ pub struct Renderer {
     harmonize: bool,
     animator: TextAnimator,
     transition: Option<Transition>,
+    last_reveal: Option<animation::Reveal>,
     /// Pen paths for the writing animation (see trace.rs).
     tracer: Tracer,
     /// Font the traced glyphs were rasterized in; a change starts over.
@@ -334,6 +336,12 @@ pub struct Renderer {
     /// Short message in the title strip ("settings applied", config errors).
     notice: Option<Notice>,
     notice_text: Buffer,
+    /// Tab labels for the title strip (empty with a single tab), the active
+    /// one, a buffer per label, and where each sits: text corner and slot.
+    tabs: Vec<String>,
+    active_tab: usize,
+    tab_text: Vec<Buffer>,
+    tab_slots: Vec<TabSlot>,
 
     /// Text size multiplier (Cmd + / Cmd -).
     zoom: f32,
@@ -676,6 +684,7 @@ impl Renderer {
             harmonize: true,
             animator: TextAnimator::default(),
             transition: None,
+            last_reveal: None,
             tracer: Tracer::new((1, 1), TRACE_ATLAS),
             traced_font: (String::new(), 0),
             trace_atlas,
@@ -694,6 +703,10 @@ impl Renderer {
             loose: Vec::new(),
             notice: None,
             notice_text,
+            tabs: Vec::new(),
+            active_tab: 0,
+            tab_text: Vec::new(),
+            tab_slots: Vec::new(),
             zoom: 1.0,
             fit_full_screen: false,
             fit: 1.0,
@@ -851,11 +864,15 @@ impl Renderer {
             duration: INTRO_TIME / self.animation.1,
             origin,
             from: animation::From::Color(color),
+            style: animation::Reveal::Bloom,
+            shape: random_unit() * 1000.0,
         });
     }
 
-    /// Reveals the next frames over the last one shown (light / dark switch).
-    pub fn start_transition(&mut self, origin: [f32; 2]) {
+    /// Reveals the next frames over the last one shown (light / dark
+    /// switch), in a brush style and shape picked at random, never the same
+    /// style twice in a row.
+    pub fn start_transition(&mut self) {
         if !self.animation.0 {
             return;
         }
@@ -866,11 +883,23 @@ impl Renderer {
             wgpu::Extent3d { width: self.config.width, height: self.config.height, depth_or_array_layers: 1 },
         );
         self.queue.submit(Some(encoder.finish()));
+        let styles: Vec<_> = animation::Reveal::ALL.into_iter().filter(|&s| Some(s) != self.last_reveal).collect();
+        let style = styles[(random_unit() * styles.len() as f32) as usize % styles.len()];
+        self.last_reveal = Some(style);
+        // Blooms start from somewhere along an edge, mostly the bottom.
+        let origin = match (random_unit() * 4.0) as u32 {
+            0 => [random_unit(), 0.0],
+            1 => [0.0, random_unit()],
+            2 => [1.0, random_unit()],
+            _ => [random_unit(), 1.0],
+        };
         self.transition = Some(Transition {
             start: self.now(),
             duration: SWITCH_TIME / self.animation.1,
             origin,
             from: animation::From::PreviousFrame,
+            style,
+            shape: random_unit() * 1000.0,
         });
     }
 
@@ -964,6 +993,24 @@ impl Renderer {
             }
             Some(_) => None,
         }
+    }
+
+    /// The tabs to show in the title strip; none when there is only one.
+    pub fn set_tabs(&mut self, labels: Vec<String>, active: usize) {
+        self.tabs = labels;
+        self.active_tab = active;
+    }
+
+    /// The tab whose label is at `x` in the title strip, if any.
+    pub fn tab_at(&self, x: f64) -> Option<usize> {
+        let x = x as f32;
+        self.tab_slots.iter().position(|slot| x >= slot.left && x < slot.right)
+    }
+
+    /// Forgets what the screen showed, so the next frame appears as it is
+    /// instead of being written in (switching tabs).
+    pub fn reset_writing(&mut self) {
+        self.animator = TextAnimator::default();
     }
 
     pub fn set_notice(&mut self, notice: Option<Notice>) {
@@ -1370,6 +1417,7 @@ impl Renderer {
         self.ink_rects.extend(overlay);
         self.layout_controls(theme, term.is_focused);
         self.layout_notice(theme);
+        self.layout_tabs(theme);
 
         let now = self.now();
         let writing = Writing {
@@ -1447,6 +1495,63 @@ impl Renderer {
         buffer.set_size(Some(self.config.width as f32), Some(20.0 * scale));
         buffer.set_text(&notice.text, &attrs, Shaping::Advanced, None);
         buffer.shape_until_scroll(false);
+    }
+
+    /// Tab labels, evenly spread over the strip right of the controls (and of
+    /// a notice, while one shows), the active one in ink and underlined with
+    /// a stroke of the brush, the others in a quiet ink.
+    fn layout_tabs(&mut self, theme: &Theme) {
+        self.tab_slots.clear();
+        if self.tabs.is_empty() {
+            return;
+        }
+        let scale = self.window.scale_factor() as f32;
+        let (notice_x, text_y) = self.notice_origin();
+        let mut left = notice_x;
+        if self.notice.is_some() {
+            let width = self.notice_text.layout_runs().map(|run| run.line_w).fold(0.0, f32::max);
+            left += width + 20.0 * scale;
+        }
+        let right = self.config.width as f32 - 16.0 * scale;
+        let n = self.tabs.len();
+        let slot_w = ((right - left) / n as f32).min(220.0 * scale);
+        if slot_w < 24.0 * scale {
+            return;
+        }
+        let start = left + ((right - left) - slot_w * n as f32) / 2.0;
+        while self.tab_text.len() < n {
+            let mut buffer = Buffer::new(&mut self.font_system, Metrics::new(12.0, 16.0));
+            buffer.borrow_with(&mut self.font_system).set_wrap(Wrap::None);
+            self.tab_text.push(buffer);
+        }
+        let weight = self.weight_for(&theme.font_family, theme.font_weight);
+        for (i, label) in self.tabs.iter().enumerate() {
+            let active = i == self.active_tab;
+            let [r, g, b] = if active { theme.ink } else { theme.palette[8] };
+            let attrs =
+                Attrs::new().family(Family::Name(&theme.font_family)).weight(Weight(weight)).color(Color::rgb(r, g, b));
+            let mut buffer = self.tab_text[i].borrow_with(&mut self.font_system);
+            buffer.set_metrics(Metrics::new(12.5 * scale, 16.0 * scale));
+            buffer.set_size(Some(slot_w * 4.0), Some(20.0 * scale));
+            buffer.set_text(label, &attrs, Shaping::Advanced, None);
+            buffer.shape_until_scroll(false);
+            let width = buffer.layout_runs().map(|run| run.line_w).fold(0.0, f32::max);
+            let slot_left = start + slot_w * i as f32;
+            let margin = 8.0 * scale;
+            // Centred in its slot; long titles start at the slot's edge and are clipped.
+            let text_x = (slot_left + (slot_w - width) / 2.0).max(slot_left + margin);
+            if active {
+                let w = width.min(slot_w - 2.0 * margin) + 6.0 * scale;
+                let y = text_y + 17.0 * scale;
+                self.ink_rects.push(Rect::new(text_x - 3.0 * scale, y, w, 1.8 * scale, theme.cursor, 0.9));
+            }
+            self.tab_slots.push(TabSlot {
+                left: slot_left,
+                right: slot_left + slot_w,
+                text: (text_x, text_y),
+                clip: slot_left + slot_w - margin,
+            });
+        }
     }
 
     /// Top-left corner of the notice, just right of the window controls.
@@ -1558,7 +1663,8 @@ impl Renderer {
                 },
                 progress: t.progress(now).min(0.999),
                 seed: self.seed,
-                _pad: [0.0; 2],
+                style: t.style as u32 as f32,
+                shape: t.shape,
             },
             None => PresentParams {
                 resolution: [w as f32, h as f32],
@@ -1566,7 +1672,8 @@ impl Renderer {
                 from_color: [0.0; 4],
                 progress: 1.0,
                 seed: self.seed,
-                _pad: [0.0; 2],
+                style: 0.0,
+                shape: 0.0,
             },
         };
         self.queue
@@ -1611,6 +1718,18 @@ impl Renderer {
                     custom_glyphs: &[],
                 });
             }
+        }
+        let strip = (TITLE_STRIP * self.window.scale_factor() as f32) as i32;
+        for (slot, buffer) in self.tab_slots.iter().zip(&self.tab_text) {
+            areas.push(TextArea {
+                buffer,
+                left: slot.text.0,
+                top: slot.text.1,
+                scale: 1.0,
+                bounds: TextBounds { left: slot.left as i32, top: 0, right: slot.clip as i32, bottom: strip },
+                default_color: Color::rgb(r, g, b),
+                custom_glyphs: &[],
+            });
         }
         if self.notice.is_some() {
             let (left, top) = self.notice_origin();
@@ -1786,6 +1905,23 @@ fn session_seed() -> f32 {
 /// therefore drawn as blanks.
 fn cell_char(c: char) -> char {
     if c.is_control() { ' ' } else { c }
+}
+
+/// Where a tab's label sits in the title strip, in physical pixels.
+struct TabSlot {
+    left: f32,
+    right: f32,
+    /// Top-left of its text, and where the text is clipped.
+    text: (f32, f32),
+    clip: f32,
+}
+
+/// A number in 0..1 that differs every call (no need for a real RNG here).
+fn random_unit() -> f32 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()));
+    (hasher.finish() >> 40) as f32 / (1u64 << 24) as f32
 }
 
 /// A character drawn on its own: its text, weight and italic.

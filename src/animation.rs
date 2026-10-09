@@ -147,6 +147,27 @@ pub struct Transition {
     pub origin: [f32; 2],
     /// What is being revealed over: a solid colour, or the previous frame.
     pub from: From,
+    /// How the brush uncovers the window (see `present.wgsl`).
+    pub style: Reveal,
+    /// Varies the brush shape, so no two reveals look the same.
+    pub shape: f32,
+}
+
+/// Ways the new look is brushed in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Reveal {
+    /// Grows from `origin` in ragged lobes.
+    Bloom = 0,
+    /// One broad stroke across the window, at some angle.
+    Sweep = 1,
+    /// A few horizontal strokes, top to bottom, alternating direction.
+    Bands = 2,
+    /// Several drops of ink landing and spreading into each other.
+    Drops = 3,
+}
+
+impl Reveal {
+    pub const ALL: [Reveal; 4] = [Reveal::Bloom, Reveal::Sweep, Reveal::Bands, Reveal::Drops];
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -254,7 +275,14 @@ mod tests {
 
     #[test]
     fn transition_progress_is_eased_and_ends() {
-        let t = Transition { start: 1.0, duration: 2.0, origin: [0.5, 1.0], from: From::PreviousFrame };
+        let t = Transition {
+            start: 1.0,
+            duration: 2.0,
+            origin: [0.5, 1.0],
+            from: From::PreviousFrame,
+            style: Reveal::Bloom,
+            shape: 0.0,
+        };
         assert_eq!(t.progress(1.0), 0.0);
         assert!(t.progress(2.0) > 0.5); // ease-out: past halfway at half time
         assert_eq!(t.progress(3.0), 1.0);

@@ -7,6 +7,7 @@
 //! Usage:
 //!   oneprompt                 run your login shell
 //!   oneprompt -e "command"    run a command through /bin/sh instead
+//!   oneprompt --position X,Y  open the window there (logical pixels; Cmd+N)
 //!   oneprompt --default-config   print the settings file Cmd+, would create
 //!   ONEPROMPT_SNAPSHOT=dir    render every theme to dir/<theme>.png and exit
 
@@ -36,7 +37,7 @@ use winit::window::{Window, WindowId};
 use chrome::Control;
 use config::{Config, OptionAsMeta};
 use renderer::{Notice, Renderer};
-use terminal::{Terminal, UserEvent};
+use terminal::{TabId, Terminal, UserEvent};
 use theme::Theme;
 
 /// How long snapshot mode lets the command run before capturing.
@@ -48,8 +49,14 @@ struct App {
     snapshot_dir: Option<PathBuf>,
     started: Instant,
 
+    /// Where to open the window (Cmd+N cascades new windows).
+    position: Option<(f64, f64)>,
+
     renderer: Option<Renderer>,
-    terminal: Option<Terminal>,
+    /// Each tab runs its own shell; the window shows the active one.
+    tabs: Vec<Tab>,
+    active: usize,
+    next_tab: TabId,
     themes: Vec<Theme>,
     current: usize,
     mods: ModifiersState,
@@ -61,7 +68,7 @@ struct App {
     notice_until: Option<Instant>,
     /// macOS is in dark mode.
     system_dark: bool,
-    /// Cmd+T override for this session: Some(true) = dark.
+    /// Cmd+Shift+L override for this session: Some(true) = dark.
     flip: Option<bool>,
     /// Leftover trackpad scroll, in pixels, below one line.
     scroll_px: f64,
@@ -70,6 +77,13 @@ struct App {
     close_requested: bool,
     /// A settings error found before the window existed, shown once it does.
     startup_error: Option<String>,
+}
+
+struct Tab {
+    id: TabId,
+    terminal: Terminal,
+    /// Set by the program running in it (OSC 0/2).
+    title: Option<String>,
 }
 
 #[derive(Default)]
@@ -99,15 +113,106 @@ impl App {
         &self.themes[self.current]
     }
 
-    /// Recomputes the grid for the window and theme, and tells the shell.
+    /// The active tab's terminal.
+    fn terminal(&self) -> Option<&Terminal> {
+        self.tabs.get(self.active).map(|t| &t.terminal)
+    }
+
+    /// Recomputes the grid for the window and theme, and tells the shells.
+    /// Every tab gets the window's size, so switching never resizes.
     fn relayout(&mut self) {
         let theme = self.themes[self.current].clone();
-        let (Some(renderer), Some(terminal)) = (self.renderer.as_mut(), self.terminal.as_mut())
-        else {
-            return;
-        };
-        terminal.resize(renderer.grid_size(&theme));
+        let Some(renderer) = self.renderer.as_mut() else { return };
+        let size = renderer.grid_size(&theme);
+        for tab in &mut self.tabs {
+            tab.terminal.resize(size);
+        }
         renderer.window().request_redraw();
+    }
+
+    /// Starts a shell in a new tab and shows it.
+    fn new_tab(&mut self) -> std::io::Result<()> {
+        let theme = self.themes[self.current].clone();
+        let Some(renderer) = self.renderer.as_mut() else { return Ok(()) };
+        let id = self.next_tab;
+        self.next_tab += 1;
+        let terminal = Terminal::spawn(self.proxy.clone(), id, renderer.grid_size(&theme), self.command.clone())?;
+        self.tabs.push(Tab { id, terminal, title: None });
+        self.switch_tab(self.tabs.len() - 1);
+        Ok(())
+    }
+
+    /// Shows tab `index`.
+    fn switch_tab(&mut self, index: usize) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        if let Some(old) = self.tabs.get(self.active).filter(|_| self.active != index) {
+            old.terminal.set_focused(false);
+        }
+        self.active = index;
+        self.mouse.selecting = false;
+        self.mouse.reported_button = None;
+        self.mouse.reported_cell = None;
+        let focused = self.renderer.as_ref().is_some_and(|r| r.window().has_focus());
+        self.tabs[index].terminal.set_focused(focused);
+        if let Some(r) = self.renderer.as_mut() {
+            // Another tab's screen is not new ink: show it as it stands.
+            r.reset_writing();
+        }
+        self.update_tabs();
+        // A full-screen app in the new tab may need its text shrunk.
+        let full_screen = self.terminal().is_some_and(|t| t.mode().contains(TermMode::ALT_SCREEN));
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_full_screen(full_screen);
+        }
+        self.relayout();
+    }
+
+    /// Closes tab `index`; returns false when it was the last one.
+    fn close_tab(&mut self, index: usize) -> bool {
+        if index >= self.tabs.len() {
+            return true;
+        }
+        self.tabs.remove(index);
+        if self.tabs.is_empty() {
+            return false;
+        }
+        let active = if self.active > index || self.active >= self.tabs.len() { self.active - 1 } else { self.active };
+        self.active = usize::MAX;
+        self.switch_tab(active.min(self.tabs.len() - 1));
+        true
+    }
+
+    /// Tells the renderer the tab labels and sets the window title.
+    fn update_tabs(&mut self) {
+        let labels: Vec<String> = self.tabs.iter().enumerate().map(|(i, t)| tab_label(t, i)).collect();
+        if let Some(r) = self.renderer.as_mut() {
+            if let Some(label) = labels.get(self.active) {
+                r.window().set_title(label);
+            }
+            r.set_tabs(if labels.len() > 1 { labels } else { Vec::new() }, self.active);
+            r.window().request_redraw();
+        }
+    }
+
+    /// Opens another window: a separate oneprompt, a little down and to the
+    /// right of this one.
+    fn new_window(&mut self) {
+        let mut command = match std::env::current_exe() {
+            Ok(exe) => std::process::Command::new(exe),
+            Err(err) => return self.show_notice(format!("could not open a window: {err}"), true),
+        };
+        if let Some(r) = &self.renderer {
+            let window = r.window();
+            if let Ok(at) = window.outer_position() {
+                let at = at.to_logical::<f64>(window.scale_factor());
+                command.arg("--position").arg(format!("{},{}", at.x + 28.0, at.y + 28.0));
+            }
+        }
+        if let Err(err) = command.spawn() {
+            self.show_notice(format!("could not open a window: {err}"), true);
+        }
     }
 
     fn redraw(&self) {
@@ -124,11 +229,33 @@ impl App {
         let Key::Character(key) = &event.logical_key else {
             return false;
         };
+        let shift = self.mods.shift_key();
         match key.as_str() {
             // Flip between the light and dark variant for this session.
-            "t" => {
+            "l" | "L" if shift => {
                 self.flip = Some(!self.themes[self.current].dark);
                 self.select_theme();
+            }
+            "t" => {
+                if let Err(err) = self.new_tab() {
+                    self.show_notice(format!("could not open a tab: {err}"), true);
+                }
+            }
+            "n" => self.new_window(),
+            // Next / previous tab (Shift+] and Shift+[ arrive as braces).
+            "}" | "]" if shift => {
+                let n = self.tabs.len();
+                self.switch_tab((self.active + 1) % n.max(1));
+            }
+            "{" | "[" if shift => {
+                let n = self.tabs.len();
+                self.switch_tab((self.active + n.max(1) - 1) % n.max(1));
+            }
+            // Cmd+1..8 pick a tab, Cmd+9 the last one.
+            digit @ ("1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9") => {
+                let n: usize = digit.parse().unwrap_or(1);
+                let index = if n == 9 { self.tabs.len().saturating_sub(1) } else { n - 1 };
+                self.switch_tab(index);
             }
             "=" | "+" => {
                 if let Some(r) = self.renderer.as_mut() {
@@ -147,20 +274,24 @@ impl App {
                     self.show_notice(format!("could not open settings: {err}"), true);
                 }
             }
-            "w" => self.close_requested = true,
+            "w" => {
+                if !self.close_tab(self.active) {
+                    self.close_requested = true;
+                }
+            }
             "m" => {
                 if let Some(r) = &self.renderer {
                     r.window().set_minimized(true);
                 }
             }
             "c" => {
-                if let Some(text) = self.terminal.as_ref().and_then(|t| t.selection_text()) {
+                if let Some(text) = self.terminal().and_then(|t| t.selection_text()) {
                     let _ = arboard::Clipboard::new().and_then(|mut c| c.set_text(text));
                 }
             }
             "v" => {
                 let text = arboard::Clipboard::new().and_then(|mut c| c.get_text());
-                if let (Ok(text), Some(t)) = (text, &self.terminal) {
+                if let (Ok(text), Some(t)) = (text, self.terminal()) {
                     t.paste(&text);
                 }
             }
@@ -190,13 +321,13 @@ impl App {
     }
 
     /// Shows the light or dark variant, per the appearance setting, the
-    /// system's mode and any Cmd+T flip.
+    /// system's mode and any Cmd+Shift+L flip.
     fn select_theme(&mut self) {
         let index = self.config.theme_index(&self.themes, self.system_dark, self.flip);
         if index != self.current {
-            // Brush the new look in over the old one, rising from the bottom.
+            // Brush the new look in over the old one, a different way each time.
             if let Some(r) = self.renderer.as_mut() {
-                r.start_transition([0.5, 1.0]);
+                r.start_transition();
             }
             self.current = index;
             self.relayout();
@@ -206,7 +337,7 @@ impl App {
 
     /// Applies a config: themes with overrides, appearance, paper seed.
     fn apply_config(&mut self, config: Config) {
-        // A new appearance setting replaces a Cmd+T flip.
+        // A new appearance setting replaces a Cmd+Shift+L flip.
         if config.appearance != self.config.appearance {
             self.flip = None;
         }
@@ -268,7 +399,7 @@ impl App {
     }
 
     fn pointer_cell(&self) -> Option<(usize, usize, bool)> {
-        let (r, t) = (self.renderer.as_ref()?, self.terminal.as_ref()?);
+        let (r, t) = (self.renderer.as_ref()?, self.terminal()?);
         Some(r.cell_at(self.mouse.x, self.mouse.y, t.size()))
     }
 
@@ -298,6 +429,10 @@ impl App {
             return true;
         }
         if self.mouse.y < renderer::TITLE_STRIP as f64 * scale as f64 {
+            if let Some(index) = r.tab_at(self.mouse.x) {
+                self.switch_tab(index);
+                return true;
+            }
             let now = Instant::now();
             if self.mouse.last_strip_click.is_some_and(|at| now - at < MULTI_CLICK) {
                 window.set_maximized(!window.is_maximized());
@@ -317,7 +452,7 @@ impl App {
             return;
         }
         let Some((col, line, right_half)) = self.pointer_cell() else { return };
-        let Some(t) = &self.terminal else { return };
+        let Some(t) = self.tabs.get(self.active).map(|t| &t.terminal) else { return };
 
         // Programs that asked for the mouse get it; Shift bypasses that so
         // you can still select text, as in other terminals.
@@ -365,7 +500,7 @@ impl App {
             }
         }
         let Some((col, line, right_half)) = self.pointer_cell() else { return };
-        let Some(t) = &self.terminal else { return };
+        let Some(t) = self.tabs.get(self.active).map(|t| &t.terminal) else { return };
         if self.mouse.selecting {
             t.update_selection(col, line, right_half);
             self.redraw();
@@ -392,7 +527,7 @@ impl App {
             self.relayout();
             let theme = self.themes[i].clone();
             let name = theme.name.to_lowercase().replace(' ', "-");
-            if let (Some(r), Some(t)) = (self.renderer.as_mut(), &self.terminal) {
+            if let (Some(r), Some(t)) = (self.renderer.as_mut(), self.tabs.get(self.active).map(|t| &t.terminal)) {
                 let term = t.term.lock();
                 r.snapshot(&theme, &term, &dir.join(format!("{name}.png")));
             }
@@ -408,6 +543,10 @@ impl ApplicationHandler<UserEvent> for App {
         let attrs = Window::default_attributes()
             .with_title("oneprompt")
             .with_inner_size(winit::dpi::LogicalSize::new(960.0, 600.0));
+        let attrs = match self.position {
+            Some((x, y)) => attrs.with_position(winit::dpi::LogicalPosition::new(x, y)),
+            None => attrs,
+        };
         // No native title bar or buttons: the surface runs to the top edge and
         // the theme draws its own controls (chrome.rs). The top strip drags
         // the window and double-click zooms it.
@@ -421,8 +560,10 @@ impl ApplicationHandler<UserEvent> for App {
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         let mut renderer = Renderer::new(window);
         let size = renderer.grid_size(self.theme());
-        match Terminal::spawn(self.proxy.clone(), size, self.command.clone()) {
-            Ok(terminal) => self.terminal = Some(terminal),
+        let id = self.next_tab;
+        self.next_tab += 1;
+        match Terminal::spawn(self.proxy.clone(), id, size, self.command.clone()) {
+            Ok(terminal) => self.tabs.push(Tab { id, terminal, title: None }),
             Err(err) => {
                 eprintln!("oneprompt: could not start shell: {err}");
                 event_loop.exit();
@@ -431,6 +572,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         renderer.window().request_redraw();
         self.renderer = Some(renderer);
+        self.update_tabs();
         // Seed, notices and the system's light/dark mode need the window.
         self.system_dark = self.renderer.as_ref().and_then(|r| r.window().theme())
             == Some(winit::window::Theme::Dark);
@@ -471,35 +613,45 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+        let tab = |id: TabId| self.tabs.iter().position(|t| t.id == id);
         match event {
-            UserEvent::Wakeup => {
+            // Background tabs keep running; only the visible one is drawn.
+            UserEvent::Wakeup(id) if tab(id) == Some(self.active) => {
                 // Full-screen apps get room for at least 80x24 cells.
-                let full_screen = self.terminal.as_ref().is_some_and(|t| t.mode().contains(TermMode::ALT_SCREEN));
+                let full_screen = self.terminal().is_some_and(|t| t.mode().contains(TermMode::ALT_SCREEN));
                 if self.renderer.as_mut().is_some_and(|r| r.set_full_screen(full_screen)) {
                     self.relayout();
                 }
                 self.redraw();
             }
-            UserEvent::Title(title) => {
-                if let Some(r) = &self.renderer {
-                    r.window().set_title(&title);
+            UserEvent::Wakeup(_) => {}
+            UserEvent::Title(id, title) => {
+                if let Some(i) = tab(id) {
+                    self.tabs[i].title = title;
+                    self.update_tabs();
                 }
             }
-            UserEvent::PtyWrite(text) => {
-                if let Some(t) = &self.terminal {
-                    t.write(text.into_bytes());
+            UserEvent::PtyWrite(id, text) => {
+                if let Some(i) = tab(id) {
+                    self.tabs[i].terminal.write(text.into_bytes());
                 }
             }
             // In snapshot mode the command may finish before we capture.
-            UserEvent::Exit if self.snapshot_dir.is_some() => {}
-            UserEvent::Exit => event_loop.exit(),
+            UserEvent::Exit(_) if self.snapshot_dir.is_some() => {}
+            UserEvent::Exit(id) => {
+                if let Some(i) = tab(id)
+                    && !self.close_tab(i)
+                {
+                    event_loop.exit();
+                }
+            }
             UserEvent::ConfigChanged => self.reload_config(),
             // Tell programs the theme's real colours, so the ones that check
             // (to choose a light or dark palette) see the sheet they are on.
-            UserEvent::ColorRequest(index, reply) => {
+            UserEvent::ColorRequest(id, index, reply) => {
                 let [r, g, b] = renderer::query_color(&self.themes[self.current], index);
-                if let Some(t) = &self.terminal {
-                    t.write(reply(alacritty_terminal::vte::ansi::Rgb { r, g, b }).into_bytes());
+                if let Some(i) = tab(id) {
+                    self.tabs[i].terminal.write(reply(alacritty_terminal::vte::ansi::Rgb { r, g, b }).into_bytes());
                 }
             }
         }
@@ -527,7 +679,7 @@ impl ApplicationHandler<UserEvent> for App {
                 );
             }
             WindowEvent::Focused(focused) => {
-                if let Some(t) = &self.terminal {
+                if let Some(t) = self.terminal() {
                     t.set_focused(focused);
                 }
                 self.redraw();
@@ -539,7 +691,7 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
-                let Some(t) = &self.terminal else { return };
+                let Some(t) = self.terminal() else { return };
                 let app_cursor = t.mode().contains(TermMode::APP_CURSOR);
                 let meta = self.option_as_meta();
                 let bytes = input::key_to_bytes(&event, self.mods, meta, app_cursor);
@@ -566,7 +718,9 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                let (Some(r), Some(t)) = (&self.renderer, &self.terminal) else { return };
+                let (Some(r), Some(t)) = (&self.renderer, self.tabs.get(self.active).map(|t| &t.terminal)) else {
+                    return;
+                };
                 let line_px = r.cell_height() as f64;
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, y) => (y * 3.0) as i32,
@@ -602,7 +756,7 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
                 let theme = self.themes[self.current].clone();
-                if let (Some(r), Some(t)) = (self.renderer.as_mut(), &self.terminal) {
+                if let (Some(r), Some(t)) = (self.renderer.as_mut(), self.tabs.get(self.active).map(|t| &t.terminal)) {
                     let term = t.term.lock();
                     r.render(&theme, &term);
                     drop(term);
@@ -618,18 +772,35 @@ impl ApplicationHandler<UserEvent> for App {
     }
 }
 
+/// A tab's name in the strip: what its program called it, else the shell's.
+fn tab_label(tab: &Tab, index: usize) -> String {
+    if let Some(title) = tab.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        return title.to_string();
+    }
+    let shell = std::env::var("SHELL").ok();
+    let name = shell.as_deref().and_then(|s| s.rsplit('/').next()).unwrap_or("shell");
+    format!("{name} {}", index + 1)
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let mut command = None;
+    let mut position = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-e" => command = args.next(),
+            "--position" => {
+                position = args.next().and_then(|p| {
+                    let (x, y) = p.split_once(',')?;
+                    Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
+                })
+            }
             "--default-config" => {
                 print!("{}", config::template());
                 return;
             }
             "-h" | "--help" => {
-                println!("usage: oneprompt [-e COMMAND] [--default-config]");
+                println!("usage: oneprompt [-e COMMAND] [--position X,Y] [--default-config]");
                 println!("settings: {}", config::path().display());
                 return;
             }
@@ -658,8 +829,11 @@ fn main() {
         command,
         snapshot_dir: std::env::var_os("ONEPROMPT_SNAPSHOT").map(PathBuf::from),
         started: Instant::now(),
+        position,
         renderer: None,
-        terminal: None,
+        tabs: Vec::new(),
+        active: 0,
+        next_tab: 0,
         themes,
         current,
         mods: ModifiersState::empty(),

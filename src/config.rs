@@ -63,7 +63,7 @@ pub struct ThemeOverride {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    /// Light or dark variant; Cmd+T flips it for the session.
+    /// Light or dark variant; Cmd+Shift+L flips it for the session.
     pub appearance: Appearance,
     /// Pin the paper pattern; unset gives a new sheet every session.
     pub seed: Option<f32>,
@@ -95,7 +95,7 @@ pub fn template() -> String {
 # Lines starting with # are comments and are ignored.
 
 # Light or dark: "system" follows macOS and switches with it; "light" or
-# "dark" pins one. Cmd+T flips between them for the session.
+# "dark" pins one. Cmd+Shift+L flips between them for the session.
 appearance = "system"
 
 # Paper pattern. Unset: a new sheet every session. A number pins one sheet.
@@ -262,7 +262,7 @@ impl Config {
     }
 
     /// Index of the theme to show, given whether the system is in dark mode
-    /// and any session override from Cmd+T.
+    /// and any session override from Cmd+Shift+L.
     pub fn theme_index(&self, themes: &[Theme], system_dark: bool, flip: Option<bool>) -> usize {
         let dark = flip.unwrap_or(match self.appearance {
             Appearance::System => system_dark,
@@ -410,7 +410,7 @@ mod tests {
         assert!(pick("", true, None));
         assert!(!pick("appearance = \"light\"", true, None)); // ...unless pinned
         assert!(pick("appearance = \"dark\"", false, None));
-        assert!(pick("appearance = \"light\"", false, Some(true))); // Cmd+T wins
+        assert!(pick("appearance = \"light\"", false, Some(true))); // Cmd+Shift+L wins
     }
 
     #[test]

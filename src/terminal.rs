@@ -20,34 +20,39 @@ use winit::event_loop::EventLoopProxy;
 /// Answers a colour query: formats the reply for a given colour.
 pub type ColorReply = Arc<dyn Fn(Rgb) -> String + Sync + Send + 'static>;
 
-/// Events from the PTY thread to the UI thread.
+/// Which tab a terminal event came from.
+pub type TabId = u64;
+
+/// Events from the PTY threads to the UI thread.
 pub enum UserEvent {
     /// New output was parsed; redraw.
-    Wakeup,
-    Title(String),
+    Wakeup(TabId),
+    /// `None`: back to the default title.
+    Title(TabId, Option<String>),
     /// The terminal wants to answer a query (e.g. cursor position).
-    PtyWrite(String),
+    PtyWrite(TabId, String),
     /// The shell exited.
-    Exit,
+    Exit(TabId),
     /// The settings file was saved (or created / deleted).
     ConfigChanged,
     /// A program asked for a colour (OSC 4/10/11/12): palette index, or
     /// 256/257/258 for foreground, background, cursor.
-    ColorRequest(usize, ColorReply),
+    ColorRequest(TabId, usize, ColorReply),
 }
 
 #[derive(Clone)]
-pub struct Listener(EventLoopProxy<UserEvent>);
+pub struct Listener(EventLoopProxy<UserEvent>, TabId);
 
 impl EventListener for Listener {
     fn send_event(&self, event: Event) {
+        let id = self.1;
         let event = match event {
-            Event::Wakeup => UserEvent::Wakeup,
-            Event::Title(title) => UserEvent::Title(title),
-            Event::ResetTitle => UserEvent::Title("oneprompt".into()),
-            Event::PtyWrite(text) => UserEvent::PtyWrite(text),
-            Event::ColorRequest(index, reply) => UserEvent::ColorRequest(index, reply),
-            Event::Exit | Event::ChildExit(_) => UserEvent::Exit,
+            Event::Wakeup => UserEvent::Wakeup(id),
+            Event::Title(title) => UserEvent::Title(id, Some(title)),
+            Event::ResetTitle => UserEvent::Title(id, None),
+            Event::PtyWrite(text) => UserEvent::PtyWrite(id, text),
+            Event::ColorRequest(index, reply) => UserEvent::ColorRequest(id, index, reply),
+            Event::Exit | Event::ChildExit(_) => UserEvent::Exit(id),
             _ => return,
         };
         let _ = self.0.send_event(event);
@@ -98,6 +103,7 @@ impl Terminal {
     /// Spawns the user's login shell, or `/bin/sh -c command` when given.
     pub fn spawn(
         proxy: EventLoopProxy<UserEvent>,
+        id: TabId,
         size: GridSize,
         command: Option<String>,
     ) -> std::io::Result<Self> {
@@ -109,7 +115,7 @@ impl Terminal {
             env: HashMap::new(),
         };
         let pty = tty::new(&options, size.window_size(), 0)?;
-        let listener = Listener(proxy);
+        let listener = Listener(proxy, id);
         let term = Arc::new(FairMutex::new(Term::new(
             Config::default(),
             &size,

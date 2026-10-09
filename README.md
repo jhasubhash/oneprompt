@@ -50,8 +50,9 @@ light or dark palette.
 - `animation = false` turns it off, `animation_speed` scales it. The app only redraws while
   something is moving.
 
-The variant follows macOS light / dark mode and switches with it; Cmd+T flips it for the
-session, and `appearance` in the settings pins one. Every session gets a new sheet of paper
+The variant follows macOS light / dark mode and switches with it; Cmd+Shift+L flips it for the
+session (brushed in a different way each time: a bloom from an edge, one broad stroke,
+painted bands or spreading drops), and `appearance` in the settings pins one. Every session gets a new sheet of paper
 (`ONEPROMPT_SEED=<number>` pins one). The renderer still supports the earlier surfaces
 (cotton paper, chalkboard, flat) and control styles for themes to come.
 
@@ -85,8 +86,12 @@ Milestone 1, a working terminal:
 | Key | Action |
 |---|---|
 | Cmd+, | open settings |
-| Cmd+T | flip between light and dark |
-| Cmd+W / Cmd+M | close / minimize (or the theme's controls, top left) |
+| Cmd+T | new tab (tabs show in the title strip; click one to switch) |
+| Cmd+1 … Cmd+9 | go to tab 1 … 8, Cmd+9 the last |
+| Cmd+Shift+] / Cmd+Shift+[ | next / previous tab |
+| Cmd+N | new window |
+| Cmd+Shift+L | flip between light and dark |
+| Cmd+W / Cmd+M | close tab (the window with the last one) / minimize; the theme's controls, top left, close or minimize the window |
 | drag top strip | move the window; double-click it to zoom |
 | Cmd+= / Cmd+- | bigger / smaller text |
 | Cmd+C | copy selection |
@@ -102,8 +107,17 @@ cargo run -- -e "htop"                          # run a command via /bin/sh inst
 ONEPROMPT_SNAPSHOT=docs/screenshots cargo run -- -e "..."   # render every theme to PNG and exit
 ```
 
+To launch it like any Mac app (Spotlight, Launchpad, Dock), make the app bundle once:
+
+```sh
+scripts/make-app.sh            # ~/Applications/oneprompt.app; pass another folder to put it there
+```
+
+The bundle's executable is a symlink to `target/release/oneprompt`, so it always runs the
+latest `cargo build --release`: no need to remake it after changes.
+
 Not yet: IME (composed input for Chinese, Japanese, ...), clickable links, search,
-tabs/splits.
+splits.
 
 ## Settings
 
@@ -162,7 +176,7 @@ src/shaders/present.wgsl    window reveal through a growing brush shape
 1. **Proportional and handwritten fonts.** The grid needs a fixed advance, so themes
    use monospace faces today (Courier New, PT Mono, Menlo). Faces like American
    Typewriter or Chalkboard need per-cell glyph placement (centre each glyph in its cell).
-2. **Input and navigation.** IME, clickable links, search in scrollback, tabs.
+2. **Input and navigation.** IME, clickable links, search in scrollback, splits.
 3. **Brush typography.** Stroke-width variation (pressure) and per-glyph wobble, a
    brush-style monospace face for Tsushima.
 4. **Theme files.** TOML themes with hot reload, image textures (scanned paper, linen)
