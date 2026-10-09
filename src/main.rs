@@ -18,6 +18,7 @@ mod input;
 mod renderer;
 mod terminal;
 mod theme;
+mod trace;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -210,9 +211,9 @@ impl App {
         }
         self.themes = config.themes();
         // Snapshots must be deterministic, so they never animate.
-        let (enabled, speed) = config.animation();
+        let (enabled, speed, writing_speed) = config.animation();
         if let Some(r) = self.renderer.as_mut() {
-            r.set_animation(enabled && self.snapshot_dir.is_none(), speed);
+            r.set_animation(enabled && self.snapshot_dir.is_none(), speed, writing_speed);
         }
         // ONEPROMPT_SEED (used for screenshots) wins over the file.
         if std::env::var_os("ONEPROMPT_SEED").is_none()

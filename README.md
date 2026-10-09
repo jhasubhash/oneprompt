@@ -24,12 +24,16 @@ window controls. There is one for now, **Tsushima**, after the ink-painting cuts
 
 ### Ink animation
 
-- **Writing**: new characters are brushed in, a ragged sweep uncovering each one along the
-  brush, then their bleed spreads as the ink dries. Scrolled text keeps its age, and big
-  repaints (`clear`, a full-screen app redrawing) appear at once.
+- **Writing**: new characters are written by hand. Each glyph is traced along a pen path
+  derived from its shape (`src/trace.rs`: pieces left to right, each followed along the ink
+  from its top-left), then its bleed spreads as the ink dries. Output that arrives together
+  (`ls`, `cat`) is written in reading order, left to right and line by line, at
+  `writing_speed` characters per second, sped up so a batch never takes more than 1.5 s.
+  Scrolled text keeps its age; full-screen apps and repaints over existing text appear at
+  once.
 - **Reveals**: the window opens like the cutscenes, parchment torn out of a sheet of ink
-  (light) or ink flooding over parchment (dark), and switching light / dark brushes the new
-  look in over the old one.
+  (light) or ink flooding over parchment (dark), and switching light / dark slowly brushes
+  the new look in over the old one.
 - `animation = false` turns it off, `animation_speed` scales it. The app only redraws while
   something is moving.
 
@@ -94,8 +98,9 @@ settings.
 
 ```toml
 appearance = "system"         # system | light | dark
-animation = true              # brushed-in text, window reveals
+animation = true              # hand-written text, window reveals
 animation_speed = 1.0
+writing_speed = 500           # characters per second for output
 option_as_meta = "left"       # left | both | none
 seed = 11                     # pin the paper; unset = new sheet each session
 
@@ -122,7 +127,8 @@ src/boxdraw.rs              box-drawing and block characters as rectangles
 src/chrome.rs               theme-drawn window controls: layout and hit testing
 src/config.rs               settings file: parsing, theme overrides, live reload
 src/renderer.rs             ink pass (text, line art, controls), main pass (surface, cells, ink composite), present pass
-src/animation.rs            per-cell write times (scroll-aware) and window reveal transitions
+src/animation.rs            per-cell write times (reading order, scroll-aware) and window reveals
+src/trace.rs                pen paths: per-glyph stroke order for the hand-writing reveal
 src/theme.rs                themes as plain data
 src/shaders/background.wgsl procedural textures
 src/shaders/rect.wgsl       rectangles, brush discs, rings and crosses

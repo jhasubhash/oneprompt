@@ -62,6 +62,8 @@ pub struct Config {
     pub animation: Option<bool>,
     /// 1 = normal, 2 = twice as fast, 0.5 = half speed.
     pub animation_speed: Option<f32>,
+    /// Characters per second when output is written out line by line.
+    pub writing_speed: Option<f32>,
     /// Font settings for every theme (per-theme sections win).
     pub font_family: Option<String>,
     pub font_size: Option<f32>,
@@ -93,6 +95,9 @@ option_as_meta = "left"
 # revealed with a brush when it opens and when light / dark switches.
 animation = true
 animation_speed = 1.0        # 2 = twice as fast, 0.5 = half speed
+# Output (ls, cat, ...) is written left to right, line by line, at this many
+# characters per second. Long output is sped up to finish within 1.5 seconds.
+writing_speed = 500
 
 # The light and dark variants, set to their built-in values; change any of them.
 # Fonts must be monospace. font_weight snaps to the weights the font has
@@ -172,11 +177,21 @@ impl Config {
         {
             return Err(format!("animation_speed {speed} is out of range (0.1 to 10)"));
         }
+        if let Some(speed) = self.writing_speed
+            && !(10.0..=100_000.0).contains(&speed)
+        {
+            return Err(format!("writing_speed {speed} is out of range (10 to 100000)"));
+        }
         Ok(())
     }
 
-    pub fn animation(&self) -> (bool, f32) {
-        (self.animation.unwrap_or(true), self.animation_speed.unwrap_or(1.0))
+    /// Animations on, their speed, and the writing speed (characters/s).
+    pub fn animation(&self) -> (bool, f32, f32) {
+        (
+            self.animation.unwrap_or(true),
+            self.animation_speed.unwrap_or(1.0),
+            self.writing_speed.unwrap_or(500.0),
+        )
     }
 
     /// The built-in themes with this config's overrides applied.
@@ -345,7 +360,9 @@ mod tests {
         assert!(Config::parse("[themes.tsushima-dark]\nnibb = 1").is_err());
         assert!(Config::parse("option_as_meta = \"both\"").is_ok());
         assert!(Config::parse("animation_speed = 0").unwrap_err().contains("out of range"));
-        assert_eq!(Config::parse("animation = false").unwrap().animation(), (false, 1.0));
+        assert_eq!(Config::parse("animation = false").unwrap().animation(), (false, 1.0, 500.0));
+        assert_eq!(Config::parse("writing_speed = 120").unwrap().animation().2, 120.0);
+        assert!(Config::parse("writing_speed = 1").unwrap_err().contains("out of range"));
     }
 
     #[test]

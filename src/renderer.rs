@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::Term;
+use alacritty_terminal::term::{Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor};
 use glyphon::{
     fontdb, Attrs, Buffer, Cache, Color, ColorMode, Family, FontSystem, Metrics, Resolution, Shaping,
@@ -22,8 +22,9 @@ use glyphon::{
 };
 use winit::window::Window;
 
-use crate::animation::{self, TextAnimator, Transition};
+use crate::animation::{self, TextAnimator, Transition, Writing};
 use crate::boxdraw;
+use crate::trace::{self, GlyphKey, Slot, Tracer};
 use crate::chrome::{self, Control};
 use crate::terminal::GridSize;
 use crate::theme::{ControlStyle, Theme};
@@ -61,7 +62,9 @@ struct InkParams {
     cell: [f32; 2],
     grid_size: [f32; 2],
     write_time: f32,
-    _pad: f32,
+    atlas_columns: f32,
+    slot_size: [f32; 2],
+    _pad: [f32; 2],
 }
 
 #[repr(C)]
@@ -76,10 +79,14 @@ struct PresentParams {
 }
 
 /// Seconds to brush one character in, at animation speed 1.
-const WRITE_TIME: f32 = 0.22;
+const WRITE_TIME: f32 = 0.38;
+/// Pen-order atlas, one cell-sized slot per traced glyph.
+const TRACE_ATLAS: (u32, u32) = (2048, 2048);
 /// Window reveal on startup and between light and dark, at speed 1.
 const INTRO_TIME: f32 = 1.6;
-const SWITCH_TIME: f32 = 1.1;
+const SWITCH_TIME: f32 = 1.9;
+/// Longest a batch of output takes to write, at speed 1.
+const MAX_WRITE: f32 = 1.5;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -166,7 +173,7 @@ struct Targets {
     /// The frame a light/dark transition reveals the new look over.
     previous: wgpu::Texture,
     present_bind_group: wgpu::BindGroup,
-    /// Per-cell birth times for the writing animation (R32Float).
+    /// Per cell: birth time and pen-order atlas slot (Rg32Float).
     births: wgpu::Texture,
     grid: (u32, u32),
 }
@@ -180,6 +187,7 @@ impl Targets {
         ink_sampler: &wgpu::Sampler,
         present_layout: &wgpu::BindGroupLayout,
         present_params: &wgpu::Buffer,
+        trace_atlas: &wgpu::TextureView,
         config: &wgpu::SurfaceConfiguration,
         grid: (u32, u32),
     ) -> Self {
@@ -206,7 +214,7 @@ impl Targets {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R32Float,
+            format: wgpu::TextureFormat::Rg32Float,
             usage: U::TEXTURE_BINDING | U::COPY_DST,
             view_formats: &[],
         });
@@ -223,6 +231,7 @@ impl Targets {
                 wgpu::BindGroupEntry { binding: 1, resource: view(&ink_view) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(ink_sampler) },
                 wgpu::BindGroupEntry { binding: 3, resource: view(&births_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: view(trace_atlas) },
             ],
         });
         let present_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -273,8 +282,16 @@ pub struct Renderer {
     clock: Instant,
     /// Animations on, and their speed (1 = normal, 2 = twice as fast).
     animation: (bool, f32),
+    /// Characters per second when output is written out.
+    writing_speed: f32,
     animator: TextAnimator,
     transition: Option<Transition>,
+    /// Pen paths for the writing animation (see trace.rs).
+    tracer: Tracer,
+    /// Font the traced glyphs were rasterized in; a change starts over.
+    traced_font: (String, u16),
+    trace_atlas: wgpu::Texture,
+    trace_atlas_view: wgpu::TextureView,
 
     /// Pointer is over the window controls: show their symbols.
     controls_hover: bool,
@@ -466,6 +483,7 @@ impl Renderer {
                     count: None,
                 },
                 Self::plain_texture_entry(3),
+                Self::plain_texture_entry(4),
             ],
         });
         let ink_params = device.create_buffer(&wgpu::BufferDescriptor {
@@ -562,6 +580,17 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
+        let trace_atlas = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("pen order atlas"),
+            size: wgpu::Extent3d { width: TRACE_ATLAS.0, height: TRACE_ATLAS.1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let trace_atlas_view = trace_atlas.create_view(&Default::default());
         let targets = Targets::new(
             &device,
             &ink_layout,
@@ -569,6 +598,7 @@ impl Renderer {
             &ink_sampler,
             &present_layout,
             &present_params,
+            &trace_atlas_view,
             &config,
             (1, 1),
         );
@@ -611,8 +641,13 @@ impl Renderer {
             targets,
             clock: Instant::now(),
             animation: (true, 1.0),
+            writing_speed: 500.0,
             animator: TextAnimator::default(),
             transition: None,
+            tracer: Tracer::new((1, 1), TRACE_ATLAS),
+            traced_font: (String::new(), 0),
+            trace_atlas,
+            trace_atlas_view,
             controls_hover: false,
             font_system,
             swash_cache,
@@ -661,17 +696,106 @@ impl Renderer {
             &self.ink_sampler,
             &self.present_layout,
             &self.present_params,
+            &self.trace_atlas_view,
             &self.config,
             grid,
         );
+    }
+
+    /// Starts the pen-path atlas over when the glyphs would come out
+    /// different: another cell size (zoom, scale) or another font.
+    fn reset_tracer_if_needed(&mut self, theme: &Theme) {
+        let slot = (self.cell_width.ceil() as u32 + 2, self.cell_height.ceil() as u32);
+        let font = (theme.font_family.clone(), theme.font_weight);
+        if slot != self.tracer.slot_size || font != self.traced_font {
+            self.tracer = Tracer::new(slot, TRACE_ATLAS);
+            self.traced_font = font;
+        }
+    }
+
+    /// Rasterizes `key` exactly as the terminal draws it and uploads its pen
+    /// order to `slot`. Returns false if the glyph has no ink (a space).
+    fn trace_glyph(&mut self, theme: &Theme, key: GlyphKey, slot: u32) -> bool {
+        let (w, h) = self.tracer.slot_size;
+        let metrics = self.metrics(theme);
+        let mut buffer = Buffer::new(&mut self.font_system, metrics);
+        let mut attrs = Attrs::new().family(Family::Name(&theme.font_family)).weight(Weight(key.weight));
+        if key.italic {
+            attrs = attrs.style(Style::Italic);
+        }
+        {
+            let mut b = buffer.borrow_with(&mut self.font_system);
+            b.set_wrap(Wrap::None);
+            b.set_size(Some(w as f32 * 4.0), Some(h as f32 * 2.0));
+            b.set_text(&key.c.to_string(), &attrs, Shaping::Advanced, None);
+            b.shape_until_scroll(false);
+        }
+        // Same placement rule glyphon uses, relative to the cell's corner;
+        // one pixel of margin on the left for glyphs that overhang.
+        let mut alpha = vec![0u8; (w * h) as usize];
+        let glyphs: Vec<_> = buffer
+            .layout_runs()
+            .flat_map(|run| {
+                let line_y = run.line_y.round() as i32;
+                run.glyphs.iter().map(move |g| {
+                    let physical = g.physical((0.0, 0.0), 1.0);
+                    (physical.cache_key, physical.x, line_y + physical.y)
+                })
+            })
+            .collect();
+        for (cache_key, gx0, gy0) in glyphs {
+            {
+                let Some(image) = self.swash_cache.get_image_uncached(&mut self.font_system, cache_key)
+                else {
+                    continue;
+                };
+                let p = image.placement;
+                let x0 = gx0 + p.left + 1;
+                let y0 = gy0 - p.top;
+                let stride = match image.content {
+                    glyphon::SwashContent::Mask => 1,
+                    _ => 4,
+                };
+                for gy in 0..p.height as i32 {
+                    for gx in 0..p.width as i32 {
+                        let (x, y) = (x0 + gx, y0 + gy);
+                        if x < 0 || y < 0 || x >= w as i32 || y >= h as i32 {
+                            continue;
+                        }
+                        let i = ((gy * p.width as i32 + gx) as usize) * stride;
+                        let a = if stride == 1 { image.data[i] } else { image.data[i + 3] };
+                        let o = &mut alpha[(y as u32 * w + x as u32) as usize];
+                        *o = (*o).max(a);
+                    }
+                }
+            }
+        }
+        let order = trace::pen_order(&alpha, w as usize, h as usize);
+        if order.iter().all(|&v| v == 0) {
+            return false;
+        }
+        let (ox, oy) = self.tracer.origin(slot);
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.trace_atlas,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: ox, y: oy, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &order,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w), rows_per_image: Some(h) },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        true
     }
 
     fn now(&self) -> f32 {
         self.clock.elapsed().as_secs_f32()
     }
 
-    pub fn set_animation(&mut self, enabled: bool, speed: f32) {
+    pub fn set_animation(&mut self, enabled: bool, speed: f32, writing_speed: f32) {
         self.animation = (enabled, speed.clamp(0.1, 10.0));
+        self.writing_speed = writing_speed;
     }
 
     /// Reveals the first frame over a solid colour (the window opening).
@@ -976,9 +1100,16 @@ impl Renderer {
         let block_cursor = cursor_shape == CursorShape::Block && cursor_line >= 0;
         let selection = content.selection;
 
-        // What each cell shows, for the writing animation.
+        // What each cell shows, for the writing animation, and the pen path
+        // (atlas slot) to write it with.
         let (columns, lines) = (self.targets.grid.0 as usize, self.targets.grid.1 as usize);
         let mut chars = vec![' '; columns * lines];
+        let mut slots = vec![0.0f32; columns * lines];
+        self.reset_tracer_if_needed(theme);
+        let regular = self.weight_for(&theme.font_family, theme.font_weight);
+        // Bold cells use the bold face; a theme that is already bold has no
+        // heavier face to go to, and synthesized weight just blots the ink.
+        let bold = self.weight_for(&theme.font_family, theme.font_weight.max(700));
 
         // Collect runs of identically styled text: (line, text, color, flags).
         let mut runs: Vec<(usize, String, [u8; 3], Flags)> = Vec::new();
@@ -994,7 +1125,24 @@ impl Renderer {
                 continue;
             }
             if line < lines && col < columns && !flags.contains(Flags::HIDDEN) {
-                chars[line * columns + col] = cell_char(indexed.cell.c);
+                let c = cell_char(indexed.cell.c);
+                chars[line * columns + col] = c;
+                if self.animation.0 && c != ' ' && boxdraw::pieces(c, 1.0, 1.0).is_none() {
+                    let key = GlyphKey {
+                        c,
+                        weight: if flags.contains(Flags::BOLD) { bold } else { regular },
+                        italic: flags.contains(Flags::ITALIC),
+                    };
+                    slots[line * columns + col] = match self.tracer.slot(key) {
+                        Slot::Ready(slot) => slot as f32,
+                        Slot::New(slot) if self.trace_glyph(theme, key, slot) => slot as f32,
+                        Slot::New(_) => {
+                            self.tracer.forget(key);
+                            0.0
+                        }
+                        Slot::None => 0.0,
+                    };
+                }
             }
 
             let mut fg = resolve(theme, indexed.cell.fg, theme.ink);
@@ -1090,24 +1238,27 @@ impl Renderer {
         self.layout_notice(theme);
 
         let now = self.now();
-        let births = self.animator.update(columns, &chars, now, self.animation.0);
+        let writing = Writing {
+            enabled: self.animation.0,
+            speed: self.writing_speed,
+            max_duration: MAX_WRITE / self.animation.1,
+            instant: term.mode().contains(TermMode::ALT_SCREEN),
+        };
+        let births = self.animator.update(columns, &chars, now, writing);
         if births.len() == columns * lines {
+            let cells: Vec<[f32; 2]> = births.iter().zip(&slots).map(|(&b, &s)| [b, s]).collect();
             self.queue.write_texture(
                 self.targets.births.as_image_copy(),
-                bytemuck::cast_slice(&births),
+                bytemuck::cast_slice(&cells),
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(columns as u32 * 4),
+                    bytes_per_row: Some(columns as u32 * 8),
                     rows_per_image: Some(lines as u32),
                 },
                 wgpu::Extent3d { width: columns as u32, height: lines as u32, depth_or_array_layers: 1 },
             );
         }
 
-        let regular = self.weight_for(&theme.font_family, theme.font_weight);
-        // Bold cells use the bold face; a theme that is already bold has no
-        // heavier face to go to, and synthesized weight just blots the ink.
-        let bold = self.weight_for(&theme.font_family, theme.font_weight.max(700));
         let family = Family::Name(&theme.font_family);
         let spans = runs.iter().map(|(_, text, [r, g, b], flags)| {
             let weight = if flags.contains(Flags::BOLD) { bold } else { regular };
@@ -1230,7 +1381,9 @@ impl Renderer {
             cell: [self.cell_width, self.cell_height],
             grid_size: [self.targets.grid.0 as f32, self.targets.grid.1 as f32],
             write_time: if self.animation.0 { WRITE_TIME / self.animation.1 } else { 0.0 },
-            _pad: 0.0,
+            atlas_columns: self.tracer.columns() as f32,
+            slot_size: [self.tracer.slot_size.0 as f32, self.tracer.slot_size.1 as f32],
+            _pad: [0.0; 2],
         };
         self.queue
             .write_buffer(&self.ink_params, 0, bytemuck::bytes_of(&ink));

@@ -2,17 +2,33 @@
 //!
 //! - `TextAnimator` remembers when each visible cell was last written, so the
 //!   ink shader can sweep new characters in with the brush and let their bleed
-//!   spread as they dry. Text that merely moved (scrolling) keeps its age, and
-//!   big repaints (clear, a full-screen app redrawing) appear at once instead of
-//!   animating the whole screen.
+//!   spread as they dry. Output arriving together is written out in reading
+//!   order, left to right and line by line, at the writing speed. Text that
+//!   merely moved (scrolling) keeps its age, and repaints (a full-screen app
+//!   redrawing over its own text) appear at once.
 //! - `Transition` is a brush reveal of the whole window: on startup, and
 //!   between the light and dark variants.
 
 /// Birth time far enough in the past that the cell counts as dry.
 pub const SETTLED: f32 = -1.0e6;
 
-/// More than this share of cells changing at once is a repaint, not writing.
+/// More than this share of cells being overwritten at once is a repaint.
 const REPAINT_SHARE: f32 = 0.33;
+/// A line break pauses the pen for this many characters' worth of time.
+const LINE_PAUSE: f32 = 3.0;
+
+/// How output is written.
+#[derive(Clone, Copy, Debug)]
+pub struct Writing {
+    pub enabled: bool,
+    /// Characters per second when several arrive together.
+    pub speed: f32,
+    /// The longest one batch of output may take, so the terminal never lags
+    /// far behind the program: big outputs are written faster.
+    pub max_duration: f32,
+    /// Full-screen apps (vim, htop, ...): no writing, everything at once.
+    pub instant: bool,
+}
 
 #[derive(Default)]
 pub struct TextAnimator {
@@ -29,11 +45,12 @@ struct Row {
 
 impl TextAnimator {
     /// Takes the visible grid (`rows` of `columns` chars, row-major) and the
-    /// current time; returns each cell's birth time, row-major.
-    pub fn update(&mut self, columns: usize, chars: &[char], now: f32, enabled: bool) -> Vec<f32> {
+    /// current time; returns each cell's birth time, row-major. Births may lie
+    /// in the future: that cell is waiting for the pen to reach it.
+    pub fn update(&mut self, columns: usize, chars: &[char], now: f32, writing: Writing) -> Vec<f32> {
         let lines = chars.len() / columns.max(1);
         let current: Vec<&[char]> = chars.chunks(columns.max(1)).take(lines).collect();
-        let fresh = !enabled || self.columns != columns || self.rows.is_empty();
+        let fresh = !writing.enabled || self.columns != columns || self.rows.is_empty();
 
         let mut rows: Vec<Row> = current
             .iter()
@@ -46,30 +63,39 @@ impl TextAnimator {
 
         if !fresh {
             let shift = scroll_shift(&self.rows, &rows);
-            let mut changed = 0usize;
+            // New ink, in reading order, and how much of it overwrote text.
+            let mut written: Vec<(usize, usize)> = Vec::new();
+            let mut overwritten = 0usize;
             for (i, row) in rows.iter_mut().enumerate() {
                 let before = self.rows.get(i + shift);
                 for col in 0..columns {
                     let c = row.chars[col];
-                    match before {
-                        Some(prev) if prev.chars.get(col) == Some(&c) => {
-                            row.births[col] = prev.births[col];
-                        }
-                        _ if c == ' ' => {}
-                        _ => {
-                            row.births[col] = now;
-                            changed += 1;
+                    let old = before.and_then(|prev| prev.chars.get(col).copied());
+                    if old == Some(c) {
+                        row.births[col] = before.map_or(SETTLED, |prev| prev.births[col]);
+                    } else if c != ' ' {
+                        written.push((i, col));
+                        if old.is_some_and(|o| o != ' ') {
+                            overwritten += 1;
                         }
                     }
                 }
             }
-            if changed as f32 > (columns * lines) as f32 * REPAINT_SHARE {
-                for row in &mut rows {
-                    for (b, &c) in row.births.iter_mut().zip(&row.chars) {
-                        if *b == now && c != ' ' {
-                            *b = SETTLED;
-                        }
+
+            let repaint = overwritten as f32 > (columns * lines) as f32 * REPAINT_SHARE;
+            if !written.is_empty() && !writing.instant && !repaint {
+                // Pen time per character, counting a pause at each new line;
+                // squeezed when the batch would take longer than allowed.
+                let breaks = written.windows(2).filter(|w| w[0].0 != w[1].0).count() as f32;
+                let steps = written.len() as f32 - 1.0 + breaks * LINE_PAUSE;
+                let per = (1.0 / writing.speed.max(1.0)).min(writing.max_duration / steps.max(1.0));
+                let mut t = now;
+                for (k, &(i, col)) in written.iter().enumerate() {
+                    if k > 0 {
+                        let new_line = written[k - 1].0 != i;
+                        t += per * if new_line { 1.0 + LINE_PAUSE } else { 1.0 };
                     }
+                    rows[i].births[col] = t;
                 }
             }
         }
@@ -157,18 +183,20 @@ mod tests {
             .collect()
     }
 
+    const WRITE: Writing = Writing { enabled: true, speed: 100.0, max_duration: 1.5, instant: false };
+
     #[test]
     fn first_frame_is_settled() {
         let mut a = TextAnimator::default();
-        let births = a.update(4, &grid(&["ab", "cd"], 4), 1.0, true);
+        let births = a.update(4, &grid(&["ab", "cd"], 4), 1.0, WRITE);
         assert!(births.iter().all(|&b| b == SETTLED));
     }
 
     #[test]
     fn typed_characters_get_born() {
         let mut a = TextAnimator::default();
-        a.update(4, &grid(&["$ ", "", ""], 4), 1.0, true);
-        let births = a.update(4, &grid(&["$ l", "", ""], 4), 2.0, true);
+        a.update(4, &grid(&["$ ", "", ""], 4), 1.0, WRITE);
+        let births = a.update(4, &grid(&["$ l", "", ""], 4), 2.0, WRITE);
         assert_eq!(births[2], 2.0);
         assert_eq!(births[0], SETTLED);
     }
@@ -176,18 +204,51 @@ mod tests {
     #[test]
     fn scrolled_text_keeps_its_age() {
         let mut a = TextAnimator::default();
-        a.update(4, &grid(&["aaaa", "bbbb", "cccc"], 4), 1.0, true);
-        let b = a.update(4, &grid(&["bbbb", "cccc", "dd"], 4), 5.0, true);
-        // Rows that moved up are unchanged; only the new line is fresh.
+        a.update(4, &grid(&["aaaa", "bbbb", "cccc"], 4), 1.0, WRITE);
+        let b = a.update(4, &grid(&["bbbb", "cccc", "dd"], 4), 5.0, WRITE);
+        // Rows that moved up are unchanged; only the new line is written,
+        // left to right at 100 characters per second.
         assert!(b[..8].iter().all(|&x| x == SETTLED));
-        assert_eq!(&b[8..10], &[5.0, 5.0]);
+        assert_eq!(&b[8..10], &[5.0, 5.01]);
     }
 
     #[test]
     fn repaints_appear_at_once() {
         let mut a = TextAnimator::default();
-        a.update(4, &grid(&["aaaa", "bbbb", "cccc"], 4), 1.0, true);
-        let b = a.update(4, &grid(&["wxyz", "wxyz", "wxyz"], 4), 2.0, true);
+        a.update(4, &grid(&["aaaa", "bbbb", "cccc"], 4), 1.0, WRITE);
+        let b = a.update(4, &grid(&["wxyz", "wxyz", "wxyz"], 4), 2.0, WRITE);
+        assert!(b.iter().all(|&x| x == SETTLED));
+    }
+
+    #[test]
+    fn output_is_written_line_by_line() {
+        let mut a = TextAnimator::default();
+        a.update(4, &grid(&["$", "", ""], 4), 1.0, WRITE);
+        // `ls` printing two lines into blank rows at once.
+        let b = a.update(4, &grid(&["$", "ab", "cd"], 4), 2.0, WRITE);
+        let (a1, b1, c2, d2) = (b[4], b[5], b[8], b[9]);
+        assert_eq!(a1, 2.0);
+        assert!(a1 < b1 && b1 < c2 && c2 < d2, "reading order");
+        // A line break pauses the pen: more than one character's time.
+        assert!(c2 - b1 > (b1 - a1) * 2.0);
+    }
+
+    #[test]
+    fn big_output_is_squeezed_and_apps_are_instant() {
+        let mut a = TextAnimator::default();
+        let cols = 80;
+        a.update(cols, &grid(&["", "", "", ""], cols), 1.0, WRITE);
+        let full = "x".repeat(80);
+        let lines = [full.as_str(); 4];
+        let b = a.update(cols, &grid(&lines, cols), 2.0, WRITE);
+        // 320 characters at 100/s would take 3.2 s; capped at 1.5 s.
+        let last = b.iter().copied().fold(SETTLED, f32::max);
+        assert!((last - 2.0 - 1.5).abs() < 1e-3, "{last}");
+
+        let mut a = TextAnimator::default();
+        a.update(4, &grid(&["", ""], 4), 1.0, WRITE);
+        let app = Writing { instant: true, ..WRITE };
+        let b = a.update(4, &grid(&["ab", "cd"], 4), 2.0, app);
         assert!(b.iter().all(|&x| x == SETTLED));
     }
 
