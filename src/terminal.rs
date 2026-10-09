@@ -9,6 +9,8 @@ use std::sync::Arc;
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
 use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Column, Line, Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::tty;
@@ -154,6 +156,63 @@ impl Terminal {
         }
     }
 
+    pub fn size(&self) -> GridSize {
+        self.size
+    }
+
+    pub fn set_focused(&self, focused: bool) {
+        let mut term = self.term.lock();
+        term.is_focused = focused;
+        if term.mode().contains(TermMode::FOCUS_IN_OUT) {
+            drop(term);
+            self.write(if focused { &b"\x1b[I"[..] } else { &b"\x1b[O"[..] });
+        }
+    }
+
+    /// Converts a viewport cell to a grid point (accounts for scrollback).
+    fn grid_point(term: &Term<Listener>, col: usize, line: usize) -> Point {
+        let offset = term.grid().display_offset() as i32;
+        Point::new(Line(line as i32 - offset), Column(col))
+    }
+
+    pub fn start_selection(&self, ty: SelectionType, col: usize, line: usize, right_half: bool) {
+        let mut term = self.term.lock();
+        let point = Self::grid_point(&term, col, line);
+        let side = if right_half { Side::Right } else { Side::Left };
+        term.selection = Some(Selection::new(ty, point, side));
+    }
+
+    pub fn update_selection(&self, col: usize, line: usize, right_half: bool) {
+        let mut term = self.term.lock();
+        let point = Self::grid_point(&term, col, line);
+        let side = if right_half { Side::Right } else { Side::Left };
+        if let Some(selection) = term.selection.as_mut() {
+            selection.update(point, side);
+        }
+    }
+
+    pub fn clear_selection(&self) {
+        self.term.lock().selection = None;
+    }
+
+    pub fn selection_text(&self) -> Option<String> {
+        self.term.lock().selection_to_string().filter(|s| !s.is_empty())
+    }
+
+    /// Whether the running program wants mouse events (vim, htop, tmux, ...).
+    pub fn mouse_mode(&self) -> bool {
+        self.mode().intersects(TermMode::MOUSE_MODE)
+    }
+
+    /// Reports a mouse event to the program. `button` is the xterm button
+    /// code (0 left, 1 middle, 2 right, 64/65 wheel) with modifier bits added,
+    /// `motion` marks drag/move reports.
+    pub fn report_mouse(&self, button: u8, col: usize, line: usize, pressed: bool, motion: bool) {
+        if let Some(bytes) = encode_mouse(self.mode(), button, col, line, pressed, motion) {
+            self.write(bytes);
+        }
+    }
+
     pub fn resize(&mut self, size: GridSize) {
         if size == self.size {
             return;
@@ -167,5 +226,59 @@ impl Terminal {
 impl Drop for Terminal {
     fn drop(&mut self) {
         let _ = self.sender.send(Msg::Shutdown);
+    }
+}
+
+/// xterm mouse report for `mode`, or `None` if the program did not ask for
+/// this kind of event.
+fn encode_mouse(
+    mode: TermMode,
+    button: u8,
+    col: usize,
+    line: usize,
+    pressed: bool,
+    motion: bool,
+) -> Option<Vec<u8>> {
+    if motion && !mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) {
+        return None;
+    }
+    let code = button + if motion { 32 } else { 0 };
+    let (x, y) = (col + 1, line + 1);
+    if mode.contains(TermMode::SGR_MOUSE) {
+        let end = if pressed { 'M' } else { 'm' };
+        Some(format!("\x1b[<{code};{x};{y}{end}").into_bytes())
+    } else {
+        // Legacy encoding: releases are button 3, and coordinates are single
+        // bytes offset by 32, so they cap at 223.
+        let code = if pressed { code } else { 3 + (code & !0b11) };
+        let byte = |v: usize| (32 + v.min(223)) as u8;
+        Some(vec![0x1b, b'[', b'M', 32 + code, byte(x), byte(y)])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sgr_press_and_release() {
+        let mode = TermMode::MOUSE_REPORT_CLICK | TermMode::SGR_MOUSE;
+        assert_eq!(encode_mouse(mode, 0, 4, 9, true, false).unwrap(), b"\x1b[<0;5;10M");
+        assert_eq!(encode_mouse(mode, 0, 4, 9, false, false).unwrap(), b"\x1b[<0;5;10m");
+    }
+
+    #[test]
+    fn legacy_release_is_button_three() {
+        let mode = TermMode::MOUSE_REPORT_CLICK;
+        assert_eq!(encode_mouse(mode, 2, 0, 0, true, false).unwrap(), vec![0x1b, b'[', b'M', 34, 33, 33]);
+        assert_eq!(encode_mouse(mode, 2, 0, 0, false, false).unwrap(), vec![0x1b, b'[', b'M', 35, 33, 33]);
+    }
+
+    #[test]
+    fn motion_needs_drag_or_motion_mode() {
+        let click_only = TermMode::MOUSE_REPORT_CLICK | TermMode::SGR_MOUSE;
+        assert!(encode_mouse(click_only, 0, 1, 1, true, true).is_none());
+        let drag = TermMode::MOUSE_DRAG | TermMode::SGR_MOUSE;
+        assert_eq!(encode_mouse(drag, 0, 1, 1, true, true).unwrap(), b"\x1b[<32;2;2M");
     }
 }

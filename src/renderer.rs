@@ -16,6 +16,7 @@ use glyphon::{
 };
 use winit::window::Window;
 
+use crate::boxdraw;
 use crate::terminal::GridSize;
 use crate::theme::Theme;
 
@@ -288,6 +289,17 @@ impl Renderer {
         self.cell_height
     }
 
+    /// Maps a window position (physical pixels) to a viewport cell, clamped
+    /// to the grid. Also says whether the point is in the cell's right half.
+    pub fn cell_at(&self, x: f64, y: f64, size: GridSize) -> (usize, usize, bool) {
+        let (pad, top) = self.padding();
+        let fx = ((x as f32 - pad) / self.cell_width).max(0.0);
+        let fy = ((y as f32 - top) / self.cell_height).max(0.0);
+        let col = (fx as usize).min(size.columns - 1);
+        let line = (fy as usize).min(size.lines - 1);
+        (col, line, fx.fract() >= 0.5)
+    }
+
     pub fn zoom_by(&mut self, factor: f32) {
         self.zoom = (self.zoom * factor).clamp(0.5, 3.0);
     }
@@ -443,10 +455,18 @@ impl Renderer {
         let cursor = content.cursor;
         let cursor_line = cursor.point.line.0 + content.display_offset as i32;
         let cursor_col = cursor.point.column.0;
-        let block_cursor = cursor.shape == CursorShape::Block && cursor_line >= 0;
+        // An unfocused window shows an outline instead of a solid block.
+        let cursor_shape = match cursor.shape {
+            CursorShape::Block if !term.is_focused => CursorShape::HollowBlock,
+            shape => shape,
+        };
+        let block_cursor = cursor_shape == CursorShape::Block && cursor_line >= 0;
+        let selection = content.selection;
 
         // Collect runs of identically styled text: (line, text, color, flags).
         let mut runs: Vec<(usize, String, [u8; 3], Flags)> = Vec::new();
+        // Decorations drawn above the cursor: underlines, box drawing.
+        let mut overlay: Vec<Rect> = Vec::new();
         self.rects.clear();
         for indexed in content.display_iter {
             let line = (indexed.point.line.0 + content.display_offset as i32) as usize;
@@ -475,20 +495,33 @@ impl Renderer {
             }
 
             let width = if flags.contains(Flags::WIDE_CHAR) { 2.0 } else { 1.0 };
+            let (x, y) = (cell_x(col), cell_y(line));
             if let Some(bg) = bg {
-                self.rects.push(Rect::new(cell_x(col), cell_y(line), cw * width, ch, bg, CELL_BG_ALPHA));
+                self.rects.push(Rect::new(x, y, cw * width, ch, bg, CELL_BG_ALPHA));
+            }
+            if selection.is_some_and(|s| s.contains(indexed.point)) {
+                let (rgb, alpha) = theme.selection;
+                self.rects.push(Rect::new(x, y, cw * width, ch, rgb, alpha));
             }
             if flags.contains(Flags::UNDERLINE) {
-                let y = cell_y(line) + ch * 0.86;
-                self.rects.push(Rect::new(cell_x(col), y, cw * width, (ch * 0.06).max(1.0), fg, 1.0));
+                let y = y + ch * 0.86;
+                overlay.push(Rect::new(x, y, cw * width, (ch * 0.06).max(1.0), fg, 1.0));
             }
             if flags.contains(Flags::STRIKEOUT) {
-                let y = cell_y(line) + ch * 0.5;
-                self.rects.push(Rect::new(cell_x(col), y, cw * width, (ch * 0.06).max(1.0), fg, 1.0));
+                let y = y + ch * 0.5;
+                overlay.push(Rect::new(x, y, cw * width, (ch * 0.06).max(1.0), fg, 1.0));
             }
+            let drawn = (!flags.contains(Flags::HIDDEN))
+                .then(|| boxdraw::pieces(indexed.cell.c, cw, ch))
+                .flatten();
 
             let mut ch_str = String::new();
-            if flags.contains(Flags::HIDDEN) {
+            if let Some(pieces) = drawn {
+                for (px, py, pw, ph, alpha) in pieces {
+                    overlay.push(Rect::new(x + px, y + py, pw, ph, fg, alpha));
+                }
+                ch_str.push(' ');
+            } else if flags.contains(Flags::HIDDEN) {
                 ch_str.push(' ');
             } else {
                 ch_str.push(indexed.cell.c);
@@ -513,18 +546,25 @@ impl Renderer {
         }
 
         // Cursor goes under the text so a block cursor can invert its cell.
-        if cursor_line >= 0 && cursor.shape != CursorShape::Hidden {
+        if cursor_line >= 0 && cursor_shape != CursorShape::Hidden {
             let (x, y) = (cell_x(cursor_col), cell_y(cursor_line as usize));
-            let rect = match cursor.shape {
-                CursorShape::Beam => Rect::new(x, y, (cw * 0.12).max(2.0), ch, theme.cursor, 1.0),
+            let c = theme.cursor;
+            let t = (cw * 0.1).max(1.0);
+            match cursor_shape {
+                CursorShape::Beam => self.rects.push(Rect::new(x, y, (cw * 0.12).max(2.0), ch, c, 1.0)),
                 CursorShape::Underline => {
-                    Rect::new(x, y + ch * 0.88, cw, (ch * 0.1).max(2.0), theme.cursor, 1.0)
+                    self.rects.push(Rect::new(x, y + ch * 0.88, cw, (ch * 0.1).max(2.0), c, 1.0))
                 }
-                CursorShape::HollowBlock => Rect::new(x, y, cw, ch, theme.cursor, 0.35),
-                _ => Rect::new(x, y, cw, ch, theme.cursor, 1.0),
-            };
-            self.rects.push(rect);
+                CursorShape::HollowBlock => self.rects.extend([
+                    Rect::new(x, y, cw, t, c, 1.0),
+                    Rect::new(x, y + ch - t, cw, t, c, 1.0),
+                    Rect::new(x, y, t, ch, c, 1.0),
+                    Rect::new(x + cw - t, y, t, ch, c, 1.0),
+                ]),
+                _ => self.rects.push(Rect::new(x, y, cw, ch, c, 1.0)),
+            }
         }
+        self.rects.extend(overlay);
 
         let family = Family::Name(theme.font_family);
         let spans = runs.iter().map(|(_, text, [r, g, b], flags)| {

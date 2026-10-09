@@ -9,6 +9,7 @@
 //!   oneprompt -e "command"    run a command through /bin/sh instead
 //!   ONEPROMPT_SNAPSHOT=dir    render every theme to dir/<theme>.png and exit
 
+mod boxdraw;
 mod input;
 mod renderer;
 mod terminal;
@@ -18,11 +19,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use alacritty_terminal::selection::SelectionType;
 use alacritty_terminal::term::TermMode;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
-use winit::keyboard::{Key, ModifiersState};
+use winit::keyboard::{Key, ModifiersKeyState, ModifiersState};
 use winit::window::{Window, WindowId};
 
 use renderer::Renderer;
@@ -43,10 +45,30 @@ struct App {
     themes: Vec<Theme>,
     current: usize,
     mods: ModifiersState,
+    /// Left Option acts as Meta; right Option still composes characters.
+    option_as_meta: bool,
     /// Leftover trackpad scroll, in pixels, below one line.
     scroll_px: f64,
-    cursor_y: f64,
+    mouse: Mouse,
 }
+
+#[derive(Default)]
+struct Mouse {
+    /// Pointer position in physical pixels.
+    x: f64,
+    y: f64,
+    /// Dragging out a selection with the left button.
+    selecting: bool,
+    /// Button code held down while the program receives mouse events.
+    reported_button: Option<u8>,
+    /// Last cell reported to the program, to avoid repeating motion events.
+    reported_cell: Option<(usize, usize)>,
+    /// For double/triple click: when, where, and how many so far.
+    last_click: Option<(Instant, (usize, usize), u8)>,
+}
+
+/// Clicks closer together than this count as a double/triple click.
+const MULTI_CLICK: Duration = Duration::from_millis(400);
 
 impl App {
     fn theme(&self) -> &Theme {
@@ -95,6 +117,11 @@ impl App {
                 }
                 self.relayout();
             }
+            "c" => {
+                if let Some(text) = self.terminal.as_ref().and_then(|t| t.selection_text()) {
+                    let _ = arboard::Clipboard::new().and_then(|mut c| c.set_text(text));
+                }
+            }
             "v" => {
                 let text = arboard::Clipboard::new().and_then(|mut c| c.get_text());
                 if let (Ok(text), Some(t)) = (text, &self.terminal) {
@@ -104,6 +131,93 @@ impl App {
             _ => return false,
         }
         true
+    }
+
+    /// xterm modifier bits for mouse reports.
+    fn mouse_mods(&self) -> u8 {
+        4 * self.mods.shift_key() as u8
+            + 8 * self.mods.alt_key() as u8
+            + 16 * self.mods.control_key() as u8
+    }
+
+    fn pointer_cell(&self) -> Option<(usize, usize, bool)> {
+        let (r, t) = (self.renderer.as_ref()?, self.terminal.as_ref()?);
+        Some(r.cell_at(self.mouse.x, self.mouse.y, t.size()))
+    }
+
+    fn on_mouse_button(&mut self, state: ElementState, button: MouseButton) {
+        let pressed = state == ElementState::Pressed;
+        // macOS drags through its (transparent) native title bar.
+        if pressed
+            && !cfg!(target_os = "macos")
+            && button == MouseButton::Left
+            && let Some(r) = &self.renderer
+            && self.mouse.y < renderer::TITLE_STRIP as f64 * r.window().scale_factor()
+        {
+            let _ = r.window().drag_window();
+            return;
+        }
+        let Some((col, line, right_half)) = self.pointer_cell() else { return };
+        let Some(t) = &self.terminal else { return };
+
+        // Programs that asked for the mouse get it; Shift bypasses that so
+        // you can still select text, as in other terminals.
+        if t.mouse_mode() && !self.mods.shift_key() {
+            let code = match button {
+                MouseButton::Left => 0,
+                MouseButton::Middle => 1,
+                MouseButton::Right => 2,
+                _ => return,
+            } + self.mouse_mods();
+            t.report_mouse(code, col, line, pressed, false);
+            self.mouse.reported_button = pressed.then_some(code);
+            self.mouse.reported_cell = Some((col, line));
+            return;
+        }
+
+        if button != MouseButton::Left {
+            return;
+        }
+        if !pressed {
+            self.mouse.selecting = false;
+            return;
+        }
+        let now = Instant::now();
+        let clicks = match self.mouse.last_click {
+            Some((at, cell, n)) if now - at < MULTI_CLICK && cell == (col, line) => n % 3 + 1,
+            _ => 1,
+        };
+        self.mouse.last_click = Some((now, (col, line), clicks));
+        let ty = match clicks {
+            1 => SelectionType::Simple,
+            2 => SelectionType::Semantic,
+            _ => SelectionType::Lines,
+        };
+        t.start_selection(ty, col, line, right_half);
+        self.mouse.selecting = true;
+        self.redraw();
+    }
+
+    fn on_mouse_move(&mut self) {
+        let Some((col, line, right_half)) = self.pointer_cell() else { return };
+        let Some(t) = &self.terminal else { return };
+        if self.mouse.selecting {
+            t.update_selection(col, line, right_half);
+            self.redraw();
+            return;
+        }
+        if !t.mouse_mode() || self.mouse.reported_cell == Some((col, line)) {
+            return;
+        }
+        self.mouse.reported_cell = Some((col, line));
+        match self.mouse.reported_button {
+            Some(code) => t.report_mouse(code, col, line, true, true),
+            // Plain motion with no button held (only in any-motion mode).
+            None if t.mode().contains(TermMode::MOUSE_MOTION) => {
+                t.report_mouse(3 + self.mouse_mods(), col, line, true, true)
+            }
+            None => {}
+        }
     }
 
     fn snapshot_themes(&mut self, dir: &std::path::Path) {
@@ -186,29 +300,34 @@ impl ApplicationHandler<UserEvent> for App {
                 self.relayout();
             }
             WindowEvent::ScaleFactorChanged { .. } => self.relayout(),
-            WindowEvent::ModifiersChanged(mods) => self.mods = mods.state(),
+            WindowEvent::ModifiersChanged(mods) => {
+                self.mods = mods.state();
+                self.option_as_meta = !cfg!(target_os = "macos")
+                    || mods.lalt_state() == ModifiersKeyState::Pressed;
+            }
+            WindowEvent::Focused(focused) => {
+                if let Some(t) = &self.terminal {
+                    t.set_focused(focused);
+                }
+                self.redraw();
+            }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 if self.shortcut(&event) {
                     return;
                 }
                 let Some(t) = &self.terminal else { return };
                 let app_cursor = t.mode().contains(TermMode::APP_CURSOR);
-                if let Some(bytes) = input::key_to_bytes(&event, self.mods, app_cursor) {
+                let bytes = input::key_to_bytes(&event, self.mods, self.option_as_meta, app_cursor);
+                if let Some(bytes) = bytes {
+                    t.clear_selection();
                     t.input(bytes);
                 }
             }
-            WindowEvent::CursorMoved { position, .. } => self.cursor_y = position.y,
-            // macOS drags through its (transparent) native title bar.
-            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. }
-                if !cfg!(target_os = "macos") =>
-            {
-                if let Some(r) = &self.renderer {
-                    let strip = renderer::TITLE_STRIP as f64 * r.window().scale_factor();
-                    if self.cursor_y < strip {
-                        let _ = r.window().drag_window();
-                    }
-                }
+            WindowEvent::CursorMoved { position, .. } => {
+                (self.mouse.x, self.mouse.y) = (position.x, position.y);
+                self.on_mouse_move();
             }
+            WindowEvent::MouseInput { state, button, .. } => self.on_mouse_button(state, button),
             WindowEvent::MouseWheel { delta, .. } => {
                 let (Some(r), Some(t)) = (&self.renderer, &self.terminal) else { return };
                 let line_px = r.cell_height() as f64;
@@ -221,7 +340,17 @@ impl ApplicationHandler<UserEvent> for App {
                         lines as i32
                     }
                 };
-                t.scroll(lines);
+                if t.mouse_mode() && lines != 0 {
+                    // Wheel buttons 64 (up) / 65 (down), one report per line.
+                    if let Some((col, line, _)) = self.pointer_cell() {
+                        let code = if lines > 0 { 64 } else { 65 } + self.mouse_mods();
+                        for _ in 0..lines.unsigned_abs() {
+                            t.report_mouse(code, col, line, true, false);
+                        }
+                    }
+                } else {
+                    t.scroll(lines);
+                }
                 self.redraw();
             }
             WindowEvent::RedrawRequested => {
@@ -276,8 +405,9 @@ fn main() {
         themes: theme::builtin(),
         current: 0,
         mods: ModifiersState::empty(),
+        option_as_meta: !cfg!(target_os = "macos"),
         scroll_px: 0.0,
-        cursor_y: 0.0,
+        mouse: Mouse::default(),
     };
     event_loop.run_app(&mut app).expect("run event loop");
 }
