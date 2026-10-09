@@ -7,7 +7,8 @@
 //!   merely moved (scrolling) keeps its age, and repaints (a full-screen app
 //!   redrawing over its own text) appear at once.
 //! - `Transition` is a brush reveal of the whole window: on startup, and
-//!   between the light and dark variants.
+//!   between the light and dark variants. Each one paints a `Brush` made up
+//!   at random, so no two reveals look alike.
 
 /// Birth time far enough in the past that the cell counts as dry.
 pub const SETTLED: f32 = -1.0e6;
@@ -143,31 +144,165 @@ fn scroll_shift(before: &[Row], now: &[Row]) -> usize {
 pub struct Transition {
     pub start: f32,
     pub duration: f32,
-    /// Where the reveal grows from, in 0..1 window coordinates.
-    pub origin: [f32; 2],
     /// What is being revealed over: a solid colour, or the previous frame.
     pub from: From,
-    /// How the brush uncovers the window (see `present.wgsl`).
-    pub style: Reveal,
-    /// Varies the brush shape, so no two reveals look the same.
-    pub shape: f32,
+    /// The brushwork that uncovers the window.
+    pub brush: Brush,
 }
 
-/// Ways the new look is brushed in.
+/// Most marks one brush can be made of (the shader's array size).
+pub const MAX_MARKS: usize = 8;
+
+/// One mark of a brush, in window space with x scaled by the aspect ratio
+/// (so a circle is round) and y running 0..1 down the window.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Reveal {
-    /// Grows from `origin` in ragged lobes.
-    Bloom = 0,
-    /// One broad stroke across the window, at some angle.
-    Sweep = 1,
-    /// A few horizontal strokes, top to bottom, alternating direction.
-    Bands = 2,
-    /// Several drops of ink landing and spreading into each other.
-    Drops = 3,
+pub struct Mark {
+    /// Where the brush touches down.
+    pub at: [f32; 2],
+    /// Stroke direction, radians (a drop ignores it).
+    pub angle: f32,
+    /// Half the stroke's width (0 for a drop).
+    pub width: f32,
+    /// When it touches down, and how fast it travels (strokes) or spreads
+    /// (drops), in arbitrary units: `Brush::norm` turns them into 0..1.
+    pub delay: f32,
+    pub speed: f32,
+    /// How much the stroke curves away from a straight line.
+    pub bend: f32,
+    pub drop: bool,
 }
 
-impl Reveal {
-    pub const ALL: [Reveal; 4] = [Reveal::Bloom, Reveal::Sweep, Reveal::Bands, Reveal::Drops];
+/// A reveal's brushwork: a few strokes and drops, the ink soaking outward
+/// from them until the window is covered, and how ragged its edge is.
+#[derive(Clone, Copy, Debug)]
+pub struct Brush {
+    pub marks: [Mark; MAX_MARKS],
+    pub count: usize,
+    /// How fast ink soaks outward past a stroke's edge.
+    pub soak: f32,
+    /// Edge raggedness: big lobes, torn chunks, bristle streaks, and the
+    /// size of the lobes.
+    pub lobes: f32,
+    pub chunks: f32,
+    pub bristles: f32,
+    pub lobe_scale: f32,
+    /// Seeds the edge noise.
+    pub shape: f32,
+    /// 1 / the latest any point is reached, so arrival times span 0..1.
+    pub norm: f32,
+}
+
+/// A small, fast random number generator (xorshift), enough for brushwork.
+pub struct Rng(u64);
+
+impl Rng {
+    pub fn new(seed: u64) -> Self {
+        Self(seed.max(1))
+    }
+
+    /// A number in 0..1.
+    pub fn unit(&mut self) -> f32 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        (self.0 >> 40) as f32 / (1u64 << 24) as f32
+    }
+
+    pub fn range(&mut self, lo: f32, hi: f32) -> f32 {
+        lo + (hi - lo) * self.unit()
+    }
+}
+
+impl Mark {
+    /// When this mark's ink reaches `p` (before normalising).
+    pub fn arrival(&self, p: [f32; 2], soak: f32) -> f32 {
+        let q = [p[0] - self.at[0], p[1] - self.at[1]];
+        if self.drop {
+            return self.delay + q[0].hypot(q[1]) / self.speed;
+        }
+        let (sin, cos) = self.angle.sin_cos();
+        let along = q[0] * cos + q[1] * sin;
+        let across = -q[0] * sin + q[1] * cos - self.bend * along * along;
+        // The tip passes `along` at its speed; beyond the stroke's sides or
+        // behind where it started, ink only gets there by soaking.
+        self.delay + along.max(0.0) / self.speed + ((across.abs() - self.width).max(0.0) + (-along).max(0.0)) / soak
+    }
+}
+
+impl Brush {
+    /// Makes up a brush for a window with this aspect ratio (width / height).
+    pub fn random(rng: &mut Rng, aspect: f32) -> Self {
+        let none = Mark { at: [0.0; 2], angle: 0.0, width: 0.0, delay: 0.0, speed: 1.0, bend: 0.0, drop: true };
+        let mut marks = [none; MAX_MARKS];
+        // Mostly a few strokes; sometimes one sweeping stroke, sometimes a
+        // flurry; now and then drops of ink as well, or only drops.
+        let strokes = match rng.unit() {
+            u if u < 0.12 => 0,
+            u if u < 0.35 => 1,
+            u if u < 0.6 => 2,
+            u if u < 0.8 => 3,
+            u if u < 0.92 => 4,
+            _ => 5,
+        };
+        let drops = if strokes == 0 { 2 + (rng.unit() * 3.0) as usize } else { (rng.unit() * 2.4) as usize };
+        let count = (strokes + drops).min(MAX_MARKS);
+        let mut delay = 0.0;
+        for (i, mark) in marks.iter_mut().take(count).enumerate() {
+            let drop = i >= strokes;
+            // Strokes start near an edge and head roughly across the window;
+            // drops land anywhere.
+            let at = if drop {
+                [rng.range(0.1, 0.9) * aspect, rng.range(0.1, 0.9)]
+            } else {
+                match (rng.unit() * 4.0) as u32 {
+                    0 => [rng.range(-0.05, 0.25) * aspect, rng.unit()],
+                    1 => [rng.range(0.75, 1.05) * aspect, rng.unit()],
+                    2 => [rng.unit() * aspect, rng.range(-0.05, 0.2)],
+                    _ => [rng.unit() * aspect, rng.range(0.8, 1.05)],
+                }
+            };
+            let centre = [0.5 * aspect - at[0], 0.5 - at[1]];
+            let angle = centre[1].atan2(centre[0]) + rng.range(-0.9, 0.9);
+            *mark = Mark {
+                at,
+                angle,
+                width: if drop { 0.0 } else { rng.range(0.06, 0.4) },
+                delay,
+                speed: if drop { rng.range(0.5, 1.2) } else { rng.range(0.9, 2.6) },
+                bend: if drop { 0.0 } else { rng.range(-0.7, 0.7) },
+                drop,
+            };
+            // Marks follow one another, sometimes overlapping in time.
+            delay += rng.range(0.0, 0.35);
+        }
+        let mut brush = Brush {
+            marks,
+            count,
+            soak: rng.range(0.45, 1.4),
+            lobes: rng.range(0.3, 0.8),
+            chunks: rng.range(0.06, 0.2),
+            bristles: rng.range(0.02, 0.1),
+            lobe_scale: rng.range(0.0022, 0.006),
+            shape: rng.unit() * 1000.0,
+            norm: 1.0,
+        };
+        // The latest point to be reached (sampled over the window) sets the
+        // time scale, so the reveal always finishes.
+        let mut latest: f32 = 1e-3;
+        for j in 0..=24 {
+            for i in 0..=32 {
+                let p = [i as f32 / 32.0 * aspect, j as f32 / 24.0];
+                latest = latest.max(brush.arrival(p));
+            }
+        }
+        brush.norm = 1.0 / latest;
+        brush
+    }
+
+    /// When the brush reaches `p`: the earliest of its marks.
+    pub fn arrival(&self, p: [f32; 2]) -> f32 {
+        self.marks[..self.count].iter().map(|m| m.arrival(p, self.soak)).fold(f32::INFINITY, f32::min)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -275,17 +410,35 @@ mod tests {
 
     #[test]
     fn transition_progress_is_eased_and_ends() {
-        let t = Transition {
-            start: 1.0,
-            duration: 2.0,
-            origin: [0.5, 1.0],
-            from: From::PreviousFrame,
-            style: Reveal::Bloom,
-            shape: 0.0,
-        };
+        let brush = Brush::random(&mut Rng::new(7), 1.6);
+        let t = Transition { start: 1.0, duration: 2.0, from: From::PreviousFrame, brush };
         assert_eq!(t.progress(1.0), 0.0);
         assert!(t.progress(2.0) > 0.5); // ease-out: past halfway at half time
         assert_eq!(t.progress(3.0), 1.0);
         assert!(t.done(3.0) && !t.done(2.9));
+    }
+
+    #[test]
+    fn every_brush_covers_the_window_and_differs() {
+        let mut rng = Rng::new(42);
+        let mut counts = std::collections::HashSet::new();
+        let mut first_marks = Vec::new();
+        for _ in 0..200 {
+            let aspect = rng.range(0.5, 2.5);
+            let brush = Brush::random(&mut rng, aspect);
+            assert!(brush.count >= 1 && brush.count <= MAX_MARKS);
+            // Normalised, every point is reached by the end (the corners too).
+            for p in [[0.0, 0.0], [aspect, 0.0], [0.0, 1.0], [aspect, 1.0], [aspect / 2.0, 0.5]] {
+                let t = brush.arrival(p) * brush.norm;
+                assert!((0.0..=1.0001).contains(&t), "{t}");
+            }
+            counts.insert(brush.count);
+            first_marks.push(brush.marks[0]);
+        }
+        // Many different compositions, never the same one twice.
+        assert!(counts.len() >= 5, "{counts:?}");
+        for (i, a) in first_marks.iter().enumerate() {
+            assert!(first_marks[i + 1..].iter().all(|b| b != a));
+        }
     }
 }

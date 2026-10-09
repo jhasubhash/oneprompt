@@ -51,9 +51,10 @@ light or dark palette.
   something is moving.
 
 The variant follows macOS light / dark mode and switches with it; Cmd+Shift+L flips it for the
-session (brushed in a different way each time: a bloom from an edge, one broad stroke,
-painted bands or spreading drops), and `appearance` in the settings pins one. Every session gets a new sheet of paper
-(`ONEPROMPT_SEED=<number>` pins one). The renderer still supports the earlier surfaces
+session, and `appearance` in the settings pins one. Each switch is brushed in with
+brushwork made up on the spot (a few strokes and drops of ink, soaking outward until the
+window is covered), so no two look alike. Every session, and every switch, gets a new sheet
+of paper (`seed` in the settings or `ONEPROMPT_SEED=<number>` pins one). The renderer still supports the earlier surfaces
 (cotton paper, chalkboard, flat) and control styles for themes to come.
 
 Rendering ink is a two-step process: text, line art and controls are drawn into an

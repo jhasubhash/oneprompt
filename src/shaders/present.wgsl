@@ -4,20 +4,20 @@
 // shape: big ragged lobes, bristle streaks running the way the brush moves,
 // and dry-brush grain at the edge, like ink paintings being uncovered.
 //
-// Each transition picks a style (how the brush travels) and a shape seed:
-//   0 bloom - grows from `origin`
-//   1 sweep - one broad stroke across the window at a random angle
-//   2 bands - a few horizontal strokes, top to bottom, alternating direction
-//   3 drops - several drops of ink landing one after another and spreading
+// The brushwork is made up at random for every transition (animation.rs,
+// `Brush`): a few strokes and drops, each reaching a point at some time; the
+// earliest of them reveals it, and ink soaks outward from them to cover the
+// rest. Raggedness, lobe size and bristles vary per transition too.
 
 struct Params {
     resolution: vec2<f32>,
-    origin: vec2<f32>,     // where the reveal grows from, 0..1
-    from_color: vec4<f32>, // rgb; w = 1 reveals over the colour, 0 over prev
     progress: f32,         // 0..1; >= 1 means no transition
-    seed: f32,
-    style: f32,            // see above
-    shape: f32,            // per-transition random seed
+    seed: f32,             // the paper's session seed
+    from_color: vec4<f32>, // rgb; w = 1 reveals over the colour, 0 over prev
+    edge: vec4<f32>,       // lobes, chunks, bristles, lobe size
+    info: vec4<f32>,       // marks, 1 / latest arrival, noise seed, soak speed
+    // Two per mark: (x, y, angle, half width), (delay, speed, bend, drop).
+    marks: array<vec4<f32>, 16>,
 };
 
 @group(0) @binding(0) var<uniform> u: Params;
@@ -63,49 +63,40 @@ fn fbm(p: vec2<f32>) -> f32 {
     return v;
 }
 
-// When the brush reaches this point (x, 0..1) and the way it is moving
-// there (yz), for the transition's style.
-fn arrival(uv: vec2<f32>, sp: vec2<f32>, aspect: f32) -> vec3<f32> {
-    let q = uv * vec2<f32>(aspect, 1.0);
-    let style = u32(u.style + 0.5);
-    let h = fract(sin(u.shape * 12.9898) * 43758.5453);
-    if (style == 1u) {
-        let angle = h * 6.2831853;
-        let dir = vec2<f32>(cos(angle), sin(angle));
-        // Where the window's corners fall along the stroke.
-        let c = vec4<f32>(0.0, dir.x * aspect, dir.y, dir.x * aspect + dir.y);
-        let lo = min(min(c.x, c.y), min(c.z, c.w));
-        let hi = max(max(c.x, c.y), max(c.z, c.w));
-        return vec3<f32>((dot(q, dir) - lo) / (hi - lo), dir);
-    }
-    if (style == 2u) {
-        let n = 3.0 + floor(h * 3.0);
-        // Band edges wander, as hand-painted strokes do.
-        let y = uv.y * n + (noise(sp * 0.004 + 7.0) - 0.5) * 0.5;
-        let band = clamp(floor(y), 0.0, n - 1.0);
-        let rightwards = (u32(band) % 2u) == 0u;
-        let x = select(1.0 - uv.x, uv.x, rightwards);
-        return vec3<f32>((band + x) / n, select(-1.0, 1.0, rightwards), 0.0);
-    }
-    if (style == 3u) {
-        var best = 1.0e3;
-        var dir = vec2<f32>(1.0, 0.0);
-        for (var i = 0; i < 4; i++) {
-            let k = u.shape + f32(i) * 7.31;
-            let at = vec2<f32>(0.1 + 0.8 * fract(sin(k * 3.17) * 43758.5), 0.1 + 0.8 * fract(sin(k * 5.71) * 24634.6));
-            let p = q - at * vec2<f32>(aspect, 1.0);
-            let t = length(p) / max(aspect, 1.0) * 0.9 + f32(i) * 0.08;
-            if (t < best) {
-                best = t;
-                dir = p / max(length(p), 1e-4);
-            }
+// When the brush reaches `q` (x scaled by the aspect ratio), 0..1; the way
+// the winning mark moves there, for the bristle streaks; and whether it is a
+// drop (whose edge has no bristles: radial streaks look like a burr).
+fn arrival(q: vec2<f32>) -> vec4<f32> {
+    var best = 1.0e6;
+    var dir = vec2<f32>(1.0, 0.0);
+    var drop = 0.0;
+    let count = u32(u.info.x + 0.5);
+    let soak = u.info.w;
+    for (var i = 0u; i < count; i++) {
+        let a = u.marks[2u * i];
+        let b = u.marks[2u * i + 1u];
+        let d = q - a.xy;
+        var t = 0.0;
+        var way = vec2<f32>(1.0, 0.0);
+        if (b.w > 0.5) {
+            // A drop spreads out in every direction.
+            t = b.x + length(d) / b.y;
+            way = d / max(length(d), 1e-4);
+        } else {
+            // A stroke: the tip passes `along` at its speed; past its sides,
+            // or behind where it started, ink arrives by soaking.
+            way = vec2<f32>(cos(a.z), sin(a.z));
+            let along = dot(d, way);
+            let across = dot(d, vec2<f32>(-way.y, way.x)) - b.z * along * along;
+            t = b.x + max(along, 0.0) / b.y + (max(abs(across) - a.w, 0.0) + max(-along, 0.0)) / soak;
         }
-        return vec3<f32>(best, dir);
+        if (t < best) {
+            best = t;
+            dir = way;
+            drop = b.w;
+        }
     }
-    let p = (uv - u.origin) * vec2<f32>(aspect, 1.0);
-    // Distance to the farthest corner, so the reveal always covers the window.
-    let far = length(max(abs(vec2<f32>(0.0, 0.0) - u.origin), abs(vec2<f32>(1.0, 1.0) - u.origin)) * vec2<f32>(aspect, 1.0));
-    return vec3<f32>(length(p) / far, p / max(length(p), 1e-4));
+    return vec4<f32>(best * u.info.y, dir, drop);
 }
 
 @fragment
@@ -119,19 +110,18 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let px = in.pos.xy;
     let uv = px / u.resolution;
     let aspect = u.resolution.x / u.resolution.y;
-    let sp = px + vec2<f32>(fract((u.seed + u.shape) * 0.173) * 500.0, fract((u.seed + u.shape) * 0.311) * 500.0);
-    let a = arrival(uv, sp, aspect);
+    let shape = u.info.z;
+    let sp = px + vec2<f32>(fract((u.seed + shape) * 0.173) * 500.0, fract((u.seed + shape) * 0.311) * 500.0);
+    let a = arrival(uv * vec2<f32>(aspect, 1.0));
     let d = a.x;
     let dir = a.yz;
-    // Strokes that cross the window in parts (bands) need finer raggedness.
-    let rough = select(1.0, 0.35, u32(u.style + 0.5) == 2u);
 
     let along = vec2<f32>(dot(sp, dir), dot(sp, vec2<f32>(-dir.y, dir.x)));
     // Big lobes, then torn chunks along the edge, then a few short bristle
     // streaks running the way the brush moves, then grit.
-    let lobes = (fbm(sp * 0.0032) - 0.5) * 0.6 * rough;
-    let chunks = (fbm(sp * 0.018 + 31.0) - 0.5) * 0.14 * rough;
-    let bristles = (noise(along * vec2<f32>(0.02, 0.16)) - 0.5) * 0.06;
+    let lobes = (fbm(sp * u.edge.w) - 0.5) * u.edge.x;
+    let chunks = (fbm(sp * 0.018 + 31.0) - 0.5) * u.edge.y;
+    let bristles = (noise(along * vec2<f32>(0.02, 0.16)) - 0.5) * u.edge.z * (1.0 - 0.85 * a.w);
     let grit = (hash(px) - 0.5) * 0.015;
     let edge = d + lobes + chunks + bristles + grit;
 

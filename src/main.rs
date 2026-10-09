@@ -493,9 +493,14 @@ impl App {
     fn select_theme(&mut self) {
         let index = self.config.theme_index(&self.themes, self.system_dark, self.flip);
         if index != self.current {
-            // Brush the new look in over the old one, a different way each time.
+            // Brush the new look in over the old one, a different way each
+            // time, on a new sheet of paper unless the settings pin one.
+            let pinned = self.config.seed.is_some() || std::env::var_os("ONEPROMPT_SEED").is_some();
             if let Some(r) = self.renderer.as_mut() {
                 r.start_transition();
+                if !pinned {
+                    r.new_sheet();
+                }
             }
             self.current = index;
             self.relayout();
@@ -796,7 +801,7 @@ impl ApplicationHandler<UserEvent> for App {
             theme.ink
         };
         if let Some(r) = self.renderer.as_mut() {
-            r.start_intro(from, [0.5, 1.0]);
+            r.start_intro(from);
         }
         if let Some(err) = self.startup_error.take() {
             self.show_notice(format!("settings not applied: {err}"), true);

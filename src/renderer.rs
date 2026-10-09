@@ -86,12 +86,42 @@ struct InkParams {
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct PresentParams {
     resolution: [f32; 2],
-    origin: [f32; 2],
-    from_color: [f32; 4],
     progress: f32,
     seed: f32,
-    style: f32,
-    shape: f32,
+    from_color: [f32; 4],
+    /// Edge raggedness: lobes, chunks, bristles, lobe size.
+    edge: [f32; 4],
+    /// Number of marks, 1 / latest arrival, noise seed, soak speed.
+    info: [f32; 4],
+    /// Two per mark: (x, y, angle, half width), (delay, speed, bend, drop).
+    marks: [[f32; 4]; 2 * animation::MAX_MARKS],
+}
+
+impl PresentParams {
+    fn new(resolution: [f32; 2], seed: f32, transition: Option<(&Transition, f32)>) -> Self {
+        let mut params = Self {
+            resolution,
+            progress: 1.0,
+            seed,
+            from_color: [0.0; 4],
+            edge: [0.0; 4],
+            info: [0.0; 4],
+            marks: [[0.0; 4]; 2 * animation::MAX_MARKS],
+        };
+        let Some((t, now)) = transition else { return params };
+        let b = &t.brush;
+        params.progress = t.progress(now).min(0.999);
+        if let animation::From::Color([r, g, bl]) = t.from {
+            params.from_color = [r, g, bl, 1.0];
+        }
+        params.edge = [b.lobes, b.chunks, b.bristles, b.lobe_scale];
+        params.info = [b.count as f32, b.norm, b.shape, b.soak];
+        for (i, m) in b.marks[..b.count].iter().enumerate() {
+            params.marks[2 * i] = [m.at[0], m.at[1], m.angle, m.width];
+            params.marks[2 * i + 1] = [m.delay, m.speed, m.bend, if m.drop { 1.0 } else { 0.0 }];
+        }
+        params
+    }
 }
 
 /// Seconds to brush one character in, at animation speed 1.
@@ -306,7 +336,8 @@ pub struct Renderer {
     harmonize: bool,
     animator: TextAnimator,
     transition: Option<Transition>,
-    last_reveal: Option<animation::Reveal>,
+    /// Makes up the brushwork for reveals.
+    rng: animation::Rng,
     /// Pen paths for the writing animation (see trace.rs).
     tracer: Tracer,
     /// Font the traced glyphs were rasterized in; a change starts over.
@@ -687,7 +718,7 @@ impl Renderer {
             harmonize: true,
             animator: TextAnimator::default(),
             transition: None,
-            last_reveal: None,
+            rng: animation::Rng::new(random_seed()),
             tracer: Tracer::new((1, 1), TRACE_ATLAS),
             traced_font: (String::new(), 0),
             trace_atlas,
@@ -857,25 +888,29 @@ impl Renderer {
         self.writing_speed = writing_speed;
     }
 
+    /// Brushwork made up for this window: every reveal is different.
+    fn new_brush(&mut self) -> animation::Brush {
+        let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
+        animation::Brush::random(&mut self.rng, aspect)
+    }
+
     /// Reveals the first frame over a solid colour (the window opening).
-    pub fn start_intro(&mut self, from: [u8; 3], origin: [f32; 2]) {
+    pub fn start_intro(&mut self, from: [u8; 3]) {
         if !self.animation.0 {
             return;
         }
         let color = from.map(|c| c as f32 / 255.0);
+        let brush = self.new_brush();
         self.transition = Some(Transition {
             start: self.now(),
             duration: INTRO_TIME / self.animation.1,
-            origin,
             from: animation::From::Color(color),
-            style: animation::Reveal::Bloom,
-            shape: random_unit() * 1000.0,
+            brush,
         });
     }
 
     /// Reveals the next frames over the last one shown (light / dark
-    /// switch), in a brush style and shape picked at random, never the same
-    /// style twice in a row.
+    /// switch), with brushwork made up at random and a slightly varied pace.
     pub fn start_transition(&mut self) {
         if !self.animation.0 {
             return;
@@ -887,23 +922,13 @@ impl Renderer {
             wgpu::Extent3d { width: self.config.width, height: self.config.height, depth_or_array_layers: 1 },
         );
         self.queue.submit(Some(encoder.finish()));
-        let styles: Vec<_> = animation::Reveal::ALL.into_iter().filter(|&s| Some(s) != self.last_reveal).collect();
-        let style = styles[(random_unit() * styles.len() as f32) as usize % styles.len()];
-        self.last_reveal = Some(style);
-        // Blooms start from somewhere along an edge, mostly the bottom.
-        let origin = match (random_unit() * 4.0) as u32 {
-            0 => [random_unit(), 0.0],
-            1 => [0.0, random_unit()],
-            2 => [1.0, random_unit()],
-            _ => [random_unit(), 1.0],
-        };
+        let brush = self.new_brush();
+        let pace = self.rng.range(0.85, 1.2);
         self.transition = Some(Transition {
             start: self.now(),
-            duration: SWITCH_TIME / self.animation.1,
-            origin,
+            duration: SWITCH_TIME * pace / self.animation.1,
             from: animation::From::PreviousFrame,
-            style,
-            shape: random_unit() * 1000.0,
+            brush,
         });
     }
 
@@ -1027,6 +1052,11 @@ impl Renderer {
         if let Some(seed) = seed {
             self.seed = seed;
         }
+    }
+
+    /// A fresh sheet of paper: a new pattern of fibers, stains and splatter.
+    pub fn new_sheet(&mut self) {
+        self.seed = self.rng.range(0.0, 1000.0);
     }
 
     pub fn set_controls_hover(&mut self, hover: bool) -> bool {
@@ -1689,29 +1719,7 @@ impl Renderer {
         if self.transition.is_some_and(|t| t.done(now)) {
             self.transition = None;
         }
-        let present = match self.transition {
-            Some(t) => PresentParams {
-                resolution: [w as f32, h as f32],
-                origin: t.origin,
-                from_color: match t.from {
-                    animation::From::Color([r, g, b]) => [r, g, b, 1.0],
-                    animation::From::PreviousFrame => [0.0; 4],
-                },
-                progress: t.progress(now).min(0.999),
-                seed: self.seed,
-                style: t.style as u32 as f32,
-                shape: t.shape,
-            },
-            None => PresentParams {
-                resolution: [w as f32, h as f32],
-                origin: [0.5, 0.5],
-                from_color: [0.0; 4],
-                progress: 1.0,
-                seed: self.seed,
-                style: 0.0,
-                shape: 0.0,
-            },
-        };
+        let present = PresentParams::new([w as f32, h as f32], self.seed, self.transition.as_ref().map(|t| (t, now)));
         self.queue
             .write_buffer(&self.present_params, 0, bytemuck::bytes_of(&present));
 
@@ -1952,12 +1960,12 @@ struct TabSlot {
     clip: f32,
 }
 
-/// A number in 0..1 that differs every call (no need for a real RNG here).
-fn random_unit() -> f32 {
+/// A seed that differs every launch.
+fn random_seed() -> u64 {
     use std::hash::{BuildHasher, Hasher};
     let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
     hasher.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()));
-    (hasher.finish() >> 40) as f32 / (1u64 << 24) as f32
+    hasher.finish()
 }
 
 /// A character drawn on its own: its text, weight and italic.
