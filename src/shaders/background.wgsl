@@ -120,12 +120,18 @@ fn washi(px_in: vec2<f32>, uv: vec2<f32>) -> vec3<f32> {
     // Water stains: regions of a slow noise field. Pigment collects at the
     // edge where the water stopped: a thin, dark, slightly ragged tide line
     // with a faint wash inside.
-    let field = fbm(px * 0.0016 + vec2<f32>(3.7, 1.3)) + (noise(px * 0.08) - 0.5) * 0.012;
+    //
+    // Text starts on the left, so the stains keep mostly to the right: the
+    // field is tilted to rise across the sheet (tide lines are where it
+    // crosses a level), and what still reaches the left half fades out.
+    let tilt = (uv.x - 0.5) * 0.12;
+    let field = fbm(px * 0.0016 + vec2<f32>(3.7, 1.3)) + tilt + (noise(px * 0.08) - 0.5) * 0.012;
+    let keep = mix(0.2, 1.0, smoothstep(0.2, 0.62, uv.x));
     for (var k = 0; k < 3; k++) {
         let level = 0.58 + f32(k) * 0.045;
         let inside = field - level;
         let edge = smoothstep(-0.002, 0.0, inside);
-        shade += edge * (0.06 + 0.5 * exp(-max(inside, 0.0) * 260.0)) * stains;
+        shade += edge * (0.06 + 0.5 * exp(-max(inside, 0.0) * 260.0)) * stains * keep;
     }
 
     var color = mix(u.surface.rgb, u.surface_shade.rgb, clamp(shade, 0.0, 1.0));
