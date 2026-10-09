@@ -14,10 +14,13 @@ use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::tty;
+use alacritty_terminal::vte::ansi::Rgb;
 use winit::event_loop::EventLoopProxy;
 
+/// Answers a colour query: formats the reply for a given colour.
+pub type ColorReply = Arc<dyn Fn(Rgb) -> String + Sync + Send + 'static>;
+
 /// Events from the PTY thread to the UI thread.
-#[derive(Debug)]
 pub enum UserEvent {
     /// New output was parsed; redraw.
     Wakeup,
@@ -28,6 +31,9 @@ pub enum UserEvent {
     Exit,
     /// The settings file was saved (or created / deleted).
     ConfigChanged,
+    /// A program asked for a colour (OSC 4/10/11/12): palette index, or
+    /// 256/257/258 for foreground, background, cursor.
+    ColorRequest(usize, ColorReply),
 }
 
 #[derive(Clone)]
@@ -40,6 +46,7 @@ impl EventListener for Listener {
             Event::Title(title) => UserEvent::Title(title),
             Event::ResetTitle => UserEvent::Title("oneprompt".into()),
             Event::PtyWrite(text) => UserEvent::PtyWrite(text),
+            Event::ColorRequest(index, reply) => UserEvent::ColorRequest(index, reply),
             Event::Exit | Event::ChildExit(_) => UserEvent::Exit,
             _ => return,
         };

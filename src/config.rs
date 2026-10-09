@@ -64,6 +64,9 @@ pub struct Config {
     pub animation_speed: Option<f32>,
     /// Characters per second when output is written out line by line.
     pub writing_speed: Option<f32>,
+    /// Map colours programs pick themselves (truecolor, 256-colour) onto the
+    /// sheet as inks. Default on.
+    pub harmonize_colors: Option<bool>,
     /// Font settings for every theme (per-theme sections win).
     pub font_family: Option<String>,
     pub font_size: Option<f32>,
@@ -98,6 +101,11 @@ animation_speed = 1.0        # 2 = twice as fast, 0.5 = half speed
 # Output (ls, cat, ...) is written left to right, line by line, at this many
 # characters per second. Long output is sped up to finish within 1.5 seconds.
 writing_speed = 500
+
+# Programs that pick exact colours (Claude Code, bat, delta, ...) choose them
+# for a plain black screen. This keeps their hues but turns them into inks
+# that read on the sheet. false shows them exactly as sent.
+harmonize_colors = true
 
 # The light and dark variants, set to their built-in values; change any of them.
 # Fonts must be monospace. font_weight snaps to the weights the font has

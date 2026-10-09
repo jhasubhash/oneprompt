@@ -22,6 +22,17 @@ window controls. There is one for now, **Tsushima**, after the ink-painting cuts
 - **Dark**: the cutscenes inverted: a field of ink with the drawing showing through in
   parchment, the same brushwork, the same crimson seal.
 
+### Colours from programs
+
+The 16 ANSI colours come from the theme. Programs that pick exact colours instead
+(24-bit truecolor or the 256-colour cube: Claude Code, bat, delta, ...) choose them for a
+plain black screen, so on parchment their light greys vanish. oneprompt keeps their hue
+but moves their lightness into the range ink can have on the sheet (in OKLab, `color.rs`):
+dark inks on light parchment, light inks on the ink field; their backgrounds (prompt rows,
+highlighted lines) become thin translucent washes, so the paper shows through. `harmonize_colors = false` shows them exactly as sent. Colour queries (OSC 4, 10,
+11, 12) are answered with the theme's real colours, so programs that check can pick their
+light or dark palette.
+
 ### Ink animation
 
 - **Writing**: new characters are written by hand. Each glyph is traced along a pen path
@@ -101,6 +112,7 @@ appearance = "system"         # system | light | dark
 animation = true              # hand-written text, window reveals
 animation_speed = 1.0
 writing_speed = 500           # characters per second for output
+harmonize_colors = true       # program-chosen colours as inks on the sheet
 option_as_meta = "left"       # left | both | none
 seed = 11                     # pin the paper; unset = new sheet each session
 
@@ -129,6 +141,7 @@ src/config.rs               settings file: parsing, theme overrides, live reload
 src/renderer.rs             ink pass (text, line art, controls), main pass (surface, cells, ink composite), present pass
 src/animation.rs            per-cell write times (reading order, scroll-aware) and window reveals
 src/trace.rs                pen paths: per-glyph stroke order for the hand-writing reveal
+src/color.rs                program-chosen colours mapped onto the sheet (OKLab)
 src/theme.rs                themes as plain data
 src/shaders/background.wgsl procedural textures
 src/shaders/rect.wgsl       rectangles, brush discs, rings and crosses

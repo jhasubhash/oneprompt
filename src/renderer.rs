@@ -24,6 +24,7 @@ use winit::window::Window;
 
 use crate::animation::{self, TextAnimator, Transition, Writing};
 use crate::boxdraw;
+use crate::color;
 use crate::trace::{self, GlyphKey, Slot, Tracer};
 use crate::chrome::{self, Control};
 use crate::terminal::GridSize;
@@ -36,6 +37,10 @@ const PADDING: f32 = 24.0;
 pub const TITLE_STRIP: f32 = 30.0;
 /// Opacity of coloured cell backgrounds, so the texture still shows through.
 const CELL_BG_ALPHA: f32 = 0.85;
+/// Opacity of a program's own background colour, laid on as a thin wash so
+/// the paper (texture, stains, vignette) shows through it.
+const WASH_ALPHA_LIGHT: f32 = 0.13;
+const WASH_ALPHA_DARK: f32 = 0.1;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -284,6 +289,8 @@ pub struct Renderer {
     animation: (bool, f32),
     /// Characters per second when output is written out.
     writing_speed: f32,
+    /// Map program-chosen colours onto the sheet (see color.rs).
+    harmonize: bool,
     animator: TextAnimator,
     transition: Option<Transition>,
     /// Pen paths for the writing animation (see trace.rs).
@@ -642,6 +649,7 @@ impl Renderer {
             clock: Instant::now(),
             animation: (true, 1.0),
             writing_speed: 500.0,
+            harmonize: true,
             animator: TextAnimator::default(),
             transition: None,
             tracer: Tracer::new((1, 1), TRACE_ATLAS),
@@ -791,6 +799,10 @@ impl Renderer {
 
     fn now(&self) -> f32 {
         self.clock.elapsed().as_secs_f32()
+    }
+
+    pub fn set_harmonize(&mut self, harmonize: bool) {
+        self.harmonize = harmonize;
     }
 
     pub fn set_animation(&mut self, enabled: bool, speed: f32, writing_speed: f32) {
@@ -1150,6 +1162,20 @@ impl Renderer {
                 AnsiColor::Named(NamedColor::Background) => None,
                 color => Some(resolve(theme, color, theme.surface_rgb())),
             };
+            // Colours the program picked itself were chosen for a plain
+            // screen; bring them onto the sheet as inks and washes.
+            let mut bg_alpha = CELL_BG_ALPHA;
+            if self.harmonize {
+                if program_chosen(indexed.cell.fg) {
+                    fg = color::ink(fg, theme);
+                }
+                if program_chosen(indexed.cell.bg) && !flags.contains(Flags::INVERSE) {
+                    // A translucent tint of the program's hue, inked for the
+                    // sheet: the paper stays visible underneath.
+                    bg = bg.map(|b| color::ink(b, theme));
+                    bg_alpha = if theme.dark { WASH_ALPHA_DARK } else { WASH_ALPHA_LIGHT };
+                }
+            }
             if flags.contains(Flags::INVERSE) {
                 let old_bg = bg.unwrap_or(theme.surface_rgb());
                 bg = Some(fg);
@@ -1166,7 +1192,7 @@ impl Renderer {
             let width = if flags.contains(Flags::WIDE_CHAR) { 2.0 } else { 1.0 };
             let (x, y) = (cell_x(col), cell_y(line));
             if let Some(bg) = bg {
-                self.rects.push(Rect::new(x, y, cw * width, ch, bg, CELL_BG_ALPHA));
+                self.rects.push(Rect::new(x, y, cw * width, ch, bg, bg_alpha));
             }
             if selection.is_some_and(|s| s.contains(indexed.point)) {
                 let (rgb, alpha) = theme.selection;
@@ -1616,6 +1642,23 @@ fn session_seed() -> f32 {
 /// therefore drawn as blanks.
 fn cell_char(c: char) -> char {
     if c.is_control() { ' ' } else { c }
+}
+
+/// True-colour and 256-colour values: picked by the program, not the theme.
+fn program_chosen(color: AnsiColor) -> bool {
+    matches!(color, AnsiColor::Spec(_) | AnsiColor::Indexed(16..))
+}
+
+/// The theme's answer for a colour query (OSC 4 / 10 / 11 / 12): palette
+/// entries 0..=255, then foreground, background and cursor.
+pub fn query_color(theme: &Theme, index: usize) -> [u8; 3] {
+    match index {
+        0..=255 => indexed(theme, index as u8),
+        256 => theme.ink,
+        257 => theme.surface_rgb(),
+        258 => theme.cursor,
+        _ => theme.ink,
+    }
 }
 
 /// xterm's 256-colour table: 16 theme colours, a 6x6x6 cube, then greys.

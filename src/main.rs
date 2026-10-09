@@ -13,6 +13,7 @@
 mod animation;
 mod boxdraw;
 mod chrome;
+mod color;
 mod config;
 mod input;
 mod renderer;
@@ -214,6 +215,7 @@ impl App {
         let (enabled, speed, writing_speed) = config.animation();
         if let Some(r) = self.renderer.as_mut() {
             r.set_animation(enabled && self.snapshot_dir.is_none(), speed, writing_speed);
+            r.set_harmonize(config.harmonize_colors.unwrap_or(true));
         }
         // ONEPROMPT_SEED (used for screenshots) wins over the file.
         if std::env::var_os("ONEPROMPT_SEED").is_none()
@@ -485,6 +487,14 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Exit if self.snapshot_dir.is_some() => {}
             UserEvent::Exit => event_loop.exit(),
             UserEvent::ConfigChanged => self.reload_config(),
+            // Tell programs the theme's real colours, so the ones that check
+            // (to choose a light or dark palette) see the sheet they are on.
+            UserEvent::ColorRequest(index, reply) => {
+                let [r, g, b] = renderer::query_color(&self.themes[self.current], index);
+                if let Some(t) = &self.terminal {
+                    t.write(reply(alacritty_terminal::vte::ansi::Rgb { r, g, b }).into_bytes());
+                }
+            }
         }
     }
 
