@@ -1,24 +1,27 @@
-//! GPU side. Each frame is three layers in one pass:
-//! 1. the procedural background (paper, chalkboard, ...),
-//! 2. solid rectangles for cell backgrounds, underlines and the cursor,
-//! 3. the terminal grid as text, via glyphon.
+//! GPU side. Each frame is built in two passes:
+//! 1. Ink pass, into an offscreen "ink layer": everything drawn *with ink*
+//!    (text via glyphon, underlines, box drawing, the window controls).
+//! 2. Main pass, onto the window: the procedural surface (paper, washi,
+//!    chalkboard, ...), cell backgrounds / selection / cursor, then the ink
+//!    layer composited by `ink.wgsl`, which makes it bleed into the surface.
 
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
 
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::Term;
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor};
 use glyphon::{
-    Attrs, Buffer, Cache, Color, ColorMode, Family, FontSystem, Metrics, Resolution, Shaping,
+    fontdb, Attrs, Buffer, Cache, Color, ColorMode, Family, FontSystem, Metrics, Resolution, Shaping,
     Style, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight, Wrap,
 };
 use winit::window::Window;
 
 use crate::boxdraw;
+use crate::chrome::{self, Control};
 use crate::terminal::GridSize;
-use crate::theme::Theme;
+use crate::theme::{ControlStyle, Theme};
 
 /// Margin around the grid, in logical pixels.
 const PADDING: f32 = 24.0;
@@ -33,8 +36,21 @@ const CELL_BG_ALPHA: f32 = 0.85;
 struct Uniforms {
     surface: [f32; 4],
     surface_shade: [f32; 4],
+    accent: [f32; 4],
     resolution: [f32; 2],
-    time: f32,
+    seed: f32,
+    scale: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct InkParams {
+    resolution: [f32; 2],
+    bleed: f32,
+    grain: f32,
+    edge: f32,
+    seed: f32,
+    nib: f32,
     _pad: f32,
 }
 
@@ -50,13 +66,72 @@ struct RectGlobals {
 struct Rect {
     rect: [f32; 4],
     color: [f32; 4],
+    /// Shape kind, brush roughness, stroke width, seed (see rect.wgsl).
+    params: [f32; 4],
 }
+
+/// Shape kinds understood by rect.wgsl.
+const SHAPE_DISC: f32 = 1.0;
+const SHAPE_RING: f32 = 2.0;
+const SHAPE_CROSS: f32 = 3.0;
 
 impl Rect {
     fn new(x: f32, y: f32, w: f32, h: f32, rgb: [u8; 3], alpha: f32) -> Self {
         let [r, g, b] = rgb.map(|c| c as f32 / 255.0);
-        Self { rect: [x, y, w, h], color: [r, g, b, alpha] }
+        Self { rect: [x, y, w, h], color: [r, g, b, alpha], params: [0.0; 4] }
     }
+
+    /// A round shape centred on (cx, cy).
+    fn shape(kind: f32, cx: f32, cy: f32, radius: f32, rgb: [u8; 3], alpha: f32) -> Self {
+        let d = radius * 2.0 + 2.0;
+        let mut rect = Self::new(cx - d / 2.0, cy - d / 2.0, d, d, rgb, alpha);
+        rect.params[0] = kind;
+        rect
+    }
+
+    fn rough(mut self, roughness: f32, seed: f32) -> Self {
+        self.params[1] = roughness;
+        self.params[3] = seed;
+        self
+    }
+
+    fn stroke(mut self, width: f32) -> Self {
+        self.params[2] = width;
+        self
+    }
+}
+
+/// What is installed for a font family.
+#[derive(Clone, Debug)]
+struct FamilyInfo {
+    /// Weights of its upright faces, e.g. [400, 700] for Courier New.
+    weights: Vec<u16>,
+    monospaced: bool,
+}
+
+/// The installed weight closest to `wanted`. On a tie (550 between 400 and
+/// 700) heavier wins above 500 and lighter below, as in CSS font matching.
+fn snap_weight(weights: &[u16], wanted: u16) -> u16 {
+    weights
+        .iter()
+        .copied()
+        .min_by_key(|&w| {
+            let tie_break = if wanted >= 500 { w < wanted } else { w > wanted };
+            (w.abs_diff(wanted), tie_break)
+        })
+        .unwrap_or(wanted)
+}
+
+/// A short message shown in the title strip, next to the window controls.
+pub struct Notice {
+    pub text: String,
+    pub is_error: bool,
+}
+
+/// Offscreen target that ink is drawn into before compositing.
+struct InkLayer {
+    view: wgpu::TextureView,
+    bind_group: wgpu::BindGroup,
 }
 
 pub struct Renderer {
@@ -69,13 +144,26 @@ pub struct Renderer {
     background: wgpu::RenderPipeline,
     uniforms: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
-    started: Instant,
+    /// Varies the paper and ink patterns per session (see `session_seed`).
+    seed: f32,
 
     rect_pipeline: wgpu::RenderPipeline,
     rect_globals: wgpu::Buffer,
     rect_bind_group: wgpu::BindGroup,
     rect_buffer: wgpu::Buffer,
+    /// Drawn on the surface, under the ink: cell backgrounds, selection, cursor.
     rects: Vec<Rect>,
+    /// Drawn into the ink layer: underlines, box drawing, window controls.
+    ink_rects: Vec<Rect>,
+
+    ink_pipeline: wgpu::RenderPipeline,
+    ink_layout: wgpu::BindGroupLayout,
+    ink_params: wgpu::Buffer,
+    ink_sampler: wgpu::Sampler,
+    ink_layer: InkLayer,
+
+    /// Pointer is over the window controls: show their symbols.
+    controls_hover: bool,
 
     font_system: FontSystem,
     swash_cache: SwashCache,
@@ -83,6 +171,11 @@ pub struct Renderer {
     atlas: TextAtlas,
     text_renderer: TextRenderer,
     text: Buffer,
+    /// What the font database has for each family name we have asked about.
+    families: HashMap<String, Option<FamilyInfo>>,
+    /// Short message in the title strip ("settings applied", config errors).
+    notice: Option<Notice>,
+    notice_text: Buffer,
 
     /// Text size multiplier (Cmd + / Cmd -).
     zoom: f32,
@@ -128,7 +221,7 @@ impl Renderer {
             view_formats: vec![],
             color_space: Default::default(),
         };
-        surface.configure(&device, &config);
+        configure_surface(&surface, &device, &config);
 
         let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("uniform layout"),
@@ -204,7 +297,7 @@ impl Renderer {
                 buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Rect>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4],
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4],
                 })],
                 compilation_options: Default::default(),
             },
@@ -229,6 +322,84 @@ impl Renderer {
         });
         let rect_buffer = Self::create_rect_buffer(&device, 1024);
 
+        let ink_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ink layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let ink_params = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ink params"),
+            size: std::mem::size_of::<InkParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let ink_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("ink sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let ink_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/ink.wgsl"));
+        let ink_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("ink pipeline layout"),
+            bind_group_layouts: &[Some(&ink_layout)],
+            immediate_size: 0,
+        });
+        let ink_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("ink composite"),
+            layout: Some(&ink_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &ink_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &ink_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    // The ink layer holds premultiplied colour.
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let ink_layer =
+            Self::create_ink_layer(&device, &ink_layout, &ink_params, &ink_sampler, &config);
+
         let mut font_system = FontSystem::new();
         let swash_cache = SwashCache::new();
         let cache = Cache::new(&device);
@@ -238,6 +409,8 @@ impl Renderer {
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let mut text = Buffer::new(&mut font_system, Metrics::new(16.0, 22.0));
         text.borrow_with(&mut font_system).set_wrap(Wrap::None);
+        let mut notice_text = Buffer::new(&mut font_system, Metrics::new(12.0, 16.0));
+        notice_text.borrow_with(&mut font_system).set_wrap(Wrap::None);
 
         Self {
             window,
@@ -248,18 +421,28 @@ impl Renderer {
             background,
             uniforms,
             bind_group,
-            started: Instant::now(),
+            seed: session_seed(),
             rect_pipeline,
             rect_globals,
             rect_bind_group,
             rect_buffer,
             rects: Vec::new(),
+            ink_rects: Vec::new(),
+            ink_pipeline,
+            ink_layout,
+            ink_params,
+            ink_sampler,
+            ink_layer,
+            controls_hover: false,
             font_system,
             swash_cache,
             viewport,
             atlas,
             text_renderer,
             text,
+            families: HashMap::new(),
+            notice: None,
+            notice_text,
             zoom: 1.0,
             cell_width: 8.0,
             cell_height: 16.0,
@@ -275,6 +458,40 @@ impl Renderer {
         })
     }
 
+    fn create_ink_layer(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        params: &wgpu::Buffer,
+        sampler: &wgpu::Sampler,
+        config: &wgpu::SurfaceConfiguration,
+    ) -> InkLayer {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("ink layer"),
+            size: wgpu::Extent3d {
+                width: config.width,
+                height: config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ink layer"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: params.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(sampler) },
+            ],
+        });
+        InkLayer { view, bind_group }
+    }
+
     pub fn window(&self) -> &Window {
         &self.window
     }
@@ -282,7 +499,75 @@ impl Renderer {
     pub fn resize(&mut self, width: u32, height: u32) {
         self.config.width = width.max(1);
         self.config.height = height.max(1);
-        self.surface.configure(&self.device, &self.config);
+        configure_surface(&self.surface, &self.device, &self.config);
+        self.ink_layer = Self::create_ink_layer(
+            &self.device,
+            &self.ink_layout,
+            &self.ink_params,
+            &self.ink_sampler,
+            &self.config,
+        );
+    }
+
+    fn family_info(&mut self, family: &str) -> Option<FamilyInfo> {
+        if let Some(info) = self.families.get(family) {
+            return info.clone();
+        }
+        let faces: Vec<_> = self
+            .font_system
+            .db()
+            .faces()
+            .filter(|face| face.families.iter().any(|(name, _)| name.eq_ignore_ascii_case(family)))
+            .map(|face| (face.weight.0, face.style == fontdb::Style::Normal, face.monospaced))
+            .collect();
+        let info = (!faces.is_empty()).then(|| {
+            let upright: Vec<u16> = faces.iter().filter(|f| f.1).map(|f| f.0).collect();
+            let mut weights = if upright.is_empty() { faces.iter().map(|f| f.0).collect() } else { upright };
+            weights.sort_unstable();
+            weights.dedup();
+            FamilyInfo { weights, monospaced: faces.iter().any(|f| f.2) }
+        });
+        self.families.insert(family.to_string(), info.clone());
+        info
+    }
+
+    /// The weight to ask the text engine for. It only uses a font when the
+    /// font has exactly the requested weight; otherwise it silently falls back
+    /// to some other (often proportional) font and the grid stops lining up.
+    /// So snap to a weight the family really has.
+    fn weight_for(&mut self, family: &str, wanted: u16) -> u16 {
+        match self.family_info(family) {
+            Some(info) => snap_weight(&info.weights, wanted),
+            None => wanted,
+        }
+    }
+
+    /// Why a theme's font would not render as a proper grid, if it would not.
+    pub fn font_problem(&mut self, family: &str) -> Option<String> {
+        match self.family_info(family) {
+            None => Some(format!("font \"{family}\" is not installed, using a fallback")),
+            Some(info) if !info.monospaced => {
+                Some(format!("font \"{family}\" is not monospace, columns will not line up"))
+            }
+            Some(_) => None,
+        }
+    }
+
+    pub fn set_notice(&mut self, notice: Option<Notice>) {
+        self.notice = notice;
+    }
+
+    /// Changes the paper pattern; `None` keeps the current sheet.
+    pub fn set_seed(&mut self, seed: Option<f32>) {
+        if let Some(seed) = seed {
+            self.seed = seed;
+        }
+    }
+
+    pub fn set_controls_hover(&mut self, hover: bool) -> bool {
+        let changed = self.controls_hover != hover;
+        self.controls_hover = hover;
+        changed
     }
 
     pub fn cell_height(&self) -> f32 {
@@ -322,7 +607,7 @@ impl Renderer {
         {
             let mut probe = probe.borrow_with(&mut self.font_system);
             probe.set_wrap(Wrap::None);
-            let attrs = Attrs::new().family(Family::Name(theme.font_family));
+            let attrs = Attrs::new().family(Family::Name(&theme.font_family));
             probe.set_text("MMMMMMMMMM", &attrs, Shaping::Advanced, None);
             probe.shape_until_scroll(false);
         }
@@ -349,11 +634,11 @@ impl Renderer {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
-                self.surface.configure(&self.device, &self.config);
+                configure_surface(&self.surface, &self.device, &self.config);
                 frame
             }
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface.configure(&self.device, &self.config);
+                configure_surface(&self.surface, &self.device, &self.config);
                 return;
             }
             // Timeout, occluded window, ...: skip this frame.
@@ -465,9 +750,10 @@ impl Renderer {
 
         // Collect runs of identically styled text: (line, text, color, flags).
         let mut runs: Vec<(usize, String, [u8; 3], Flags)> = Vec::new();
-        // Decorations drawn above the cursor: underlines, box drawing.
+        // Decorations drawn in ink: underlines, box drawing.
         let mut overlay: Vec<Rect> = Vec::new();
         self.rects.clear();
+        self.ink_rects.clear();
         for indexed in content.display_iter {
             let line = (indexed.point.line.0 + content.display_offset as i32) as usize;
             let col = indexed.point.column.0;
@@ -524,7 +810,7 @@ impl Renderer {
             } else if flags.contains(Flags::HIDDEN) {
                 ch_str.push(' ');
             } else {
-                ch_str.push(indexed.cell.c);
+                ch_str.push(cell_char(indexed.cell.c));
                 if let Some(extra) = indexed.cell.zerowidth() {
                     ch_str.extend(extra);
                 }
@@ -564,14 +850,21 @@ impl Renderer {
                 _ => self.rects.push(Rect::new(x, y, cw, ch, c, 1.0)),
             }
         }
-        self.rects.extend(overlay);
+        self.ink_rects.extend(overlay);
+        self.layout_controls(theme, term.is_focused);
+        self.layout_notice(theme);
 
-        let family = Family::Name(theme.font_family);
+        let regular = self.weight_for(&theme.font_family, theme.font_weight);
+        // Bold cells use the bold face; a theme that is already bold has no
+        // heavier face to go to, and synthesized weight just blots the ink.
+        let bold = self.weight_for(&theme.font_family, theme.font_weight.max(700));
+        let family = Family::Name(&theme.font_family);
         let spans = runs.iter().map(|(_, text, [r, g, b], flags)| {
-            let mut attrs = Attrs::new().family(family).color(Color::rgb(*r, *g, *b));
-            if flags.contains(Flags::BOLD) {
-                attrs = attrs.weight(Weight::BOLD);
-            }
+            let weight = if flags.contains(Flags::BOLD) { bold } else { regular };
+            let mut attrs = Attrs::new()
+                .family(family)
+                .weight(Weight(weight))
+                .color(Color::rgb(*r, *g, *b));
             if flags.contains(Flags::ITALIC) {
                 attrs = attrs.style(Style::Italic);
             }
@@ -586,34 +879,142 @@ impl Renderer {
         text.shape_until_scroll(false);
     }
 
+    /// The notice, set in the theme's font, small, in the title strip.
+    fn layout_notice(&mut self, theme: &Theme) {
+        let Some(notice) = &self.notice else { return };
+        let scale = self.window.scale_factor() as f32;
+        // Errors in the theme's red, confirmations in a quiet ink.
+        let [r, g, b] = if notice.is_error { theme.palette[1] } else { theme.palette[8] };
+        let attrs = Attrs::new()
+            .family(Family::Name(&theme.font_family))
+            .color(Color::rgb(r, g, b));
+        let mut buffer = self.notice_text.borrow_with(&mut self.font_system);
+        buffer.set_metrics(Metrics::new(12.5 * scale, 16.0 * scale));
+        buffer.set_size(Some(self.config.width as f32), Some(20.0 * scale));
+        buffer.set_text(&notice.text, &attrs, Shaping::Advanced, None);
+        buffer.shape_until_scroll(false);
+    }
+
+    /// Top-left corner of the notice, just right of the window controls.
+    fn notice_origin(&self) -> (f32, f32) {
+        let scale = self.window.scale_factor() as f32;
+        let (x, cy, r) = chrome::geometry(Control::Zoom, scale);
+        (x + r + 14.0 * scale, cy - 8.0 * scale)
+    }
+
+    /// The window's close / minimize / zoom controls, in the theme's style.
+    fn layout_controls(&mut self, theme: &Theme, focused: bool) {
+        let scale = self.window.scale_factor() as f32;
+        // Like macOS: controls fade when the window is in the background.
+        let alpha = if focused || self.controls_hover { 1.0 } else { 0.45 };
+        let surface = theme.surface_rgb();
+        for (i, control) in chrome::CONTROLS.into_iter().enumerate() {
+            let (cx, cy, r) = chrome::geometry(control, scale);
+            let color = theme.controls.colors[i];
+            let shape = match theme.controls.style {
+                ControlStyle::Dot => Rect::shape(SHAPE_DISC, cx, cy, r, color, alpha),
+                ControlStyle::Brush => {
+                    Rect::shape(SHAPE_DISC, cx, cy, r, color, alpha).rough(0.16, i as f32 + 1.0)
+                }
+                ControlStyle::Ring => Rect::shape(SHAPE_RING, cx, cy, r, color, alpha)
+                    .stroke(1.6 * scale)
+                    .rough(0.08, i as f32 + 1.0),
+            };
+            self.ink_rects.push(shape);
+
+            if !self.controls_hover {
+                continue;
+            }
+            // Symbols: ring style draws them in the control's colour,
+            // filled styles cut them out in the surface colour.
+            let mark = if theme.controls.style == ControlStyle::Ring { color } else { surface };
+            let t = (1.3 * scale).max(1.0);
+            let arm = r * 0.5;
+            match control {
+                Control::Close => self
+                    .ink_rects
+                    .push(Rect::shape(SHAPE_CROSS, cx, cy, arm, mark, 0.9).stroke(t)),
+                Control::Minimize => {
+                    self.ink_rects.push(Rect::new(cx - arm, cy - t / 2.0, arm * 2.0, t, mark, 0.9))
+                }
+                Control::Zoom => self.ink_rects.extend([
+                    Rect::new(cx - arm, cy - t / 2.0, arm * 2.0, t, mark, 0.9),
+                    Rect::new(cx - t / 2.0, cy - arm, t, arm * 2.0, mark, 0.9),
+                ]),
+            }
+        }
+    }
+
     fn draw(&mut self, theme: &Theme, view: &wgpu::TextureView) {
         let (w, h) = (self.config.width, self.config.height);
+        let scale = self.window.scale_factor() as f32;
         let s = theme.surface;
         let d = theme.surface_shade;
+        let (accent, splatter) = theme.splatter;
+        let a = accent.map(|c| c as f32 / 255.0);
         let uniforms = Uniforms {
             surface: [s[0], s[1], s[2], theme.texture as u32 as f32],
             surface_shade: [d[0], d[1], d[2], theme.texture_strength],
+            accent: [a[0], a[1], a[2], splatter],
             resolution: [w as f32, h as f32],
-            time: self.started.elapsed().as_secs_f32(),
-            _pad: 0.0,
+            seed: self.seed,
+            scale,
         };
         self.queue
             .write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&uniforms));
         let globals = RectGlobals { resolution: [w as f32, h as f32], _pad: [0.0; 2] };
         self.queue
             .write_buffer(&self.rect_globals, 0, bytemuck::bytes_of(&globals));
+        let ink = InkParams {
+            resolution: [w as f32, h as f32],
+            bleed: theme.ink_style.bleed * scale,
+            grain: theme.ink_style.grain,
+            edge: theme.ink_style.edge,
+            seed: self.seed,
+            nib: theme.ink_style.nib * scale,
+            _pad: 0.0,
+        };
+        self.queue
+            .write_buffer(&self.ink_params, 0, bytemuck::bytes_of(&ink));
 
-        let needed = (self.rects.len() * std::mem::size_of::<Rect>()) as u64;
+        // Both rect lists share one buffer: surface rects, then ink rects.
+        let surface_count = self.rects.len() as u32;
+        let total = self.rects.len() + self.ink_rects.len();
+        let needed = (total * std::mem::size_of::<Rect>()) as u64;
         if needed > self.rect_buffer.size() {
-            self.rect_buffer = Self::create_rect_buffer(&self.device, self.rects.len().next_power_of_two());
+            self.rect_buffer = Self::create_rect_buffer(&self.device, total.next_power_of_two());
         }
-        if !self.rects.is_empty() {
+        if total > 0 {
+            let all: Vec<Rect> = self.rects.iter().chain(&self.ink_rects).copied().collect();
             self.queue
-                .write_buffer(&self.rect_buffer, 0, bytemuck::cast_slice(&self.rects));
+                .write_buffer(&self.rect_buffer, 0, bytemuck::cast_slice(&all));
         }
 
         self.viewport.update(&self.queue, Resolution { width: w, height: h });
         let (pad, top) = self.padding();
+        let bounds = TextBounds { left: 0, top: 0, right: w as i32, bottom: h as i32 };
+        let [r, g, b] = theme.ink;
+        let mut areas = vec![TextArea {
+            buffer: &self.text,
+            left: pad,
+            top,
+            scale: 1.0,
+            bounds,
+            default_color: Color::rgb(r, g, b),
+            custom_glyphs: &[],
+        }];
+        if self.notice.is_some() {
+            let (left, top) = self.notice_origin();
+            areas.push(TextArea {
+                buffer: &self.notice_text,
+                left,
+                top,
+                scale: 1.0,
+                bounds,
+                default_color: Color::rgb(r, g, b),
+                custom_glyphs: &[],
+            });
+        }
         self.text_renderer
             .prepare(
                 &self.device,
@@ -621,23 +1022,7 @@ impl Renderer {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                [TextArea {
-                    buffer: &self.text,
-                    left: pad,
-                    top,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: 0,
-                        top: 0,
-                        right: w as i32,
-                        bottom: h as i32,
-                    },
-                    default_color: {
-                        let [r, g, b] = theme.ink;
-                        Color::rgb(r, g, b)
-                    },
-                    custom_glyphs: &[],
-                }],
+                areas,
                 &mut self.swash_cache,
             )
             .expect("prepare text");
@@ -645,18 +1030,40 @@ impl Renderer {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
+        let attachment = |view, load| {
+            Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
+            })
+        };
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ink pass"),
+                color_attachments: &[attachment(
+                    &self.ink_layer.view,
+                    wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                )],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            if !self.ink_rects.is_empty() {
+                pass.set_pipeline(&self.rect_pipeline);
+                pass.set_bind_group(0, &self.rect_bind_group, &[]);
+                pass.set_vertex_buffer(0, self.rect_buffer.slice(..needed));
+                pass.draw(0..4, surface_count..total as u32);
+            }
+            self.text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)
+                .expect("render text");
+        }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
+                color_attachments: &[attachment(view, wgpu::LoadOp::Clear(wgpu::Color::BLACK))],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
@@ -666,16 +1073,16 @@ impl Renderer {
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.draw(0..3, 0..1);
 
-            if !self.rects.is_empty() {
+            if surface_count > 0 {
                 pass.set_pipeline(&self.rect_pipeline);
                 pass.set_bind_group(0, &self.rect_bind_group, &[]);
                 pass.set_vertex_buffer(0, self.rect_buffer.slice(..needed));
-                pass.draw(0..4, 0..self.rects.len() as u32);
+                pass.draw(0..4, 0..surface_count);
             }
 
-            self.text_renderer
-                .render(&self.atlas, &self.viewport, &mut pass)
-                .expect("render text");
+            pass.set_pipeline(&self.ink_pipeline);
+            pass.set_bind_group(0, &self.ink_layer.bind_group, &[]);
+            pass.draw(0..3, 0..1);
         }
         self.queue.submit(Some(encoder.finish()));
     }
@@ -708,6 +1115,54 @@ fn resolve(theme: &Theme, color: AnsiColor, default: [u8; 3]) -> [u8; 3] {
     }
 }
 
+/// Configures the surface and pins its colour space to sRGB.
+///
+/// wgpu's `SurfaceColorSpace::Srgb` leaves the Metal layer's colorspace unset
+/// (nil), i.e. untagged. On wide-gamut displays macOS then colour-matches some
+/// frames and passes others through untouched, so the whole window shifts
+/// tint/brightness from frame to frame (seen while typing, when frames are
+/// presented in quick succession). Tagging the layer as sRGB makes every
+/// frame go through the same conversion. Configuring resets the tag, so this
+/// runs after every configure.
+fn configure_surface(
+    surface: &wgpu::Surface<'static>,
+    device: &wgpu::Device,
+    config: &wgpu::SurfaceConfiguration,
+) {
+    surface.configure(device, config);
+    #[cfg(target_os = "macos")]
+    // SAFETY: the hal surface is only used to set a layer property, on the
+    // thread that owns the window, while no frame is acquired.
+    unsafe {
+        use objc2_core_graphics::{CGColorSpace, kCGColorSpaceSRGB};
+        if let Some(hal) = surface.as_hal::<wgpu::hal::api::Metal>() {
+            let srgb = CGColorSpace::with_name(Some(kCGColorSpaceSRGB));
+            hal.render_layer().lock().setColorspace(srgb.as_deref());
+        }
+    }
+}
+
+/// A new seed for every launch, so each session gets a different sheet of
+/// paper. `ONEPROMPT_SEED` pins it (handy for comparing screenshots).
+fn session_seed() -> f32 {
+    if let Some(seed) = std::env::var("ONEPROMPT_SEED").ok().and_then(|s| s.parse().ok()) {
+        return seed;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    (nanos % 100_000) as f32 / 100.0
+}
+
+/// The character to lay out for a cell. Each cell must advance exactly one
+/// column, but the grid keeps a literal `\t` where a tab started (so copying
+/// preserves it), and the text engine would expand that to its own tab width
+/// and push the rest of the line out of the grid. Control characters are
+/// therefore drawn as blanks.
+fn cell_char(c: char) -> char {
+    if c.is_control() { ' ' } else { c }
+}
+
 /// xterm's 256-colour table: 16 theme colours, a 6x6x6 cube, then greys.
 fn indexed(theme: &Theme, i: u8) -> [u8; 3] {
     match i {
@@ -726,4 +1181,28 @@ fn indexed(theme: &Theme, i: u8) -> [u8; 3] {
 
 fn mix(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
     [0, 1, 2].map(|i| (a[i] as f32 * (1.0 - t) + b[i] as f32 * t).round() as u8)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn control_characters_take_one_blank_cell() {
+        assert_eq!(cell_char('\t'), ' ');
+        assert_eq!(cell_char('\u{7f}'), ' ');
+        assert_eq!(cell_char('a'), 'a');
+        assert_eq!(cell_char('─'), '─');
+    }
+
+    #[test]
+    fn weights_snap_to_installed_faces() {
+        let courier = [400, 700];
+        assert_eq!(snap_weight(&courier, 100), 400);
+        assert_eq!(snap_weight(&courier, 450), 400);
+        assert_eq!(snap_weight(&courier, 550), 700); // tie above 500: heavier
+        assert_eq!(snap_weight(&courier, 900), 700);
+        assert_eq!(snap_weight(&[300, 500], 400), 300); // tie below 500: lighter
+        assert_eq!(snap_weight(&[], 550), 550);
+    }
 }

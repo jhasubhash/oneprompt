@@ -26,6 +26,8 @@ pub enum UserEvent {
     PtyWrite(String),
     /// The shell exited.
     Exit,
+    /// The settings file was saved (or created / deleted).
+    ConfigChanged,
 }
 
 #[derive(Clone)]

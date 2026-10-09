@@ -11,5 +11,12 @@ bytemuck = { version = "1", features = ["derive"] }
 glyphon = "0.12"
 png = "0.18"
 pollster = "0.4"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
 wgpu = "30"
 winit = "0.30"
+
+# Tag the Metal layer's colour space explicitly (see Renderer::tag_srgb).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-graphics = { version = "0.3", features = ["CGColorSpace"] }
+objc2-quartz-core = { version = "0.3", features = ["CALayer", "CAMetalLayer", "objc2-core-graphics"] }
