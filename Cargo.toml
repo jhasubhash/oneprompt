@@ -5,6 +5,8 @@ edition = "2024"
 description = "A GPU terminal that treats the background and fonts as first-class design surfaces"
 
 [dependencies]
+alacritty_terminal = "0.26"
+arboard = { version = "3", default-features = false }
 bytemuck = { version = "1", features = ["derive"] }
 glyphon = "0.12"
 png = "0.18"

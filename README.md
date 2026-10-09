@@ -10,35 +10,48 @@ an ink colour and a typeface, for example *ink on paper* or *chalk on slate*.
 
 ## Status
 
-Milestone 0, a rendering prototype:
+Milestone 1, a working terminal:
 
-- winit window + wgpu renderer
+- Your login shell in a PTY, parsed by `alacritty_terminal` (VT sequences, scrollback, alternate screen)
+- Grid rendering with glyphon / cosmic-text, one monospace font per theme
+- ANSI colours mapped to per-theme palettes ("inks" on paper, "chalks" on slate); 256-colour and true colour pass through
+- Bold, italic, underline, strikeout, inverse, dim; block, beam and underline cursors
 - Procedural backgrounds in WGSL (`src/shaders/background.wgsl`): paper fibers and grain, chalkboard smudges and dust, flat
-- Per-theme fonts via glyphon / cosmic-text (system fonts, fallback included)
-- A local line editor so you can type and see the feel. **There is no shell yet.**
+
+| Key | Action |
+|---|---|
+| Cmd+T | next theme |
+| Cmd+= / Cmd+- | bigger / smaller text |
+| Cmd+V | paste (bracketed when the app asks for it) |
+| scroll | scrollback, or arrow keys inside full-screen apps |
 
 ```sh
-cargo run                                   # F1 cycles themes
-ONEPROMPT_SNAPSHOT=docs/screenshots cargo run   # render every theme to PNG and exit
+cargo run                                       # your login shell
+cargo run -- -e "htop"                          # run a command via /bin/sh instead
+ONEPROMPT_SNAPSHOT=docs/screenshots cargo run -- -e "..."   # render every theme to PNG and exit
 ```
+
+Not yet: mouse selection and copy, Option-as-Meta, mouse reporting to apps, box-drawing
+characters drawn as shapes (block glyphs currently show seams), IME.
 
 ## Layout
 
 ```
-src/main.rs                 app + input handling (winit ApplicationHandler)
-src/renderer.rs             wgpu setup, background pass, text pass, PNG snapshots
+src/main.rs                 window events, shortcuts, wiring
+src/terminal.rs             PTY + alacritty_terminal grid, resize, scroll, paste
+src/input.rs                key presses -> xterm byte sequences
+src/renderer.rs             wgpu passes: background, cell rectangles, text; PNG snapshots
 src/theme.rs                themes as plain data
 src/shaders/background.wgsl procedural textures
+src/shaders/rect.wgsl       cell backgrounds, cursor, underlines
 ```
 
 ## Roadmap
 
-1. **Real terminal.** Spawn the shell with `portable-pty` and parse output with
-   `alacritty_terminal` (grid, scrollback, VT parser). Swap the line editor for the grid.
-2. **Cell grid renderer.** Fixed cell metrics from the theme's font. Proportional
-   faces such as American Typewriter look lovely but break column alignment, so themes
-   should prefer monospace faces (Courier Prime, iA Writer Mono, Victor Mono, Comic Mono)
-   or fall back to per-cell glyph placement.
+1. **Proportional and handwritten fonts.** The grid needs a fixed advance, so themes
+   use monospace faces today (Courier New, PT Mono, Menlo). Faces like American
+   Typewriter or Chalkboard need per-cell glyph placement (centre each glyph in its cell).
+2. **Selection and copy**, Option-as-Meta, mouse reporting, box-drawing glyphs.
 3. **Ink shader.** Render text to an offscreen texture, then composite it with the paper:
    multiply blending, slightly darker glyph edges, and noise-driven pressure and bleed
    so letters look absorbed rather than printed on top.
