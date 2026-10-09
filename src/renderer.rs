@@ -323,6 +323,14 @@ pub struct Renderer {
     text: Buffer,
     /// What the font database has for each family name we have asked about.
     families: HashMap<String, Option<FamilyInfo>>,
+    /// Characters the theme's font has, for the current family.
+    coverage: (String, HashMap<char, bool>),
+    /// Characters drawn on their own, one buffer each, keyed by text, weight
+    /// and italic; valid for `loose_metrics`.
+    loose_glyphs: HashMap<LooseKey, Buffer>,
+    loose_metrics: (String, u32, u32),
+    /// This frame's loose characters: cell corner, key and colour.
+    loose: Vec<(f32, f32, LooseKey, [u8; 3])>,
     /// Short message in the title strip ("settings applied", config errors).
     notice: Option<Notice>,
     notice_text: Buffer,
@@ -680,6 +688,10 @@ impl Renderer {
             text_renderer,
             text,
             families: HashMap::new(),
+            coverage: (String::new(), HashMap::new()),
+            loose_glyphs: HashMap::new(),
+            loose_metrics: (String::new(), 0, 0),
+            loose: Vec::new(),
             notice: None,
             notice_text,
             zoom: 1.0,
@@ -908,6 +920,28 @@ impl Renderer {
         });
         self.families.insert(family.to_string(), info.clone());
         info
+    }
+
+    /// Whether the theme's own font has `c`. Characters it lacks come from
+    /// fallback fonts whose advances differ from the cell width.
+    fn covers(&mut self, family: &str, c: char) -> bool {
+        if self.coverage.0 != family {
+            self.coverage = (family.to_string(), HashMap::new());
+        }
+        if let Some(&known) = self.coverage.1.get(&c) {
+            return known;
+        }
+        let face = self
+            .font_system
+            .db()
+            .faces()
+            .find(|face| face.families.iter().any(|(name, _)| name.eq_ignore_ascii_case(family)))
+            .map(|face| (face.id, face.weight));
+        let has = face
+            .and_then(|(id, weight)| self.font_system.get_font(id, weight))
+            .is_some_and(|font| font.as_swash().charmap().map(c) != 0);
+        self.coverage.1.insert(c, has);
+        has
     }
 
     /// The weight to ask the text engine for. It only uses a font when the
@@ -1179,6 +1213,15 @@ impl Renderer {
         self.rects.clear();
         self.ink_rects.clear();
         let cells: Vec<_> = content.display_iter.collect();
+        self.loose.clear();
+        let metrics_key = {
+            let m = self.metrics(theme);
+            (theme.font_family.clone(), m.font_size.to_bits(), m.line_height.to_bits())
+        };
+        if metrics_key != self.loose_metrics || self.loose_glyphs.len() > 4096 {
+            self.loose_glyphs.clear();
+            self.loose_metrics = metrics_key;
+        }
         let canvas = if self.harmonize { canvas_color(&cells, columns * lines) } else { None };
         for indexed in cells {
             let line = (indexed.point.line.0 + content.display_offset as i32) as usize;
@@ -1272,9 +1315,21 @@ impl Renderer {
             } else if flags.contains(Flags::HIDDEN) {
                 ch_str.push(' ');
             } else {
-                ch_str.push(cell_char(indexed.cell.c));
+                let c = cell_char(indexed.cell.c);
+                let mut glyph = String::from(c);
                 if let Some(extra) = indexed.cell.zerowidth() {
-                    ch_str.extend(extra);
+                    glyph.extend(extra);
+                }
+                // In a line of text, a character from a fallback font
+                // advances by its own width and pushes the rest of the row
+                // off the grid. Such characters are drawn on their own at
+                // their cell; the row keeps blanks in their place.
+                if width > 1.0 || (!c.is_ascii() && !self.covers(&theme.font_family, c)) {
+                    let weight = if flags.contains(Flags::BOLD) { bold } else { regular };
+                    self.loose.push((x, y, (glyph, weight, flags.contains(Flags::ITALIC)), fg));
+                    ch_str.push_str(if width > 1.0 { "  " } else { " " });
+                } else {
+                    ch_str.push_str(&glyph);
                 }
             }
             let style = flags & (Flags::BOLD | Flags::ITALIC);
@@ -1357,6 +1412,25 @@ impl Renderer {
         text.set_size(Some(w), Some(h));
         text.set_rich_text(spans, &Attrs::new().family(family), Shaping::Advanced, None);
         text.shape_until_scroll(false);
+
+        for (_, _, key, _) in &self.loose {
+            if self.loose_glyphs.contains_key(key) {
+                continue;
+            }
+            let mut buffer = Buffer::new(&mut self.font_system, metrics);
+            let mut attrs = Attrs::new().family(Family::Name(&theme.font_family)).weight(Weight(key.1));
+            if key.2 {
+                attrs = attrs.style(Style::Italic);
+            }
+            {
+                let mut b = buffer.borrow_with(&mut self.font_system);
+                b.set_wrap(Wrap::None);
+                b.set_size(Some(self.cell_width * 4.0), Some(self.cell_height * 2.0));
+                b.set_text(&key.0, &attrs, Shaping::Advanced, None);
+                b.shape_until_scroll(false);
+            }
+            self.loose_glyphs.insert(key.clone(), buffer);
+        }
     }
 
     /// The notice, set in the theme's font, small, in the title strip.
@@ -1524,6 +1598,20 @@ impl Renderer {
             default_color: Color::rgb(r, g, b),
             custom_glyphs: &[],
         }];
+        // Characters drawn on their own, each at its cell.
+        for (x, y, key, [r, g, b]) in &self.loose {
+            if let Some(buffer) = self.loose_glyphs.get(key) {
+                areas.push(TextArea {
+                    buffer,
+                    left: *x,
+                    top: *y,
+                    scale: 1.0,
+                    bounds,
+                    default_color: Color::rgb(*r, *g, *b),
+                    custom_glyphs: &[],
+                });
+            }
+        }
         if self.notice.is_some() {
             let (left, top) = self.notice_origin();
             areas.push(TextArea {
@@ -1699,6 +1787,9 @@ fn session_seed() -> f32 {
 fn cell_char(c: char) -> char {
     if c.is_control() { ' ' } else { c }
 }
+
+/// A character drawn on its own: its text, weight and italic.
+type LooseKey = (String, u16, bool);
 
 /// Share of the screen one background colour must cover to count as the
 /// program's canvas.
