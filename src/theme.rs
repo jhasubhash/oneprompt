@@ -33,6 +33,12 @@ pub struct Ink {
     /// Brush nib length in logical pixels: glyphs are swept along a slanted
     /// nib, giving thick-and-thin strokes. 0 keeps the font's own shapes.
     pub nib: f32,
+    /// How much the bleed differs from character to character: each one
+    /// bleeds between (1 - this) and (1 + this) times `bleed`. 0..1.
+    pub bleed_variation: f32,
+    /// Seconds the bleed keeps creeping outwards after a character is
+    /// written (at animation speed 1), fast at first, then slowing.
+    pub bleed_time: f32,
 }
 
 /// How the window's close / minimize / zoom controls are drawn.
@@ -133,7 +139,7 @@ pub fn builtin() -> Vec<Theme> {
             font_size: 17.0,
             font_weight: 700,
             line_height: 24.0,
-            ink_style: Ink { bleed: 1.3, grain: 0.22, edge: 0.7, nib: 1.2 },
+            ink_style: Ink { bleed: 1.3, grain: 0.22, edge: 0.7, nib: 1.2, bleed_variation: 0.35, bleed_time: 2.5 },
             splatter: ([168, 30, 36], 1.0),
             controls: Controls {
                 style: ControlStyle::Brush,
@@ -175,7 +181,7 @@ pub fn builtin() -> Vec<Theme> {
             font_size: 17.0,
             font_weight: 700,
             line_height: 24.0,
-            ink_style: Ink { bleed: 1.1, grain: 0.25, edge: 0.6, nib: 1.2 },
+            ink_style: Ink { bleed: 1.1, grain: 0.25, edge: 0.6, nib: 1.2, bleed_variation: 0.35, bleed_time: 2.5 },
             splatter: ([186, 40, 44], 1.0),
             controls: Controls {
                 style: ControlStyle::Brush,

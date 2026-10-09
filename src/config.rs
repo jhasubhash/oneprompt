@@ -48,6 +48,10 @@ pub struct ThemeOverride {
     pub grain: Option<f32>,
     pub edge: Option<f32>,
     pub nib: Option<f32>,
+    /// Per-character spread of the bleed, 0..1: 0 every letter alike.
+    pub bleed_variation: Option<f32>,
+    /// Seconds the bleed keeps spreading after a letter is written.
+    pub bleed_time: Option<f32>,
     /// Paper texture strength (mottling, relief, fibers): 1 built-in, 0 flat.
     pub texture: Option<f32>,
     /// Water-stain strength: 1 built-in, 0 none.
@@ -117,6 +121,9 @@ harmonize_colors = true
 # Fonts must be monospace. font_weight snaps to the weights the font has
 # (Courier New and PT Mono: 400 regular, 700 bold).
 #   bleed  how far ink wicks past strokes (pixels)
+#   bleed_variation  how much the bleed differs per letter, 0..1 (0.35: each
+#                    letter bleeds 0.65 to 1.35 times `bleed`)
+#   bleed_time       seconds the bleed keeps spreading after a letter is written
 #   nib    brush nib length: thick-and-thin strokes (pixels, 0 = off)
 #   grain  dry-brush streaks, 0..1
 #   edge   pigment pooling at stroke rims, 0..1
@@ -129,7 +136,7 @@ harmonize_colors = true
         let ink = theme.ink_style;
         out += &format!(
             "\n[themes.{key}]\nfont_family = \"{family}\"\nfont_size = {size}\nfont_weight = {weight}\n\
-             line_height = {line}\nbleed = {bleed}\nnib = {nib}\ngrain = {grain}\nedge = {edge}\n\
+             line_height = {line}\nbleed = {bleed}\nbleed_variation = {variation}\nbleed_time = {bleed_time}\nnib = {nib}\ngrain = {grain}\nedge = {edge}\n\
              texture = {texture}\nstains = {stains}\nsplatter = {splatter}\n",
             key = key(theme.name),
             family = theme.font_family,
@@ -137,6 +144,8 @@ harmonize_colors = true
             weight = theme.font_weight,
             line = theme.line_height,
             bleed = ink.bleed,
+            variation = ink.bleed_variation,
+            bleed_time = ink.bleed_time,
             nib = ink.nib,
             grain = ink.grain,
             edge = ink.edge,
@@ -197,6 +206,12 @@ impl Config {
         if let Some(v) = paper.into_iter().find(|v| !(0.0..=3.0).contains(v)) {
             return Err(format!("texture / stains / splatter {v} is out of range (0 to 3)"));
         }
+        if let Some(v) = self.themes.values().find_map(|o| o.bleed_variation.filter(|v| !(0.0..=1.0).contains(v))) {
+            return Err(format!("bleed_variation {v} is out of range (0 to 1)"));
+        }
+        if let Some(v) = self.themes.values().find_map(|o| o.bleed_time.filter(|v| !(0.0..=30.0).contains(v))) {
+            return Err(format!("bleed_time {v} is out of range (0 to 30 seconds)"));
+        }
         if let Some(speed) = self.animation_speed
             && !(0.1..=10.0).contains(&speed)
         {
@@ -240,6 +255,8 @@ impl Config {
             ink.grain = o.grain.unwrap_or(ink.grain);
             ink.edge = o.edge.unwrap_or(ink.edge);
             ink.nib = o.nib.unwrap_or(ink.nib);
+            ink.bleed_variation = o.bleed_variation.unwrap_or(ink.bleed_variation);
+            ink.bleed_time = o.bleed_time.unwrap_or(ink.bleed_time);
         }
         themes
     }
@@ -340,6 +357,15 @@ mod tests {
         let light = config.themes().into_iter().find(|t| !t.dark).unwrap();
         assert_eq!((light.texture_strength, light.stains, light.splatter.1), (0.5, 0.0, 2.0));
         assert!(Config::parse("[themes.tsushima-light]\nstains = 5").unwrap_err().contains("out of range"));
+    }
+
+    #[test]
+    fn bleed_animation_is_settable() {
+        let config = Config::parse("[themes.tsushima-light]\nbleed_variation = 0.6\nbleed_time = 4").unwrap();
+        let light = config.themes().into_iter().find(|t| !t.dark).unwrap();
+        assert_eq!((light.ink_style.bleed_variation, light.ink_style.bleed_time), (0.6, 4.0));
+        assert!(Config::parse("[themes.tsushima-light]\nbleed_variation = 2").is_err());
+        assert!(Config::parse("[themes.tsushima-light]\nbleed_time = -1").is_err());
     }
 
     #[test]

@@ -7,8 +7,11 @@
 //   grain  - dry-brush streaks: the core of a stroke is not perfectly solid
 //   edge   - pigment pools where a stroke dries, darkening its rim
 //   write  - new characters are written by hand: each glyph is uncovered
-//            along its pen path (trace.rs), then its bleed spreads as the ink
-//            dries. Glyphs without a path get a ragged brush sweep.
+//            along its pen path (trace.rs). Glyphs without a path get a
+//            ragged brush sweep.
+//   creep  - the bleed keeps wicking outwards for a while after a character
+//            is written, while the pen moves on; every character carries its
+//            own load of ink, so some bleed more than others.
 
 struct Params {
     resolution: vec2<f32>,
@@ -24,7 +27,8 @@ struct Params {
     write_time: f32,        // seconds to write one character; 0 = off
     atlas_columns: f32,     // slots per row in the pen-order atlas
     slot_size: vec2<f32>,   // atlas slot size, pixels (cell + 2 px margin)
-    _pad: vec2<f32>,
+    bleed_variation: f32,   // per-character bleed: (1 -/+ this) x bleed
+    bleed_time: f32,        // seconds the bleed keeps creeping; 0 = at once
 };
 
 @group(0) @binding(0) var<uniform> u: Params;
@@ -144,6 +148,32 @@ fn written_as(pos: vec2<f32>, sp: vec2<f32>, nudge: vec2<f32>) -> f32 {
     return clamp((progress * 1.45 - ragged) * 9.0, 0.0, 1.0);
 }
 
+struct Bleed {
+    growth: f32, // how far the bleed has crept, 0..1 of its reach
+    scale: f32,  // this character's load of ink, around 1
+};
+
+// The bleed of the character whose cell holds `p`. Ink wicks into paper
+// like water: quickly at first, then slower and slower (distance grows
+// with the square root of time), so it is still creeping well after the
+// pen has moved on to the next letters.
+fn bleed_of(p: vec2<f32>) -> Bleed {
+    let g = (p - u.grid_origin) / u.cell;
+    if (any(g < vec2<f32>(0.0)) || any(g >= u.grid_size)) {
+        return Bleed(1.0, 1.0);
+    }
+    let cell = floor(g);
+    let birth = textureLoad(births, vec2<i32>(cell), 0).r;
+    // The birth time is part of the hash, so retyping a cell gives it a new load.
+    let h = hash(cell + vec2<f32>(fract(birth * 0.731) * 61.0, fract(u.seed * 0.173) * 37.0));
+    let scale = 1.0 + u.bleed_variation * (h * 2.0 - 1.0);
+    var growth = 1.0;
+    if (u.write_time > 0.0 && u.bleed_time > 0.0) {
+        growth = 0.12 + 0.88 * sqrt(clamp((u.time - birth) / u.bleed_time, 0.0, 1.0));
+    }
+    return Bleed(growth, scale);
+}
+
 fn ink_at(pos: vec2<f32>, sp: vec2<f32>) -> vec4<f32> {
     return sample_at(pos) * written(pos, sp);
 }
@@ -188,7 +218,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             let angle = f32(k) * 6.2831853 / f32(TAPS) + jitter;
             let r = reach * (0.3 + 0.7 * hash(px + f32(k) * 13.7));
             let offset = rotate(vec2<f32>(cos(angle) * 1.7, sin(angle) * 0.55) * r, fiber_angle);
-            halo += ink_at(px + offset, sp);
+            // Each tap reaches only as far as the bleed of the character it
+            // lands on has crept, scaled by that character's ink load; fresh
+            // bleed is fainter too.
+            let b = bleed_of(px + offset);
+            halo += ink_at(px + offset * b.scale * b.growth, sp) * mix(0.35, 1.0, b.growth);
         }
         halo /= f32(TAPS);
     }
@@ -197,7 +231,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // of a smooth glow.
     let capillary = smoothstep(0.35, 0.75, noise(rotate(sp, fiber_angle) * vec2<f32>(0.25, 1.1)));
     let wick = halo.a * mix(0.15, 1.0, capillary) * (0.35 + 0.65 * amount);
-    // (The halo's spread is applied below, once `spread` is known.)
 
     // Ink soaks in: antialiased edges of thin strokes saturate towards solid;
     // the load of ink varies a little, and dry-brush grain thins it in places.
@@ -207,22 +240,20 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let load = 0.9 + 0.1 * noise(sp * 0.02 + 5.0);
     let body = clamp(core.a * 1.3, 0.0, 1.0) * grain * load;
 
-    // After the brush front (applied per sample above), the bleed spreads
-    // and the wet ink settles over a few write times.
+    // After the brush front (applied per sample above), the wet ink settles
+    // over a few write times. (The bleed's creep is in the halo taps.)
     let age = cell_ink(px, vec2<f32>(0.0)).age;
-    var spread = 1.0;
     var wet = 0.0;
     if (age < u.write_time * 4.0) {
-        spread = smoothstep(0.0, 1.0, age / (u.write_time * 3.0));
         wet = 1.0 - clamp(age / (u.write_time * 4.0), 0.0, 1.0);
     }
 
     // Pigment pools at the rim: strongest where the halo is half covered.
     let rim = clamp(halo.a * (1.0 - halo.a) * 4.0, 0.0, 1.0) * u.edge;
 
-    // Wet ink is a touch heavier and its bleed is still creeping outwards.
+    // Wet ink is a touch heavier.
     let alpha = clamp(
-        max(body * (1.0 + 0.25 * wet), wick * 0.85 * spread) + rim * 0.2 * spread * (1.0 - body),
+        max(body * (1.0 + 0.25 * wet), wick * 0.85) + rim * 0.2 * (1.0 - body),
         0.0,
         1.0,
     );

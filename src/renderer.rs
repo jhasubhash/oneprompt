@@ -71,7 +71,8 @@ struct InkParams {
     write_time: f32,
     atlas_columns: f32,
     slot_size: [f32; 2],
-    _pad: [f32; 2],
+    bleed_variation: f32,
+    bleed_time: f32,
 }
 
 #[repr(C)]
@@ -289,6 +290,8 @@ pub struct Renderer {
     clock: Instant,
     /// Animations on, and their speed (1 = normal, 2 = twice as fast).
     animation: (bool, f32),
+    /// The current theme's bleed creep, seconds at speed 1 (for redraws).
+    bleed_time: f32,
     /// Characters per second when output is written out.
     writing_speed: f32,
     /// Map program-chosen colours onto the sheet (see color.rs).
@@ -650,6 +653,7 @@ impl Renderer {
             targets,
             clock: Instant::now(),
             animation: (true, 1.0),
+            bleed_time: 0.0,
             writing_speed: 500.0,
             harmonize: true,
             animator: TextAnimator::default(),
@@ -850,8 +854,10 @@ impl Renderer {
     pub fn is_animating(&self) -> bool {
         let now = self.now();
         let write_time = WRITE_TIME / self.animation.1;
+        // Ink is wet for a few write times; its bleed creeps for longer.
+        let bleed_time = self.bleed_time / self.animation.1;
         self.transition.is_some_and(|t| !t.done(now))
-            || (self.animation.0 && now - self.animator.latest_birth() < write_time * 4.0)
+            || (self.animation.0 && now - self.animator.latest_birth() < (write_time * 4.0).max(bleed_time))
     }
 
     pub fn window(&self) -> &Window {
@@ -1395,6 +1401,7 @@ impl Renderer {
         let globals = RectGlobals { resolution: [w as f32, h as f32], _pad: [0.0; 2] };
         self.queue
             .write_buffer(&self.rect_globals, 0, bytemuck::bytes_of(&globals));
+        self.bleed_time = theme.ink_style.bleed_time;
         let ink = InkParams {
             resolution: [w as f32, h as f32],
             bleed: theme.ink_style.bleed * scale,
@@ -1412,7 +1419,8 @@ impl Renderer {
             write_time: if self.animation.0 { WRITE_TIME / self.animation.1 } else { 0.0 },
             atlas_columns: self.tracer.columns() as f32,
             slot_size: [self.tracer.slot_size.0 as f32, self.tracer.slot_size.1 as f32],
-            _pad: [0.0; 2],
+            bleed_variation: theme.ink_style.bleed_variation,
+            bleed_time: theme.ink_style.bleed_time / self.animation.1,
         };
         self.queue
             .write_buffer(&self.ink_params, 0, bytemuck::bytes_of(&ink));

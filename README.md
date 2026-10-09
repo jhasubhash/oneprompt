@@ -37,7 +37,9 @@ light or dark palette.
 
 - **Writing**: new characters are written by hand. Each glyph is traced along a pen path
   derived from its shape (`src/trace.rs`: pieces left to right, each followed along the ink
-  from its top-left), then its bleed spreads as the ink dries. Output that arrives together
+  from its top-left). Its bleed then keeps creeping into the paper for a few seconds
+  (quickly at first, then slowing) while the pen moves on, and every character carries
+  its own load of ink, so some bleed more than others. Output that arrives together
   (`ls`, `cat`) is written in reading order, left to right and line by line, at
   `writing_speed` characters per second, sped up so a batch never takes more than 1.5 s.
   Scrolled text keeps its age; full-screen apps and repaints over existing text appear at
@@ -119,6 +121,8 @@ seed = 11                     # pin the paper; unset = new sheet each session
 [themes.tsushima-light]       # each variant: fonts, line_height, bleed, nib, grain, edge,
 font_family = "Courier New"   # and the paper: texture, stains, splatter (1 = built-in, 0 = off)
 font_weight = 700
+bleed_variation = 0.5         # per-letter bleed: 0.5 to 1.5 times `bleed`
+bleed_time = 4                # seconds the bleed keeps spreading
 texture = 0.6
 stains = 0
 ```
