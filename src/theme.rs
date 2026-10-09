@@ -39,6 +39,9 @@ pub struct Ink {
     /// Seconds the bleed keeps creeping outwards after a character is
     /// written (at animation speed 1), fast at first, then slowing.
     pub bleed_time: f32,
+    /// How much the ink takes on the paper's grain, 0..1: the brush skips
+    /// the tooth's peaks, ink settles in its hollows, fibers lie over it.
+    pub absorb: f32,
 }
 
 /// How the window's close / minimize / zoom controls are drawn.
@@ -76,6 +79,7 @@ pub struct Theme {
     pub stains: f32,
     /// Default text colour (sRGB).
     pub ink: [u8; 3],
+    /// Cursor and other marks of the hand (tab underline, caret): seal ink.
     pub cursor: [u8; 3],
     /// Selection block colour and opacity; selected text is drawn on it in
     /// the surface colour, reversed out of the ink.
@@ -116,7 +120,7 @@ pub fn builtin() -> Vec<Theme> {
             texture_strength: 1.0,
             stains: 1.0,
             ink: [18, 13, 9],
-            cursor: [158, 28, 32],
+            cursor: [182, 56, 38],
             selection: ([30, 22, 15], 0.9),
             palette: [
                 [22, 20, 18],    // black: sumi
@@ -140,7 +144,7 @@ pub fn builtin() -> Vec<Theme> {
             font_size: 17.0,
             font_weight: 700,
             line_height: 24.0,
-            ink_style: Ink { bleed: 0.7, grain: 0.22, edge: 0.7, nib: 1.2, bleed_variation: 0.35, bleed_time: 2.5 },
+            ink_style: Ink { bleed: 0.7, grain: 0.22, edge: 0.7, nib: 1.2, bleed_variation: 0.35, bleed_time: 2.5, absorb: 0.7 },
             splatter: ([168, 30, 36], 1.0),
             controls: Controls {
                 style: ControlStyle::Brush,
@@ -158,7 +162,7 @@ pub fn builtin() -> Vec<Theme> {
             texture_strength: 1.0,
             stains: 1.0,
             ink: [222, 196, 148],
-            cursor: [196, 44, 46],
+            cursor: [212, 82, 54],
             selection: ([222, 196, 148], 0.88),
             palette: [
                 [104, 90, 72],   // black: thin parchment, still visible on ink
@@ -182,7 +186,7 @@ pub fn builtin() -> Vec<Theme> {
             font_size: 17.0,
             font_weight: 700,
             line_height: 24.0,
-            ink_style: Ink { bleed: 0.7, grain: 0.25, edge: 0.6, nib: 1.2, bleed_variation: 0.35, bleed_time: 2.5 },
+            ink_style: Ink { bleed: 0.7, grain: 0.25, edge: 0.6, nib: 1.2, bleed_variation: 0.35, bleed_time: 2.5, absorb: 0.7 },
             splatter: ([186, 40, 44], 1.0),
             controls: Controls {
                 style: ControlStyle::Brush,

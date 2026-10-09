@@ -52,6 +52,8 @@ pub struct ThemeOverride {
     pub bleed_variation: Option<f32>,
     /// Seconds the bleed keeps spreading after a letter is written.
     pub bleed_time: Option<f32>,
+    /// How much the ink takes on the paper's grain, 0..1.
+    pub absorb: Option<f32>,
     /// Paper texture strength (mottling, relief, fibers): 1 built-in, 0 flat.
     pub texture: Option<f32>,
     /// Water-stain strength: 1 built-in, 0 none.
@@ -127,6 +129,7 @@ harmonize_colors = true
 #   nib    brush nib length: thick-and-thin strokes (pixels, 0 = off)
 #   grain  dry-brush streaks, 0..1
 #   edge   pigment pooling at stroke rims, 0..1
+#   absorb how much the ink takes on the paper's grain, 0..1 (0 = ink sits on top)
 #   texture   paper texture (mottling, relief, fibers): 1 built-in, 0 flat, up to 3
 #   stains    water-stain tide lines: 1 built-in, 0 none, up to 3
 #   splatter  ink flecks in the top-right corner: 1 built-in, 0 none, up to 3
@@ -136,7 +139,7 @@ harmonize_colors = true
         let ink = theme.ink_style;
         out += &format!(
             "\n[themes.{key}]\nfont_family = \"{family}\"\nfont_size = {size}\nfont_weight = {weight}\n\
-             line_height = {line}\nbleed = {bleed}\nbleed_variation = {variation}\nbleed_time = {bleed_time}\nnib = {nib}\ngrain = {grain}\nedge = {edge}\n\
+             line_height = {line}\nbleed = {bleed}\nbleed_variation = {variation}\nbleed_time = {bleed_time}\nnib = {nib}\ngrain = {grain}\nedge = {edge}\nabsorb = {absorb}\n\
              texture = {texture}\nstains = {stains}\nsplatter = {splatter}\n",
             key = key(theme.name),
             family = theme.font_family,
@@ -149,6 +152,7 @@ harmonize_colors = true
             nib = ink.nib,
             grain = ink.grain,
             edge = ink.edge,
+            absorb = ink.absorb,
             texture = theme.texture_strength,
             stains = theme.stains,
             splatter = theme.splatter.1,
@@ -158,7 +162,7 @@ harmonize_colors = true
 }
 
 /// Settings that belong to a variant, under `[themes.<name>]`.
-const THEME_SETTINGS: [&str; 13] = [
+const THEME_SETTINGS: [&str; 14] = [
     "font_family",
     "font_size",
     "font_weight",
@@ -166,6 +170,7 @@ const THEME_SETTINGS: [&str; 13] = [
     "bleed",
     "bleed_variation",
     "bleed_time",
+    "absorb",
     "nib",
     "grain",
     "edge",
@@ -240,6 +245,9 @@ impl Config {
         if let Some(v) = self.themes.values().find_map(|o| o.bleed_variation.filter(|v| !(0.0..=1.0).contains(v))) {
             return Err(format!("bleed_variation {v} is out of range (0 to 1)"));
         }
+        if let Some(v) = self.themes.values().find_map(|o| o.absorb.filter(|v| !(0.0..=1.0).contains(v))) {
+            return Err(format!("absorb {v} is out of range (0 to 1)"));
+        }
         if let Some(v) = self.themes.values().find_map(|o| o.bleed_time.filter(|v| !(0.0..=30.0).contains(v))) {
             return Err(format!("bleed_time {v} is out of range (0 to 30 seconds)"));
         }
@@ -288,6 +296,7 @@ impl Config {
             ink.nib = o.nib.unwrap_or(ink.nib);
             ink.bleed_variation = o.bleed_variation.unwrap_or(ink.bleed_variation);
             ink.bleed_time = o.bleed_time.unwrap_or(ink.bleed_time);
+            ink.absorb = o.absorb.unwrap_or(ink.absorb);
         }
         themes
     }

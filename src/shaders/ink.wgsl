@@ -9,6 +9,10 @@
 //   write  - new characters are written by hand: each glyph is uncovered
 //            along its pen path (trace.rs). Glyphs without a path get a
 //            ragged brush sweep.
+//   paper  - the ink takes on the sheet's own grain: the brush skips the
+//            tooth's peaks, ink settles in its hollows, fibers lie over it
+//            (the same tooth and fibers background.wgsl draws, at the same
+//            places)
 //   creep  - the bleed keeps wicking outwards for a while after a character
 //            is written, while the pen moves on; every character carries its
 //            own load of ink, so some bleed more than others.
@@ -29,6 +33,7 @@ struct Params {
     slot_size: vec2<f32>,   // atlas slot size, pixels (cell + 2 px margin)
     bleed_variation: f32,   // per-character bleed: (1 -/+ this) x bleed
     bleed_time: f32,        // seconds the bleed keeps creeping; 0 = at once
+    paper: vec4<f32>,       // x: px per logical px, y: texture strength, z: absorb
 };
 
 @group(0) @binding(0) var<uniform> u: Params;
@@ -148,6 +153,38 @@ fn written_as(pos: vec2<f32>, sp: vec2<f32>, nudge: vec2<f32>) -> f32 {
     return clamp((progress * 1.45 - ragged) * 9.0, 0.0, 1.0);
 }
 
+// The paper, as background.wgsl draws it (keep the two in step): the
+// height of its tooth, and its long fibers. `p` is in logical pixels with
+// the sheet's seed offset applied.
+fn tooth(p: vec2<f32>) -> f32 {
+    return noise(p * 0.35) * 0.55 + noise(p * 0.9) * 0.3 + noise(p * 2.2) * 0.15;
+}
+
+fn fiber(px: vec2<f32>, angle: f32, offset: f32) -> f32 {
+    let warp = vec2<f32>(noise(px * 0.012 + offset), noise(px * 0.012 + offset + 5.0)) * 24.0;
+    let q = rotate(px + warp, angle) * vec2<f32>(0.01, 0.12) + offset;
+    let n = noise(q) * 0.75 + noise(q * 2.1) * 0.25;
+    let sparse = smoothstep(0.62, 0.8, noise(q * vec2<f32>(0.6, 0.08) + 9.0));
+    return (1.0 - smoothstep(0.0, 0.03, abs(n - 0.5))) * sparse;
+}
+
+struct Paper {
+    peak: f32,   // on a raised point of the tooth, 0..1
+    hollow: f32, // in a low spot, 0..1
+    fibers: f32, // under one of the light fibers, 0..1
+};
+
+fn paper_at(px: vec2<f32>) -> Paper {
+    let lp = px / max(u.paper.x, 1.0)
+        + vec2<f32>(fract(u.seed * 0.137) * 400.0, fract(u.seed * 0.291) * 400.0);
+    let h = tooth(lp);
+    var light = 0.0;
+    for (var k = 0; k < 3; k++) {
+        light += fiber(lp, 0.5 + f32(k) * 1.9, f32(k) * 21.0);
+    }
+    return Paper(smoothstep(0.52, 0.78, h), 1.0 - smoothstep(0.22, 0.46, h), clamp(light, 0.0, 1.0));
+}
+
 struct Bleed {
     growth: f32, // how far the bleed has crept, 0..1 of its reach
     scale: f32,  // this character's load of ink, around 1
@@ -230,7 +267,19 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Capillary feathering: the halo breaks up into fine tendrils instead
     // of a smooth glow.
     let capillary = smoothstep(0.35, 0.75, noise(rotate(sp, fiber_angle) * vec2<f32>(0.25, 1.1)));
-    let wick = halo.a * mix(0.15, 1.0, capillary) * (0.35 + 0.65 * amount);
+    // The sheet under the ink: the brush skips the tooth's peaks (dry
+    // flecks in the letters, in the paper's own pattern), ink settles
+    // heavier in the hollows, and light fibers lie over it. Only worked out
+    // where there is ink.
+    let bite = u.paper.z * min(u.paper.y, 1.5);
+    var sheet = Paper(0.0, 0.0, 0.0);
+    if (bite > 0.0 && core.a + halo.a > 0.002) {
+        sheet = paper_at(px);
+    }
+
+    // Bleed runs along the hollows and stops at the peaks.
+    let wick = halo.a * mix(0.15, 1.0, capillary) * (0.35 + 0.65 * amount)
+        * (1.0 + bite * (0.6 * sheet.hollow - 0.5 * sheet.peak));
 
     // Ink soaks in: antialiased edges of thin strokes saturate towards solid;
     // the load of ink varies a little, and dry-brush grain thins it in places.
@@ -238,7 +287,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let streak = noise(rotate(sp, -NIB_ANGLE) * vec2<f32>(0.15, 1.3) + 3.1);
     let grain = 1.0 - u.grain * smoothstep(0.4, 0.95, streak * 0.75 + hash(px) * 0.25);
     let load = 0.9 + 0.1 * noise(sp * 0.02 + 5.0);
-    let body = clamp(core.a * 1.3, 0.0, 1.0) * grain * load;
+    let tooth_skip = 1.0 - bite * (0.42 * sheet.peak + 0.3 * sheet.fibers);
+    let settle = 1.0 + bite * 0.25 * sheet.hollow;
+    let body = clamp(core.a * 1.3 * settle, 0.0, 1.0) * grain * load * tooth_skip;
 
     // After the brush front (applied per sample above), the wet ink settles
     // over a few write times. (The bleed's creep is in the halo taps.)

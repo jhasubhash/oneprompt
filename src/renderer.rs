@@ -80,6 +80,8 @@ struct InkParams {
     slot_size: [f32; 2],
     bleed_variation: f32,
     bleed_time: f32,
+    /// Physical pixels per logical pixel, paper texture strength, absorb.
+    paper: [f32; 4],
 }
 
 #[repr(C)]
@@ -154,6 +156,7 @@ struct Rect {
 const SHAPE_DISC: f32 = 1.0;
 const SHAPE_RING: f32 = 2.0;
 const SHAPE_CROSS: f32 = 3.0;
+const SHAPE_DAB: f32 = 4.0;
 
 impl Rect {
     fn new(x: f32, y: f32, w: f32, h: f32, rgb: [u8; 3], alpha: f32) -> Self {
@@ -166,6 +169,14 @@ impl Rect {
         let d = radius * 2.0 + 2.0;
         let mut rect = Self::new(cx - d / 2.0, cy - d / 2.0, d, d, rgb, alpha);
         rect.params[0] = kind;
+        rect
+    }
+
+    /// A dab of the brush filling the box (x, y, w, h), with a pixel of
+    /// room around it for the ragged edge.
+    fn dab(x: f32, y: f32, w: f32, h: f32, rgb: [u8; 3], alpha: f32) -> Self {
+        let mut rect = Self::new(x - 1.0, y - 1.0, w + 2.0, h + 2.0, rgb, alpha);
+        rect.params[0] = SHAPE_DAB;
         rect
     }
 
@@ -1440,23 +1451,29 @@ impl Renderer {
             }
         }
 
-        // Cursor goes under the text so a block cursor can invert its cell.
+        // The cursor is a dab of seal ink, laid down in the ink layer so it
+        // bleeds and takes the paper's grain like the text. It goes under the
+        // text, so a block cursor shows its character in the paper's colour.
+        // Each cell gets its own dab.
         if cursor_line >= 0 && cursor_shape != CursorShape::Hidden {
             let (x, y) = (cell_x(cursor_col), cell_y(cursor_line as usize));
             let c = theme.cursor;
+            let seed = cursor_col as f32 * 1.37 + cursor_line as f32 * 7.11;
             let t = (cw * 0.1).max(1.0);
             match cursor_shape {
-                CursorShape::Beam => self.rects.push(Rect::new(x, y, (cw * 0.12).max(2.0), ch, c, 1.0)),
-                CursorShape::Underline => {
-                    self.rects.push(Rect::new(x, y + ch * 0.88, cw, (ch * 0.1).max(2.0), c, 1.0))
+                CursorShape::Beam => {
+                    self.ink_rects.push(Rect::dab(x, y, (cw * 0.18).max(2.5), ch, c, 1.0).rough(0.6, seed))
                 }
-                CursorShape::HollowBlock => self.rects.extend([
-                    Rect::new(x, y, cw, t, c, 1.0),
-                    Rect::new(x, y + ch - t, cw, t, c, 1.0),
-                    Rect::new(x, y, t, ch, c, 1.0),
-                    Rect::new(x + cw - t, y, t, ch, c, 1.0),
+                CursorShape::Underline => self
+                    .ink_rects
+                    .push(Rect::dab(x, y + ch * 0.84, cw, (ch * 0.12).max(2.5), c, 1.0).rough(0.6, seed)),
+                CursorShape::HollowBlock => self.ink_rects.extend([
+                    Rect::new(x, y, cw, t, c, 0.9),
+                    Rect::new(x, y + ch - t, cw, t, c, 0.9),
+                    Rect::new(x, y, t, ch, c, 0.9),
+                    Rect::new(x + cw - t, y, t, ch, c, 0.9),
                 ]),
-                _ => self.rects.push(Rect::new(x, y, cw, ch, c, 1.0)),
+                _ => self.ink_rects.push(Rect::dab(x, y + ch * 0.04, cw, ch * 0.92, c, 0.95).rough(1.0, seed)),
             }
         }
         self.ink_rects.extend(overlay);
@@ -1716,6 +1733,7 @@ impl Renderer {
             slot_size: [self.tracer.slot_size.0 as f32, self.tracer.slot_size.1 as f32],
             bleed_variation: theme.ink_style.bleed_variation,
             bleed_time: theme.ink_style.bleed_time / self.animation.1,
+            paper: [scale, theme.texture_strength, theme.ink_style.absorb, 0.0],
         };
         self.queue
             .write_buffer(&self.ink_params, 0, bytemuck::bytes_of(&ink));

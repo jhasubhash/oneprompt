@@ -17,10 +17,11 @@ window controls. There is one for now, **Tsushima**, after the ink-painting cuts
 - **Light**: golden parchment browning heavily towards the edges, with relief-lit tooth,
   water-stain tide lines, fibers and a flick of crimson splatter; bold near-black sumi swept
   with a slanted brush nib (thick-and-thin strokes, dry-brush streaks, varying pressure)
-  whose ragged edges bleed in patches along the fibers; a crimson seal for the cursor and
-  close control.
+  whose ragged edges bleed in patches along the fibers; a crimson close control, and a
+  cursor that is a dab of cinnabar seal ink (ragged, pressed wider at the top, drying out at
+  the bottom, different in every cell).
 - **Dark**: the cutscenes inverted: a field of ink with the drawing showing through in
-  parchment, the same brushwork, the same crimson seal.
+  parchment, the same brushwork, the same seal ink.
 
 ### Colours from programs
 
@@ -60,7 +61,10 @@ of paper (`seed` in the settings or `ONEPROMPT_SEED=<number>` pins one). The ren
 Rendering ink is a two-step process: text, line art and controls are drawn into an
 offscreen *ink layer*, then `src/shaders/ink.wgsl` composites it onto the surface with
 a brush nib (glyphs swept along a slanted nib for thick-and-thin strokes), bleed (ink
-wicking along paper fibers), dry-brush grain and pooled rims. Each theme sets those
+wicking along paper fibers), dry-brush grain and pooled rims. The ink also takes on the
+sheet's own grain (`absorb`): the brush skips the paper's raised tooth, leaving flecks in
+the letters where the sheet shows, ink settles in its hollows and fibers lie over it, all
+at the same places the background draws them. Each theme sets those
 amounts and its font weight in `theme.rs`; all zero gives crisp screen text.
 
 On macOS the Metal layer is explicitly tagged sRGB. Left untagged, wide-gamut displays
