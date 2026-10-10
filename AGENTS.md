@@ -2,8 +2,8 @@
 
 oneprompt is a macOS terminal (Rust, wgpu, winit, glyphon, alacritty_terminal) whose point
 is how it looks: a hand-made paper sheet, ink that bleeds, text written in by hand. Visual
-quality comes before terminal feature breadth. README.md describes the features and the
-source layout.
+quality comes before terminal feature breadth. README.md is the short
+pitch; docs/GUIDE.md describes every feature, setting and the source layout.
 
 ## Build and check
 
@@ -33,8 +33,9 @@ cargo clippy --release         # keep it warning-free
    The bundle's executable links to `target/release/oneprompt` (`scripts/make-app.sh`), so
    it never needs remaking after a build.
 
-4. **Keep README.md current**: update it whenever the code changes make it stale (features,
-   settings, source layout, build steps), in the same change.
+4. **Keep the docs current**: update docs/GUIDE.md whenever the code changes make it stale
+   (features, settings, source layout, build steps), in the same change. Keep README.md
+   short: it is the pitch; touch it only for headline features or install changes.
 
 ## Testing in the GUI without disturbing the user
 
@@ -67,7 +68,7 @@ cargo clippy --release         # keep it warning-free
 - Theme settings are declared by the theme (`Theme::params`); the settings template,
   validation and settings panel rows are generated from them.
 - New settings: validate their range, apply them live, add them to the template and a row
-  in the settings panel (`settings::items`), document them in README.md.
+  in the settings panel (`settings::items`), document them in docs/GUIDE.md.
 
 ## Releases
 

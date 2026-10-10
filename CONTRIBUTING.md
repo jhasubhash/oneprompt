@@ -2,7 +2,7 @@
 
 Thanks for your interest. oneprompt is a macOS terminal whose point is how it looks, so
 visual quality comes before terminal feature breadth. Please keep that in mind when
-proposing changes. README.md describes the features and the source layout.
+proposing changes. [docs/GUIDE.md](docs/GUIDE.md) describes the features and the source layout.
 
 ## Before you start
 
@@ -45,8 +45,8 @@ include a screenshot or short recording in your pull request.
   enforces it. If a theme needs something the API lacks, add it to the API so every
   theme can use it.
 - A new setting needs a validated range, must apply live, must be added to the generated
-  template, and must be documented in README.md.
-- Update README.md whenever your change makes it stale.
+  template, and must be documented in docs/GUIDE.md.
+- Update docs/GUIDE.md whenever your change makes it stale (README.md is the short pitch).
 
 ## Adding a theme
 
@@ -67,7 +67,8 @@ include a screenshot or short recording in your pull request.
    `cargo test` compiles its shaders.
 5. Look at both variants (`ONEPROMPT_SNAPSHOT=<dir>` renders every variant;
    `ONEPROMPT_SNAPSHOT_SWITCH=<n>` adds frames of each switch), add screenshots to
-   `docs/screenshots/` and a short description to README.md.
+   `docs/screenshots/` and a short description to docs/GUIDE.md (and a column in README.md's
+   screenshot table).
 
 ## Pull requests
 
