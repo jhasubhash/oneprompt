@@ -314,6 +314,15 @@ pub struct PlanData {
 }
 
 impl PlanData {
+    /// A sword cut through the whole sheet, for clearing it: along the line
+    /// through `at` (x across 0..aspect, y down 0..1) at `angle`, the halves
+    /// then sliding apart along it and falling (`front.w` = 2).
+    pub fn slash(at: [f32; 2], angle: f32, seed: f32) -> Self {
+        let mut data = Self { edge: [0.0; 4], info: [0.0, 0.0, seed, 0.0], cut: [0.0; 4], front: [0.0, 0.0, 0.0, 2.0], marks: [[0.0; 4]; 3 * MAX_MARKS] };
+        data.marks[0] = [at[0], at[1], angle, 0.0];
+        data
+    }
+
     /// A fire, for closing a sheet: lit at `at` (x across 0..aspect, y down
     /// 0..1), its front `reach` away when it is done (`front.w` = 1 tells
     /// the shader it is a burn).

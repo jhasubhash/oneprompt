@@ -62,6 +62,13 @@ impl Action {
     fn from_id(id: &str) -> Option<Action> {
         Self::ALL.into_iter().find(|a| a.id() == id)
     }
+
+    /// The action named `name` in kebab case ("clear", "new-tab",
+    /// "split-right", ...), for `ONEPROMPT_ACTIONS`.
+    pub fn from_name(name: &str) -> Option<Action> {
+        let flat: String = name.chars().filter(|c| *c != '-' && *c != '_').collect();
+        Self::ALL.into_iter().find(|a| a.id().eq_ignore_ascii_case(&flat))
+    }
 }
 
 /// What the menu should say right now.

@@ -57,7 +57,7 @@ include a screenshot or short recording in your pull request.
    `theme_shape`, `theme_transition`. Leave out what it doesn't need; the framework's
    plain defaults fill in. Values come from `Theme::data` (and `Plan` for transitions)
    into a struct the theme declares.
-3. Give it its reactions: `reveal`, `switch`, `close`, `cursor`, `strike` / `draw_strike`,
+3. Give it its reactions: `reveal`, `switch`, `close`, `clear`, `cursor`, `strike` / `draw_strike`,
    `draw_divider` for the line between split panes (drawn in when a split is made), and
    `draw_failure` for a command that failed (in the margin beside its prompt) and
    `draw_stamp` for a long command that finished (just after it), and `draw_idle` for a

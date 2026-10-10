@@ -87,6 +87,10 @@ pub struct Config {
     pub drying_time: Option<f32>,
     /// How far ink an hour old has faded, 0..1 (default 0.3; 0: never).
     pub ink_aging: Option<f32>,
+    /// Closing a tab or the window, and clearing the screen (Cmd+K), the
+    /// theme's way. Default on.
+    pub close_effect: Option<bool>,
+    pub clear_effect: Option<bool>,
     /// After idle_after seconds (default 60) with no key or click, the theme's
     /// idle scene plays: Tsushima's falling leaves. Default on.
     pub idle_scene: Option<bool>,
@@ -156,6 +160,13 @@ strike_splatter = true       # extras: Tsushima's blood; false: a clean strike
 ink_drying = true
 drying_time = 4
 ink_aging = 0.3
+
+# Closing a tab or the window burns its sheet away in Tsushima and wipes it off
+# the Chalkboard. Clearing the screen (Cmd+K) cuts it in two with a sword in
+# Tsushima, the halves sliding apart and falling; the Chalkboard gets one
+# sweep of the eraser.
+close_effect = true
+clear_effect = true
 
 # Left alone for idle_after seconds, the window gets the theme's idle scene:
 # maple leaves drift down onto the paper in Tsushima, chalk dust settles on

@@ -96,7 +96,11 @@ light or dark palette.
   way. Tsushima sets it alight near a corner: a ragged front of fire spreads across it,
   browning and charring the paper ahead and leaving ash and embers, the next tab showing
   through (closing the window leaves only ash). Chalkboard wipes it off with the eraser.
-  `animation = false` closes at once.
+  `close_effect = false` closes at once.
+- **Clearing cuts the screen in two**: Cmd+K cuts the old screen with one stroke of the
+  sword in Tsushima; after a breath the halves slide apart along the cut and fall away,
+  clean paper beneath. Chalkboard gives it one sweep of the eraser. `clear_effect = false`
+  clears at once.
 - **Deleted names are struck out**: when a file or folder named on screen is deleted (`rm`,
   a script, the Finder, ...), every mention of it, in `ls` output, the command that
   deleted it, anywhere, is struck through and fades. Words are looked up relative to the
@@ -156,7 +160,8 @@ another theme). A theme implements the `Theme` trait:
   frame: size, time, seed, grid, colours; and `hash`, `noise`, `rotate`) plus its own data
   from Rust. A stage it leaves out gets a plain default. A test compiles every stage.
 - **Events**: `reveal` (the window opens), `switch` (switching to it, from its other
-  variant or another theme), `close` (a tab or the window closing), `cursor`, `strike` / `draw_strike` (a deleted name),
+  variant or another theme), `close` (a tab or the window closing), `clear` (Cmd+K),
+  `cursor`, `strike` / `draw_strike` (a deleted name),
   `draw_divider` (the line between split panes, drawn in when the split is made), and
   `mark_time` / `draw_failure` (a command that failed, beside its prompt) and
   `stamp_time` / `draw_stamp` (a long command that finished), and `idle_time` /
@@ -280,6 +285,8 @@ strike_splatter = true        # with the theme's extras (blood, chalk dust)
 ink_drying = true             # fresh ink looks wet, then dries
 drying_time = 4               # seconds
 ink_aging = 0.3               # how far ink an hour old fades, 0..1
+close_effect = true           # closing burns / wipes the sheet away
+clear_effect = true           # Cmd+K cuts the screen in two / sweeps it
 idle_scene = true             # leaves fall / dust settles on an idle window
 idle_after = 60               # seconds without a key or click
 shell_integration = true      # the shell marks its prompts (new shells)

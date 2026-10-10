@@ -333,6 +333,18 @@ pub fn items(config: &Config, variant: &Variant, fonts: &Fonts) -> Vec<Item> {
     ));
     items.push(top("Drying time", "Seconds fresh ink stays wet.", slider(config.drying_time.unwrap_or(4.0), 1.0, 20.0), "drying_time"));
     items.push(top(
+        "Closing",
+        "A closed tab or window burns away, or is wiped off the board.",
+        Control::Toggle(config.close_effect.unwrap_or(true)),
+        "close_effect",
+    ));
+    items.push(top(
+        "Clearing",
+        "Cmd+K cuts the old screen in two with a sword, or sweeps it with the eraser.",
+        Control::Toggle(config.clear_effect.unwrap_or(true)),
+        "clear_effect",
+    ));
+    items.push(top(
         "Idle scene",
         "Left alone, the window gets the theme's scene: falling leaves, settling dust.",
         Control::Toggle(config.idle_scene.unwrap_or(true)),

@@ -48,7 +48,9 @@ cargo clippy --release         # keep it warning-free
   tell the two apart (same executable), and keys sent to the test window have landed in the
   user's. Script the test shell instead: start it with `ZDOTDIR` pointing at a folder whose
   `.zshrc` feeds queued commands from a `zle-line-init` widget (shell integration restores
-  that `ZDOTDIR` for zsh), so it types its own commands.
+  that `ZDOTDIR` for zsh), so it types its own commands. For the app's own actions,
+  `ONEPROMPT_ACTIONS="2:clear,4.5:new-tab,6:close-tab"` plays menu actions (by their names
+  in kebab case) at those seconds after start.
 - No synthetic mouse clicks: window coordinates do not map reliably across the user's
   displays, and clicks have landed in other apps. Ask the user to try mouse behaviour.
 - Tests that use Cmd+C / Cmd+V save the clipboard first and restore it afterwards.

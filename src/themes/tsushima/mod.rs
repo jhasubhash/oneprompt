@@ -41,6 +41,7 @@ const CUT_TIME: f32 = 0.32;
 const REVEAL_TIME: f32 = 1.6;
 const SWITCH_TIME: f32 = 2.8;
 const BURN_TIME: f32 = 1.5;
+const CLEAR_TIME: f32 = 1.2;
 
 /// A failed command's stroke is dragged down the margin this fast.
 const FAILURE_TIME: f32 = 0.3;
@@ -245,6 +246,16 @@ impl Theme for Tsushima {
             .fold(0.0, f32::max);
         let data = PlanData::burn(at, far + 0.45, rng.unit() * 100.0);
         Some(Plan { duration: BURN_TIME * rng.range(0.9, 1.15), ease: 1.15, data: theme::bytes(&data) })
+    }
+
+    /// Clearing the screen cuts the old sheet in two with one stroke of the
+    /// sword, corner to corner; a breath, then the halves slide apart along
+    /// the cut and drop away, the clean sheet beneath.
+    fn clear(&self, _v: &Variant, rng: &mut Rng, aspect: f32) -> Option<Plan> {
+        let at = [aspect * rng.range(0.4, 0.6), rng.range(0.4, 0.6)];
+        let angle = rng.range(0.35, 0.65) * if rng.unit() < 0.5 { 1.0 } else { -1.0 };
+        let data = PlanData::slash(at, angle, rng.unit() * 100.0);
+        Some(Plan { duration: CLEAR_TIME, ease: 1.0, data: theme::bytes(&data) })
     }
 
     /// The bleed keeps creeping for `bleed_time`.

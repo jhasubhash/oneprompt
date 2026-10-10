@@ -11,6 +11,8 @@
 //!   oneprompt --default-config   print the settings file Cmd+, would create
 //!   ONEPROMPT_SNAPSHOT=dir    render every theme to dir/<theme>.png and exit
 //!   ONEPROMPT_SNAPSHOT_SWITCH=n   with it, also n frames of each switch
+//!   ONEPROMPT_ACTIONS="2:clear,4.5:new-tab"   menu actions at those seconds
+//!                             after start (testing without keystrokes)
 
 mod animation;
 mod boxdraw;
@@ -602,6 +604,11 @@ impl App {
                 }
             }
             Action::Clear => {
+                // The old screen goes the theme's way, over the cleared one.
+                let theme = self.themes[self.current].clone();
+                if let Some(r) = self.renderer.as_mut() {
+                    r.start_clear(&theme);
+                }
                 if let Some(t) = self.terminal() {
                     t.clear();
                 }
@@ -1077,6 +1084,7 @@ impl App {
             let dry_time = if config.ink_drying.unwrap_or(true) { config.drying_time.unwrap_or(4.0) } else { 0.0 };
             r.set_ink_life(dry_time, config.ink_aging.unwrap_or(0.3));
             r.set_idle(config.idle_scene.unwrap_or(true).then(|| config.idle_after.unwrap_or(60.0)));
+            r.set_effects(config.close_effect.unwrap_or(true), config.clear_effect.unwrap_or(true));
         }
         // ONEPROMPT_SEED (used for screenshots) wins over the file.
         if std::env::var_os("ONEPROMPT_SEED").is_none()
@@ -2041,6 +2049,32 @@ impl ApplicationHandler<UserEvent> for App {
     }
 }
 
+/// Sends the menu actions `ONEPROMPT_ACTIONS` lists ("2:clear,4.5:new-tab":
+/// seconds after start, then the action's name) at their times, so the GUI
+/// can be tested without sending keystrokes.
+fn play_actions(proxy: winit::event_loop::EventLoopProxy<UserEvent>) {
+    let Ok(list) = std::env::var("ONEPROMPT_ACTIONS") else { return };
+    let mut steps: Vec<(f32, menu::Action)> = Vec::new();
+    for item in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let parsed = item.split_once(':').and_then(|(at, name)| Some((at.trim().parse().ok()?, menu::Action::from_name(name.trim())?)));
+        match parsed {
+            Some(step) => steps.push(step),
+            None => eprintln!("oneprompt: ONEPROMPT_ACTIONS: can't read `{item}` (seconds:action)"),
+        }
+    }
+    steps.sort_by(|a, b| a.0.total_cmp(&b.0));
+    std::thread::spawn(move || {
+        let start = Instant::now();
+        for (at, action) in steps {
+            let wait = Duration::from_secs_f32(at.max(0.0)).saturating_sub(start.elapsed());
+            std::thread::sleep(wait);
+            if proxy.send_event(UserEvent::Menu(action)).is_err() {
+                return;
+            }
+        }
+    });
+}
+
 /// A tab's name in the strip: what its program called it, else the shell's.
 fn tab_label(tab: &Tab, index: usize) -> String {
     if let Some(name) = &tab.name {
@@ -2092,6 +2126,7 @@ fn main() {
         Err(err) => (Config::default(), Some(err)),
     };
     config::watch(config_path.clone(), event_loop.create_proxy());
+    play_actions(event_loop.create_proxy());
     let themes = config.themes();
     // The window (and with it the system's light/dark mode) does not exist
     // yet; `resumed` picks the right variant.

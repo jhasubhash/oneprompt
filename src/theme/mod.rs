@@ -76,6 +76,11 @@ pub trait Theme: Sync + 'static {
     fn close(&self, _variant: &Variant, _rng: &mut Rng, _aspect: f32) -> Option<Plan> {
         None
     }
+    /// How the screen is cleared (Cmd+K): the old sheet goes, the cleared
+    /// one beneath. None: it simply clears.
+    fn clear(&self, _variant: &Variant, _rng: &mut Rng, _aspect: f32) -> Option<Plan> {
+        None
+    }
     /// Seconds the ink keeps changing after a character is written (at
     /// speed 1), so the window keeps redrawing that long.
     fn settle_time(&self, _variant: &Variant) -> f32 {

@@ -609,6 +609,8 @@ pub struct Renderer {
     idle_until: f32,
     /// The window is going: its last transition shows nothing after.
     closing: bool,
+    /// The theme's effects for closing and for clearing, on or off.
+    effects: (bool, bool),
     /// Whether struck names fling blood.
     splatter: bool,
     /// Every pane's grid and writing state, by pane id, and the one being
@@ -827,6 +829,7 @@ impl Renderer {
             sweep: None,
             idle_until: f32::NEG_INFINITY,
             closing: false,
+            effects: (true, true),
             splatter: true,
             panes: HashMap::new(),
             pane: 0,
@@ -1246,11 +1249,36 @@ impl Renderer {
     /// window. Returns false if there is nothing to show (no animation, or
     /// the theme has none).
     pub fn start_close(&mut self, variant: &Variant, window: bool) -> bool {
-        if !self.animation.0 {
+        if !self.animation.0 || !self.effects.0 {
             return false;
         }
         let aspect = self.aspect();
         let Some(plan) = variant.theme.close(variant, &mut self.rng, aspect) else { return false };
+        self.closing = window;
+        self.start_over_last(plan);
+        true
+    }
+
+    /// Starts the way `variant`'s theme clears the screen (Cmd+K), over the
+    /// last frame shown.
+    pub fn start_clear(&mut self, variant: &Variant) {
+        if !self.animation.0 || !self.effects.1 {
+            return;
+        }
+        let aspect = self.aspect();
+        if let Some(plan) = variant.theme.clear(variant, &mut self.rng, aspect) {
+            self.start_over_last(plan);
+        }
+    }
+
+    /// Which of the theme's effects play: closing a tab or the window, and
+    /// clearing the screen.
+    pub fn set_effects(&mut self, close: bool, clear: bool) {
+        self.effects = (close, clear);
+    }
+
+    /// Starts `plan` over the frame last shown.
+    fn start_over_last(&mut self, plan: api::Plan) {
         let mut encoder = self.device.create_command_encoder(&Default::default());
         encoder.copy_texture_to_texture(
             self.targets.scene.as_image_copy(),
@@ -1258,9 +1286,7 @@ impl Renderer {
             wgpu::Extent3d { width: self.config.width, height: self.config.height, depth_or_array_layers: 1 },
         );
         self.queue.submit(Some(encoder.finish()));
-        self.closing = window;
         self.start(plan, animation::From::PreviousFrame);
-        true
     }
 
     /// No transition is running (a closing window may go).
