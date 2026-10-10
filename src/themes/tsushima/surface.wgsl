@@ -1,0 +1,96 @@
+// Tsushima's sheet: hand-made washi, procedural, so it is resolution
+// independent and costs no image assets.
+
+fn fbm(p: vec2<f32>) -> f32 {
+    var v = 0.0;
+    var amp = 0.5;
+    var q = p;
+    for (var k = 0; k < 5; k++) {
+        v += amp * noise(q);
+        q = q * 2.03 + vec2<f32>(17.0, 9.0);
+        amp *= 0.5;
+    }
+    return v;
+}
+
+fn vignette(uv: vec2<f32>) -> f32 {
+    let d = distance(uv, vec2<f32>(0.5));
+    return smoothstep(0.35, 0.85, d);
+}
+
+// Hand-made washi: a rough, lumpy tooth lit from the top left, mottled pulp,
+// long fibers, and the hard-edged tide lines water leaves when it dries.
+fn washi(px_in: vec2<f32>, uv: vec2<f32>) -> vec3<f32> {
+    // The session seed shifts every pattern, so each launch is a new sheet.
+    let px = px_in + sheet_offset();
+
+    // Dark sheets (konshi) are shaded towards a lighter tone, so their
+    // vignette has to darken separately instead of going through `shade`.
+    let dark_sheet = dot(frame.surface.rgb, vec3<f32>(0.3, 0.59, 0.11)) < 0.5;
+    let clouds = fbm(px * 0.006);
+    let mottle = noise(px * 0.05) * 0.6 + noise(px * 0.13) * 0.4;
+    let grain = hash(px) - 0.5;
+    // `texture` scales the paper itself; `stains` the water marks below.
+    let texture = look.shade.w;
+    let stains = look.stains;
+    var shade = (clouds * 0.3 + mottle * 0.12 + grain * 0.08) * texture;
+    if (!dark_sheet) {
+        // Parchment browns heavily towards the corners, as in the paintings.
+        shade += vignette(uv) * 0.75;
+    }
+
+    // Water stains: regions of a slow noise field. Pigment collects at the
+    // edge where the water stopped: a thin, dark, slightly ragged tide line
+    // with a faint wash inside.
+    //
+    // Text starts on the left, so the stains keep mostly to the right: the
+    // field is tilted to rise across the sheet (tide lines are where it
+    // crosses a level), and what still reaches the left half fades out.
+    let tilt = (uv.x - 0.5) * 0.12;
+    let field = fbm(px * 0.0016 + vec2<f32>(3.7, 1.3)) + tilt + (noise(px * 0.08) - 0.5) * 0.012;
+    let keep = mix(0.2, 1.0, smoothstep(0.2, 0.62, uv.x));
+    for (var k = 0; k < 3; k++) {
+        let level = 0.58 + f32(k) * 0.045;
+        let inside = field - level;
+        let edge = smoothstep(-0.002, 0.0, inside);
+        shade += edge * (0.06 + 0.5 * exp(-max(inside, 0.0) * 260.0)) * stains * keep;
+    }
+
+    var color = mix(frame.surface.rgb, look.shade.rgb, clamp(shade, 0.0, 1.0));
+
+    // Relief: light the tooth from the top left so the sheet reads as rough.
+    let e = 0.75;
+    let dx = tooth(px + vec2<f32>(e, 0.0)) - tooth(px - vec2<f32>(e, 0.0));
+    let dy = tooth(px + vec2<f32>(0.0, e)) - tooth(px - vec2<f32>(0.0, e));
+    let lit = clamp(-(dx + dy) * 1.6, -1.0, 1.0);
+    color = color * (1.0 + lit * select(0.11, 0.55, dark_sheet) * texture);
+    if (dark_sheet) {
+        color = color * (1.0 - vignette(uv) * 0.35);
+    }
+
+    // Fibers: mostly lighter than the sheet, a few darker ones.
+    var light = 0.0;
+    for (var k = 0; k < 3; k++) {
+        light += fiber(px, 0.5 + f32(k) * 1.9, f32(k) * 21.0);
+    }
+    color = mix(color, mix(color, vec3<f32>(1.0), select(0.1, 0.07, dark_sheet)), clamp(light * texture, 0.0, 1.0));
+    let dark = fiber(px, 2.4, 57.0);
+    color = mix(color, look.shade.rgb * 0.8, clamp(dark * select(0.2, 0.18, dark_sheet) * texture, 0.0, 1.0));
+
+    // A few flicks of ink splatter in the top-right corner, well away from
+    // where the text starts.
+    let corner = smoothstep(0.55, 1.0, uv.x) * smoothstep(0.45, 0.0, uv.y);
+    let cell = floor(px / 9.0);
+    let h = hash(cell + 0.5);
+    if (h > 1.0 - 0.06 * corner * look.splatter.w) {
+        let center = (cell + vec2<f32>(hash(cell + 1.3), hash(cell + 2.9))) * 9.0;
+        let radius = 0.6 + 2.4 * hash(cell + 4.1) * hash(cell + 7.7);
+        let dot_mask = 1.0 - smoothstep(radius - 0.6, radius + 0.6, distance(px, center));
+        color = mix(color, look.splatter.rgb, dot_mask * 0.8);
+    }
+    return clamp(color, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+fn surface(px: vec2<f32>, uv: vec2<f32>) -> vec3<f32> {
+    return washi(px, uv);
+}

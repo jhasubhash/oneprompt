@@ -1,12 +1,16 @@
-//! GPU side. Each frame is built in two passes:
+//! GPU side, the framework every theme draws through (`theme` has the API).
+//! Each frame is built in three passes, each running the current theme's
+//! stage (its own shader, or the framework's plain default):
 //! 1. Ink pass, into an offscreen "ink layer": everything drawn *with ink*
-//!    (text via glyphon, underlines, box drawing, the window controls).
-//! 2. Main pass, into the offscreen scene: the procedural surface (paper,
-//!    washi, chalkboard, ...), cell backgrounds / selection / cursor, then the
-//!    ink layer composited by `ink.wgsl`, which makes it bleed into the
-//!    surface and brushes new characters in.
-//! 3. Present pass, onto the window: copies the scene, or during a
-//!    transition reveals it through a growing brush shape (`present.wgsl`).
+//!    (text via glyphon, underlines, box drawing, the window controls, the
+//!    cursor and struck-out names, which are shapes).
+//! 2. Main pass, into the offscreen scene: the surface stage, cell
+//!    backgrounds / selection, then the ink layer composited by the ink
+//!    stage, which decides how ink behaves on the surface and writes new
+//!    characters in.
+//! 3. Present pass, onto the window: copies the scene, or while a reveal or
+//!    switch runs, the incoming theme's transition stage shows it over what
+//!    was there before.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -28,9 +32,12 @@ use crate::boxdraw;
 use crate::color;
 use crate::trace::{self, GlyphKey, Slot, Tracer};
 use crate::chrome::{self, Control};
+use crate::picker;
 use crate::strike::{Strikes, Struck};
 use crate::terminal::GridSize;
-use crate::theme::{ControlStyle, Theme};
+use crate::theme::{
+    self as api, ControlStyle, Ctx, Cursor, CursorKind, Shape, StrikeSpan, Theme, Variant, CROSS, DISC, RING,
+};
 
 /// Margin around the grid, in logical pixels.
 const PADDING: f32 = 24.0;
@@ -50,96 +57,225 @@ const CELL_BG_ALPHA: f32 = 0.85;
 const WASH_ALPHA_LIGHT: f32 = 0.13;
 const WASH_ALPHA_DARK: f32 = 0.1;
 
+/// What every stage of every theme sees (prelude.wgsl, `Frame`).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct Uniforms {
-    surface: [f32; 4],
-    surface_shade: [f32; 4],
-    accent: [f32; 4],
+struct Frame {
     resolution: [f32; 2],
-    seed: f32,
     scale: f32,
-    /// x: water-stain strength.
-    extra: [f32; 4],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct InkParams {
-    resolution: [f32; 2],
-    bleed: f32,
-    grain: f32,
-    edge: f32,
     seed: f32,
-    nib: f32,
     time: f32,
+    speed: f32,
+    progress: f32,
+    _pad0: f32,
+    from_color: [f32; 4],
     grid_origin: [f32; 2],
     cell: [f32; 2],
     grid_size: [f32; 2],
+    slot_size: [f32; 2],
     write_time: f32,
     atlas_columns: f32,
-    slot_size: [f32; 2],
-    bleed_variation: f32,
-    bleed_time: f32,
-    /// Physical pixels per logical pixel, paper texture strength, absorb.
-    paper: [f32; 4],
+    _pad1: [f32; 2],
+    surface: [f32; 4],
+    ink: [f32; 4],
+    accent: [f32; 4],
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct PresentParams {
-    resolution: [f32; 2],
-    progress: f32,
-    seed: f32,
-    from_color: [f32; 4],
-    /// Edge raggedness: lobes, chunks, bristles, lobe size.
-    edge: [f32; 4],
-    /// Number of marks, 1 / latest arrival, noise seed, soak speed.
-    info: [f32; 4],
-    /// Colour of the fresh edge of sword cuts (rgb), how strong.
-    cut: [f32; 4],
-    /// How the front runs: progress × x + y; z: how the wash slows.
-    front: [f32; 4],
-    /// Three per mark: (x, y, angle, half width), (delay, speed, bend, kind),
-    /// and for cuts (length, hold, droplet side, splatter).
-    marks: [[f32; 4]; 3 * animation::MAX_MARKS],
+/// The framework's shader parts (see `theme` for how stages are put together).
+const PRELUDE: &str = include_str!("shaders/prelude.wgsl");
+const SURFACE_STAGE: &str = include_str!("shaders/surface_stage.wgsl");
+const SHAPES_STAGE: &str = include_str!("shaders/shapes_stage.wgsl");
+const INK_STAGE: &str = include_str!("shaders/ink_stage.wgsl");
+const TRANSITION_STAGE: &str = include_str!("shaders/transition_stage.wgsl");
+const SURFACE_DEFAULT: &str = include_str!("shaders/surface_default.wgsl");
+const SHAPES_DEFAULT: &str = include_str!("shaders/shapes_default.wgsl");
+const INK_DEFAULT: &str = include_str!("shaders/ink_default.wgsl");
+const TRANSITION_DEFAULT: &str = include_str!("shaders/transition_default.wgsl");
+
+/// One stage's full source: the prelude, the theme's common part, the
+/// framework's part, and the theme's function (or the default).
+fn stage_source(theme: &dyn Theme, stage: &str, own: Option<&str>, default: &str) -> String {
+    format!("{PRELUDE}\n{}\n{stage}\n{}", theme.shaders().common, own.unwrap_or(default))
 }
 
-impl PresentParams {
-    fn new(resolution: [f32; 2], seed: f32, transition: Option<(&Transition, f32)>) -> Self {
-        let mut params = Self {
-            resolution,
-            progress: 1.0,
-            seed,
-            from_color: [0.0; 4],
-            edge: [0.0; 4],
-            info: [0.0; 4],
-            cut: [0.0; 4],
-            front: [0.0; 4],
-            marks: [[0.0; 4]; 3 * animation::MAX_MARKS],
+/// Every stage's source for `theme`: surface, shapes, ink, transition.
+fn stage_sources(theme: &dyn Theme) -> [String; 4] {
+    let own = theme.shaders();
+    [
+        stage_source(theme, SURFACE_STAGE, own.surface, SURFACE_DEFAULT),
+        stage_source(theme, SHAPES_STAGE, own.shapes, SHAPES_DEFAULT),
+        stage_source(theme, INK_STAGE, own.ink, INK_DEFAULT),
+        stage_source(theme, TRANSITION_STAGE, own.transition, TRANSITION_DEFAULT),
+    ]
+}
+
+/// The bind group layouts stages are built against, and their pipeline
+/// layouts. Binding 0 is the frame, 1 the theme's data, in every stage.
+struct Layouts {
+    /// Surface and shapes: frame and data.
+    frame: wgpu::BindGroupLayout,
+    /// Ink: also the ink layer, its sampler, births and the pen-order atlas.
+    ink: wgpu::BindGroupLayout,
+    /// Transition: also the plan, the scene and the previous frame.
+    transition: wgpu::BindGroupLayout,
+    frame_pipeline: wgpu::PipelineLayout,
+    ink_pipeline: wgpu::PipelineLayout,
+    transition_pipeline: wgpu::PipelineLayout,
+}
+
+impl Layouts {
+    fn new(device: &wgpu::Device) -> Self {
+        let uniform = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
         };
-        let Some((t, now)) = transition else { return params };
-        let b = &t.brush;
-        params.progress = t.progress(now).min(0.999);
-        if let animation::From::Color([r, g, bl]) = t.from {
-            params.from_color = [r, g, bl, 1.0];
+        let layout = |label, entries: &[wgpu::BindGroupLayoutEntry]| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some(label), entries })
+        };
+        let frame = layout("frame layout", &[uniform(0), uniform(1)]);
+        let ink = layout(
+            "ink layout",
+            &[
+                uniform(0),
+                uniform(1),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                Renderer::plain_texture_entry(4),
+                Renderer::plain_texture_entry(5),
+            ],
+        );
+        let transition = layout(
+            "transition layout",
+            &[uniform(0), uniform(1), uniform(2), Renderer::plain_texture_entry(3), Renderer::plain_texture_entry(4)],
+        );
+        let pipeline = |label, group: &wgpu::BindGroupLayout| {
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some(label),
+                bind_group_layouts: &[Some(group)],
+                immediate_size: 0,
+            })
+        };
+        Self {
+            frame_pipeline: pipeline("frame pipeline layout", &frame),
+            ink_pipeline: pipeline("ink pipeline layout", &ink),
+            transition_pipeline: pipeline("transition pipeline layout", &transition),
+            frame,
+            ink,
+            transition,
         }
-        params.edge = [b.lobes, b.chunks, b.bristles, b.lobe_scale];
-        params.info = [b.count as f32, b.norm, b.shape, b.soak];
-        let [r, g, bl] = t.cut.map(|c| c as f32 / 255.0);
-        params.cut = [r, g, bl, 0.9];
-        params.front = [b.front[0], b.front[1], animation::WASH_SPREAD, 0.0];
-        for (i, m) in b.marks[..b.count].iter().enumerate() {
-            let kind = match m.kind {
-                animation::Kind::Stroke => 0.0,
-                animation::Kind::Drop => 1.0,
-                animation::Kind::Slash => 2.0,
-            };
-            params.marks[3 * i] = [m.at[0], m.at[1], m.angle, m.width];
-            params.marks[3 * i + 1] = [m.delay, m.speed, m.bend, kind];
-            params.marks[3 * i + 2] = [m.length, m.hold, m.side, m.splatter];
+    }
+}
+
+/// A theme's pipelines, one per stage, built the first time it is drawn.
+struct Stages {
+    surface: wgpu::RenderPipeline,
+    shapes: wgpu::RenderPipeline,
+    ink: wgpu::RenderPipeline,
+    transition: wgpu::RenderPipeline,
+}
+
+impl Stages {
+    fn new(device: &wgpu::Device, layouts: &Layouts, format: wgpu::TextureFormat, theme: &dyn Theme) -> Self {
+        let [surface, shapes, ink, transition] = stage_sources(theme);
+        let build = |label: &str,
+                     source: String,
+                     layout: &wgpu::PipelineLayout,
+                     blend: Option<wgpu::BlendState>,
+                     buffers: &[Option<wgpu::VertexBufferLayout>],
+                     topology| {
+            let label = format!("{} {label}", theme.id());
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(&label),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            });
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(&label),
+                layout: Some(layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_main"),
+                    buffers,
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState { format, blend, write_mask: wgpu::ColorWrites::ALL })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState { topology, ..Default::default() },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let list = wgpu::PrimitiveTopology::TriangleList;
+        let instances = [Some(wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Shape>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4],
+        })];
+        Self {
+            surface: build("surface", surface, &layouts.frame_pipeline, None, &[], list),
+            shapes: build(
+                "shapes",
+                shapes,
+                &layouts.frame_pipeline,
+                Some(wgpu::BlendState::ALPHA_BLENDING),
+                &instances,
+                wgpu::PrimitiveTopology::TriangleStrip,
+            ),
+            // The ink layer holds premultiplied colour.
+            ink: build("ink", ink, &layouts.ink_pipeline, Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING), &[], list),
+            transition: build("transition", transition, &layouts.transition_pipeline, None, &[], list),
         }
-        params
+    }
+}
+
+/// Uniform buffers every stage reads: the frame, the theme's data, and the
+/// running transition's plan.
+struct Buffers {
+    frame: wgpu::Buffer,
+    data: wgpu::Buffer,
+    plan: wgpu::Buffer,
+}
+
+impl Buffers {
+    fn new(device: &wgpu::Device) -> Self {
+        let uniform = |label, size: usize| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: size as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+        Self {
+            frame: uniform("frame", std::mem::size_of::<Frame>()),
+            data: uniform("theme data", api::DATA_SIZE),
+            plan: uniform("transition plan", api::PLAN_SIZE),
+        }
     }
 }
 
@@ -147,90 +283,14 @@ impl PresentParams {
 const WRITE_TIME: f32 = 0.38;
 /// Pen-order atlas, one cell-sized slot per traced glyph.
 const TRACE_ATLAS: (u32, u32) = (2048, 2048);
-/// Window reveal on startup and between light and dark, at speed 1.
-const INTRO_TIME: f32 = 1.6;
-const SWITCH_TIME: f32 = 2.8;
 /// Longest a batch of output takes to write, at speed 1.
 const MAX_WRITE: f32 = 1.5;
 
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct RectGlobals {
-    resolution: [f32; 2],
-    _pad: [f32; 2],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct Rect {
-    rect: [f32; 4],
-    color: [f32; 4],
-    /// Shape kind, brush roughness, stroke width, seed (see rect.wgsl).
-    params: [f32; 4],
-}
-
-/// Shape kinds understood by rect.wgsl.
-const SHAPE_DISC: f32 = 1.0;
-const SHAPE_RING: f32 = 2.0;
-const SHAPE_CROSS: f32 = 3.0;
-const SHAPE_DAB: f32 = 4.0;
-const SHAPE_SLASH: f32 = 5.0;
-
-/// How long the sword takes to cut through a deleted name, at speed 1, and
-/// how much later each further mention of it is cut.
-const STRIKE_TIME: f32 = 0.22;
+/// Each further mention of one deleted name is struck this much later.
 const STRIKE_STAGGER: f32 = 0.04;
-/// How far struck text fades towards the paper.
-const STRIKE_FADE: f32 = 0.45;
-/// Blood flung off the blade: how long until it has dried to a stain (at
-/// speed 1, after the cut), and how strong the dried stain stays.
-const SPLATTER_DRY: f32 = 2.4;
-const SPLATTER_STAIN: f32 = 0.3;
-/// Mentions beyond this many get no splatter, so deleting a whole tree
-/// does not drown the screen.
-const MAX_SPLATTERED: usize = 60;
-
-impl Rect {
-    fn new(x: f32, y: f32, w: f32, h: f32, rgb: [u8; 3], alpha: f32) -> Self {
-        let [r, g, b] = rgb.map(|c| c as f32 / 255.0);
-        Self { rect: [x, y, w, h], color: [r, g, b, alpha], params: [0.0; 4] }
-    }
-
-    /// A round shape centred on (cx, cy).
-    fn shape(kind: f32, cx: f32, cy: f32, radius: f32, rgb: [u8; 3], alpha: f32) -> Self {
-        let d = radius * 2.0 + 2.0;
-        let mut rect = Self::new(cx - d / 2.0, cy - d / 2.0, d, d, rgb, alpha);
-        rect.params[0] = kind;
-        rect
-    }
-
-    /// A dab of the brush filling the box (x, y, w, h), with a pixel of
-    /// room around it for the ragged edge.
-    fn dab(x: f32, y: f32, w: f32, h: f32, rgb: [u8; 3], alpha: f32) -> Self {
-        let mut rect = Self::new(x - 1.0, y - 1.0, w + 2.0, h + 2.0, rgb, alpha);
-        rect.params[0] = SHAPE_DAB;
-        rect
-    }
-
-    fn rough(mut self, roughness: f32, seed: f32) -> Self {
-        self.params[1] = roughness;
-        self.params[3] = seed;
-        self
-    }
-
-    fn stroke(mut self, width: f32) -> Self {
-        self.params[2] = width;
-        self
-    }
-
-    /// A sword cut through the box (x, y, w, h), drawn in up to `progress`
-    /// (0..1) of the way across.
-    fn slash(x: f32, y: f32, w: f32, h: f32, rgb: [u8; 3], progress: f32, seed: f32) -> Self {
-        let mut rect = Self::new(x, y, w, h, rgb, 1.0);
-        rect.params = [SHAPE_SLASH, progress, 0.0, seed];
-        rect
-    }
-}
+/// Mentions beyond this many get no extras (blood, ...), so deleting a whole
+/// tree does not drown the screen.
+const MAX_STRIKE_EXTRAS: usize = 60;
 
 /// What is installed for a font family.
 #[derive(Clone, Debug)]
@@ -262,6 +322,7 @@ pub struct Notice {
 /// Everything sized by the window or the grid, rebuilt together.
 struct Targets {
     /// Ink is drawn here before it is composited onto the surface.
+    ink: wgpu::Texture,
     ink_view: wgpu::TextureView,
     ink_bind_group: wgpu::BindGroup,
     /// The finished frame, before the present pass copies it to the window.
@@ -279,14 +340,13 @@ impl Targets {
     #[allow(clippy::too_many_arguments)]
     fn new(
         device: &wgpu::Device,
-        ink_layout: &wgpu::BindGroupLayout,
-        ink_params: &wgpu::Buffer,
+        layouts: &Layouts,
+        buffers: &Buffers,
         ink_sampler: &wgpu::Sampler,
-        present_layout: &wgpu::BindGroupLayout,
-        present_params: &wgpu::Buffer,
         trace_atlas: &wgpu::TextureView,
         config: &wgpu::SurfaceConfiguration,
         grid: (u32, u32),
+        keep: Option<&Targets>,
     ) -> Self {
         let size = wgpu::Extent3d { width: config.width, height: config.height, depth_or_array_layers: 1 };
         let texture = |label, usage| {
@@ -302,9 +362,16 @@ impl Targets {
             })
         };
         use wgpu::TextureUsages as U;
-        let ink = texture("ink layer", U::RENDER_ATTACHMENT | U::TEXTURE_BINDING);
-        let scene = texture("scene", U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_SRC);
-        let previous = texture("previous frame", U::TEXTURE_BINDING | U::COPY_DST);
+        // Only the grid changed (another theme's font): keep the window-sized
+        // textures, so a transition still has the previous frame.
+        let (ink, scene, previous) = match keep.filter(|t| t.scene.width() == config.width && t.scene.height() == config.height) {
+            Some(t) => (t.ink.clone(), t.scene.clone(), t.previous.clone()),
+            None => (
+                texture("ink layer", U::RENDER_ATTACHMENT | U::TEXTURE_BINDING),
+                texture("scene", U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_SRC),
+                texture("previous frame", U::TEXTURE_BINDING | U::COPY_DST),
+            ),
+        };
         let births = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("cell births"),
             size: wgpu::Extent3d { width: grid.0.max(1), height: grid.1.max(1), depth_or_array_layers: 1 },
@@ -320,28 +387,124 @@ impl Targets {
         let previous_view = previous.create_view(&Default::default());
         let births_view = births.create_view(&Default::default());
         let view = wgpu::BindingResource::TextureView;
+        let entry = |binding, resource| wgpu::BindGroupEntry { binding, resource };
         let ink_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("ink layer"),
-            layout: ink_layout,
+            label: Some("ink stage"),
+            layout: &layouts.ink,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: ink_params.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: view(&ink_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(ink_sampler) },
-                wgpu::BindGroupEntry { binding: 3, resource: view(&births_view) },
-                wgpu::BindGroupEntry { binding: 4, resource: view(trace_atlas) },
+                entry(0, buffers.frame.as_entire_binding()),
+                entry(1, buffers.data.as_entire_binding()),
+                entry(2, view(&ink_view)),
+                entry(3, wgpu::BindingResource::Sampler(ink_sampler)),
+                entry(4, view(&births_view)),
+                entry(5, view(trace_atlas)),
             ],
         });
         let present_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("present"),
-            layout: present_layout,
+            label: Some("transition stage"),
+            layout: &layouts.transition,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: present_params.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: view(&scene_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: view(&previous_view) },
+                entry(0, buffers.frame.as_entire_binding()),
+                entry(1, buffers.data.as_entire_binding()),
+                entry(2, buffers.plan.as_entire_binding()),
+                entry(3, view(&scene_view)),
+                entry(4, view(&previous_view)),
             ],
         });
-        Self { ink_view, ink_bind_group, scene, scene_view, previous, present_bind_group, births, grid }
+        Self { ink, ink_view, ink_bind_group, scene, scene_view, previous, present_bind_group, births, grid }
     }
+}
+
+/// The theme picker as drawn: the chosen card, and per theme the variant
+/// its card previews and the picture of it.
+struct PickerView {
+    selected: usize,
+    cards: Vec<PickerCard>,
+    title: Buffer,
+    hint: Buffer,
+}
+
+struct PickerCard {
+    variant: Variant,
+    /// The screen drawn in `variant`, at the window's size.
+    picture: Option<(wgpu::Texture, wgpu::BindGroup)>,
+    name: Buffer,
+    about: Buffer,
+}
+
+/// The pipeline that draws pictures (picker previews) into boxes.
+fn picker_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat) -> (wgpu::BindGroupLayout, wgpu::RenderPipeline) {
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("picture layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("picture pipeline layout"),
+        bind_group_layouts: &[Some(&layout)],
+        immediate_size: 0,
+    });
+    let source = format!("{PRELUDE}\n{}", include_str!("shaders/image.wgsl"));
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("picture"),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("picture"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &module,
+            entry_point: Some("vs_main"),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<Shape>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4],
+            })],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &module,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, ..Default::default() },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    });
+    (layout, pipeline)
 }
 
 pub struct Renderer {
@@ -351,36 +514,31 @@ pub struct Renderer {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
 
-    background: wgpu::RenderPipeline,
-    uniforms: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
-    /// Varies the paper and ink patterns per session (see `session_seed`).
+    layouts: Layouts,
+    buffers: Buffers,
+    /// Frame and theme data, for the surface and shapes stages.
+    frame_group: wgpu::BindGroup,
+    /// Each theme's stages, by theme id, built the first time it is drawn.
+    stages: HashMap<&'static str, Stages>,
+    /// Varies the surface and ink patterns per session (see `session_seed`).
     seed: f32,
 
-    rect_pipeline: wgpu::RenderPipeline,
-    rect_globals: wgpu::Buffer,
-    rect_bind_group: wgpu::BindGroup,
     rect_buffer: wgpu::Buffer,
-    /// Drawn on the surface, under the ink: cell backgrounds, selection, cursor.
-    rects: Vec<Rect>,
-    /// Drawn into the ink layer: underlines, box drawing, window controls.
-    ink_rects: Vec<Rect>,
-
-    ink_pipeline: wgpu::RenderPipeline,
-    ink_layout: wgpu::BindGroupLayout,
-    ink_params: wgpu::Buffer,
+    /// Drawn on the surface, under the ink: cell backgrounds, selection.
+    rects: Vec<Shape>,
+    /// Drawn into the ink layer: underlines, box drawing, window controls,
+    /// the cursor, struck-out names.
+    ink_rects: Vec<Shape>,
     ink_sampler: wgpu::Sampler,
-    present_pipeline: wgpu::RenderPipeline,
-    present_layout: wgpu::BindGroupLayout,
-    present_params: wgpu::Buffer,
     targets: Targets,
 
     /// Animation clock: births and transitions are measured on it.
     clock: Instant,
     /// Animations on, and their speed (1 = normal, 2 = twice as fast).
     animation: (bool, f32),
-    /// The current theme's bleed creep, seconds at speed 1 (for redraws).
-    bleed_time: f32,
+    /// How long the current theme's ink keeps changing after a character is
+    /// written, seconds at speed 1 (for redraws).
+    settle_time: f32,
     /// Characters per second when output is written out.
     writing_speed: f32,
     /// Map program-chosen colours onto the sheet (see color.rs).
@@ -391,7 +549,7 @@ pub struct Renderer {
     splatter: bool,
     animator: TextAnimator,
     transition: Option<Transition>,
-    /// Makes up the brushwork for reveals.
+    /// For themes' made-up-at-random reveals.
     rng: animation::Rng,
     /// Pen paths for the writing animation (see trace.rs).
     tracer: Tracer,
@@ -402,6 +560,14 @@ pub struct Renderer {
 
     /// Pointer is over the window controls: show their symbols.
     controls_hover: bool,
+    /// The theme picker, while it is open.
+    picker: Option<PickerView>,
+    picker_pipeline: wgpu::RenderPipeline,
+    picker_layout: wgpu::BindGroupLayout,
+    picker_buffer: wgpu::Buffer,
+    picker_text: TextRenderer,
+    /// Drawing a picker preview rather than the live screen.
+    thumbnail: bool,
 
     font_system: FontSystem,
     swash_cache: SwashCache,
@@ -481,231 +647,22 @@ impl Renderer {
         };
         configure_surface(&surface, &device, &config);
 
-        let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("uniform layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-        let uniform_buffer = |label, size: usize| {
-            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(label),
-                size: size as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(label),
-                layout: &uniform_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buffer.as_entire_binding(),
-                }],
-            });
-            (buffer, bind_group)
-        };
-        let (uniforms, bind_group) =
-            uniform_buffer("background uniforms", std::mem::size_of::<Uniforms>());
-        let (rect_globals, rect_bind_group) =
-            uniform_buffer("rect globals", std::mem::size_of::<RectGlobals>());
-
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("pipeline layout"),
-            bind_group_layouts: &[Some(&uniform_layout)],
-            immediate_size: 0,
-        });
-
-        let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/background.wgsl"));
-        let background = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("background"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(format.into())],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        let rect_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/rect.wgsl"));
-        let rect_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("rects"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &rect_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Rect>() as u64,
-                    step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4],
-                })],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &rect_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-        let rect_buffer = Self::create_rect_buffer(&device, 1024);
-
-        let ink_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("ink layout"),
+        let layouts = Layouts::new(&device);
+        let buffers = Buffers::new(&device);
+        let frame_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("frame"),
+            layout: &layouts.frame,
             entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                Self::plain_texture_entry(3),
-                Self::plain_texture_entry(4),
+                wgpu::BindGroupEntry { binding: 0, resource: buffers.frame.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: buffers.data.as_entire_binding() },
             ],
         });
-        let ink_params = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("ink params"),
-            size: std::mem::size_of::<InkParams>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let rect_buffer = Self::create_rect_buffer(&device, 1024);
         let ink_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("ink sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
-        });
-        let ink_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/ink.wgsl"));
-        let ink_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("ink pipeline layout"),
-            bind_group_layouts: &[Some(&ink_layout)],
-            immediate_size: 0,
-        });
-        let ink_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("ink composite"),
-            layout: Some(&ink_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &ink_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &ink_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    // The ink layer holds premultiplied colour.
-                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-        let present_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("present layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                Self::plain_texture_entry(1),
-                Self::plain_texture_entry(2),
-            ],
-        });
-        let present_params = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("present params"),
-            size: std::mem::size_of::<PresentParams>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let present_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/present.wgsl"));
-        let present_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("present pipeline layout"),
-            bind_group_layouts: &[Some(&present_layout)],
-            immediate_size: 0,
-        });
-        let present_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("present"),
-            layout: Some(&present_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &present_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &present_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(format.into())],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
         });
         let trace_atlas = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("pen order atlas"),
@@ -718,17 +675,7 @@ impl Renderer {
             view_formats: &[],
         });
         let trace_atlas_view = trace_atlas.create_view(&Default::default());
-        let targets = Targets::new(
-            &device,
-            &ink_layout,
-            &ink_params,
-            &ink_sampler,
-            &present_layout,
-            &present_params,
-            &trace_atlas_view,
-            &config,
-            (1, 1),
-        );
+        let targets = Targets::new(&device, &layouts, &buffers, &ink_sampler, &trace_atlas_view, &config, (1, 1), None);
 
         let mut font_system = FontSystem::new();
         let swash_cache = SwashCache::new();
@@ -737,6 +684,9 @@ impl Renderer {
         let mut atlas = TextAtlas::with_color_mode(&device, &queue, &cache, format, ColorMode::Web);
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let picker_text = TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let (picker_layout, picker_pipeline) = picker_pipeline(&device, format);
+        let picker_buffer = Self::create_rect_buffer(&device, 64);
         let mut text = Buffer::new(&mut font_system, Metrics::new(16.0, 22.0));
         text.borrow_with(&mut font_system).set_wrap(Wrap::None);
         let mut notice_text = Buffer::new(&mut font_system, Metrics::new(12.0, 16.0));
@@ -748,27 +698,19 @@ impl Renderer {
             device,
             queue,
             config,
-            background,
-            uniforms,
-            bind_group,
+            layouts,
+            buffers,
+            frame_group,
+            stages: HashMap::new(),
             seed: session_seed(),
-            rect_pipeline,
-            rect_globals,
-            rect_bind_group,
             rect_buffer,
             rects: Vec::new(),
             ink_rects: Vec::new(),
-            ink_pipeline,
-            ink_layout,
-            ink_params,
             ink_sampler,
-            present_pipeline,
-            present_layout,
-            present_params,
             targets,
             clock: Instant::now(),
             animation: (true, 1.0),
-            bleed_time: 0.0,
+            settle_time: 0.0,
             writing_speed: 500.0,
             harmonize: true,
             strikes_until: f32::NEG_INFINITY,
@@ -781,6 +723,12 @@ impl Renderer {
             trace_atlas,
             trace_atlas_view,
             controls_hover: false,
+            picker: None,
+            picker_pipeline,
+            picker_layout,
+            picker_buffer,
+            picker_text,
+            thumbnail: false,
             font_system,
             swash_cache,
             viewport,
@@ -810,7 +758,7 @@ impl Renderer {
     fn create_rect_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("rect instances"),
-            size: (capacity * std::mem::size_of::<Rect>()) as u64,
+            size: (capacity * std::mem::size_of::<Shape>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         })
@@ -834,22 +782,21 @@ impl Renderer {
     fn rebuild_targets(&mut self, grid: (u32, u32)) {
         self.targets = Targets::new(
             &self.device,
-            &self.ink_layout,
-            &self.ink_params,
+            &self.layouts,
+            &self.buffers,
             &self.ink_sampler,
-            &self.present_layout,
-            &self.present_params,
             &self.trace_atlas_view,
             &self.config,
             grid,
+            Some(&self.targets),
         );
     }
 
     /// Starts the pen-path atlas over when the glyphs would come out
     /// different: another cell size (zoom, scale) or another font.
-    fn reset_tracer_if_needed(&mut self, theme: &Theme) {
+    fn reset_tracer_if_needed(&mut self, variant: &Variant) {
         let slot = (self.cell_width.ceil() as u32 + 2, self.cell_height.ceil() as u32);
-        let font = (theme.font_family.clone(), theme.font_weight);
+        let font = (variant.font_family.clone(), variant.font_weight);
         if slot != self.tracer.slot_size || font != self.traced_font {
             self.tracer = Tracer::new(slot, TRACE_ATLAS);
             self.traced_font = font;
@@ -858,11 +805,11 @@ impl Renderer {
 
     /// Rasterizes `key` exactly as the terminal draws it and uploads its pen
     /// order to `slot`. Returns false if the glyph has no ink (a space).
-    fn trace_glyph(&mut self, theme: &Theme, key: GlyphKey, slot: u32) -> bool {
+    fn trace_glyph(&mut self, variant: &Variant, key: GlyphKey, slot: u32) -> bool {
         let (w, h) = self.tracer.slot_size;
-        let metrics = self.metrics(theme);
+        let metrics = self.metrics(variant);
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
-        let mut attrs = Attrs::new().family(Family::Name(&theme.font_family)).weight(Weight(key.weight));
+        let mut attrs = Attrs::new().family(Family::Name(&variant.font_family)).weight(Weight(key.weight));
         if key.italic {
             attrs = attrs.style(Style::Italic);
         }
@@ -949,32 +896,46 @@ impl Renderer {
         self.writing_speed = writing_speed;
     }
 
-    /// Brushwork made up for this window: every reveal is different.
-    fn new_brush(&mut self) -> animation::Brush {
-        let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
-        animation::Brush::random(&mut self.rng, aspect)
+    fn aspect(&self) -> f32 {
+        self.config.width as f32 / self.config.height.max(1) as f32
     }
 
-    /// Reveals the first frame over a solid colour (the window opening).
-    pub fn start_intro(&mut self, from: [u8; 3]) {
+    /// What theme hooks get to know about the window.
+    fn ctx(&self) -> Ctx {
+        Ctx {
+            scale: self.window.scale_factor() as f32,
+            cell: [self.cell_width, self.cell_height],
+            speed: self.animation.1,
+        }
+    }
+
+    /// Starts `plan` (at speed 1) over `from`.
+    fn start(&mut self, plan: api::Plan, from: animation::From) {
+        self.transition = Some(Transition {
+            start: self.now(),
+            duration: plan.duration / self.animation.1,
+            ease: plan.ease,
+            from,
+            data: plan.data,
+        });
+    }
+
+    /// Reveals the first frame over a solid colour (the window opening), the
+    /// way `variant`'s theme opens.
+    pub fn start_intro(&mut self, from: [u8; 3], variant: &Variant) {
         if !self.animation.0 {
             return;
         }
         let color = from.map(|c| c as f32 / 255.0);
-        let brush = self.new_brush();
-        self.transition = Some(Transition {
-            start: self.now(),
-            duration: INTRO_TIME / self.animation.1,
-            from: animation::From::Color(color),
-            brush,
-            cut: [0; 3],
-        });
+        let aspect = self.aspect();
+        if let Some(plan) = variant.theme.reveal(variant, &mut self.rng, aspect) {
+            self.start(plan, animation::From::Color(color));
+        }
     }
 
-    /// Reveals the next frames over the last one shown (light / dark
-    /// switch): a flurry of sword cuts made up at random, edged in `cut`
-    /// (the new look's seal ink), at a slightly varied pace.
-    pub fn start_transition(&mut self, cut: [u8; 3]) {
+    /// Reveals the next frames over the last one shown, the way `variant`'s
+    /// theme takes over (from its other variant, or from another theme).
+    pub fn start_transition(&mut self, variant: &Variant) {
         if !self.animation.0 {
             return;
         }
@@ -985,27 +946,21 @@ impl Renderer {
             wgpu::Extent3d { width: self.config.width, height: self.config.height, depth_or_array_layers: 1 },
         );
         self.queue.submit(Some(encoder.finish()));
-        let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
-        let brush = animation::Brush::sword(&mut self.rng, aspect);
-        let pace = self.rng.range(0.85, 1.2);
-        self.transition = Some(Transition {
-            start: self.now(),
-            duration: SWITCH_TIME * pace / self.animation.1,
-            from: animation::From::PreviousFrame,
-            brush,
-            cut,
-        });
+        let aspect = self.aspect();
+        if let Some(plan) = variant.theme.switch(variant, &mut self.rng, aspect) {
+            self.start(plan, animation::From::PreviousFrame);
+        }
     }
 
     /// Whether something is still moving, so the app keeps redrawing.
     pub fn is_animating(&self) -> bool {
         let now = self.now();
         let write_time = WRITE_TIME / self.animation.1;
-        // Ink is wet for a few write times; its bleed creeps for longer.
-        let bleed_time = self.bleed_time / self.animation.1;
-        self.transition.is_some_and(|t| !t.done(now))
+        // Ink is wet for a few write times; it may keep settling for longer.
+        let settle_time = self.settle_time / self.animation.1;
+        self.transition.as_ref().is_some_and(|t| !t.done(now))
             || now < self.strikes_until
-            || (self.animation.0 && now - self.animator.latest_birth() < (write_time * 4.0).max(bleed_time))
+            || (self.animation.0 && now - self.animator.latest_birth() < (write_time * 4.0).max(settle_time))
     }
 
     pub fn window(&self) -> &Window {
@@ -1019,7 +974,7 @@ impl Renderer {
         let grid = self.targets.grid;
         self.rebuild_targets(grid);
         // A resized window cannot reveal over a frame of the old size.
-        if self.transition.is_some_and(|t| t.from == animation::From::PreviousFrame) {
+        if self.transition.as_ref().is_some_and(|t| t.from == animation::From::PreviousFrame) {
             self.transition = None;
         }
     }
@@ -1168,17 +1123,17 @@ impl Renderer {
         (PADDING * scale, (TITLE_STRIP + PADDING * 0.5) * scale)
     }
 
-    fn metrics(&self, theme: &Theme) -> Metrics {
+    fn metrics(&self, variant: &Variant) -> Metrics {
         let scale = self.window.scale_factor() as f32 * self.zoom * self.fit;
-        Metrics::new(theme.font_size * scale, (theme.line_height * scale).round())
+        Metrics::new(variant.font_size * scale, (variant.line_height * scale).round())
     }
 
     /// How many cells fit the window. While a full-screen app runs, the
     /// text shrinks (down to `MIN_FIT`) until the grid is at least
     /// `FULL_SCREEN_MIN`.
-    pub fn grid_size(&mut self, theme: &Theme) -> GridSize {
+    pub fn grid_size(&mut self, variant: &Variant) -> GridSize {
         self.fit = 1.0;
-        let mut size = self.measure(theme);
+        let mut size = self.measure(variant);
         let (columns, lines) = FULL_SCREEN_MIN;
         // Cell size scales with the font, apart from rounding: aim for the
         // ratio, then step down a little until it fits.
@@ -1188,20 +1143,20 @@ impl Renderer {
             }
             let ratio = (size.columns as f32 / columns as f32).min(size.lines as f32 / lines as f32);
             self.fit = (self.fit * ratio.min(0.97)).max(MIN_FIT);
-            size = self.measure(theme);
+            size = self.measure(variant);
         }
         size
     }
 
     /// Measures the theme's font at the current size and returns how many
     /// cells fit the window.
-    fn measure(&mut self, theme: &Theme) -> GridSize {
-        let metrics = self.metrics(theme);
+    fn measure(&mut self, variant: &Variant) -> GridSize {
+        let metrics = self.metrics(variant);
         let mut probe = Buffer::new(&mut self.font_system, metrics);
         {
             let mut probe = probe.borrow_with(&mut self.font_system);
             probe.set_wrap(Wrap::None);
-            let attrs = Attrs::new().family(Family::Name(&theme.font_family));
+            let attrs = Attrs::new().family(Family::Name(&variant.font_family));
             probe.set_text("MMMMMMMMMM", &attrs, Shaping::Advanced, None);
             probe.shape_until_scroll(false);
         }
@@ -1231,7 +1186,7 @@ impl Renderer {
 
     /// Draws a frame; `strikes`, when given, finds names of deleted files on
     /// screen to strike out.
-    pub fn render<L: EventListener>(&mut self, theme: &Theme, term: &Term<L>, strikes: Option<&mut Strikes>) {
+    pub fn render<L: EventListener>(&mut self, variant: &Variant, term: &Term<L>, strikes: Option<&mut Strikes>) {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
@@ -1246,10 +1201,220 @@ impl Renderer {
             _ => return,
         };
         let view = frame.texture.create_view(&Default::default());
-        self.layout(theme, term, strikes);
-        self.draw(theme, &view);
+        self.draw_previews(term);
+        self.layout(variant, term, strikes);
+        self.draw(variant, &view);
+        self.draw_picker(variant, &view);
         self.queue.present(frame);
         self.atlas.trim();
+    }
+
+    /// Opens the theme picker on `cards` (per theme, the variant its card
+    /// previews) with `selected` chosen, or closes it (None).
+    pub fn set_picker(&mut self, picker: Option<(usize, Vec<Variant>)>) {
+        let Some((selected, variants)) = picker else {
+            self.picker = None;
+            return;
+        };
+        let same = self.picker.as_ref().is_some_and(|p| {
+            p.cards.len() == variants.len() && p.cards.iter().zip(&variants).all(|(c, v)| c.variant.name == v.name)
+        });
+        if !same {
+            let fs = &mut self.font_system;
+            let mut buffer = || {
+                let mut b = Buffer::new(fs, Metrics::new(12.0, 16.0));
+                b.borrow_with(fs).set_wrap(Wrap::None);
+                b
+            };
+            let (title, hint) = (buffer(), buffer());
+            let cards = variants
+                .into_iter()
+                .map(|variant| PickerCard { variant, picture: None, name: buffer(), about: buffer() })
+                .collect();
+            self.picker = Some(PickerView { selected, cards, title, hint });
+        }
+        if let Some(p) = self.picker.as_mut() {
+            p.selected = selected;
+        }
+    }
+
+    /// Where the picker's cards are, physical pixels.
+    pub fn picker_cards(&self) -> Vec<[f32; 4]> {
+        let n = self.picker.as_ref().map_or(0, |p| p.cards.len());
+        picker::cards(n, self.config.width as f32, self.config.height as f32, self.window.scale_factor() as f32)
+    }
+
+    /// Draws each picker card's picture: the screen as its variant draws it,
+    /// with no writing in and no transition.
+    fn draw_previews<L: EventListener>(&mut self, term: &Term<L>) {
+        let Some(mut picker) = self.picker.take() else { return };
+        let transition = self.transition.take();
+        let settle_time = self.settle_time;
+        self.thumbnail = true;
+        let (w, h) = (self.config.width, self.config.height);
+        for card in &mut picker.cards {
+            let stale = card.picture.as_ref().is_none_or(|(t, _)| t.width() != w || t.height() != h);
+            if stale {
+                let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("theme preview"),
+                    size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: self.config.format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                });
+                let view = texture.create_view(&Default::default());
+                let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("theme preview"),
+                    layout: &self.picker_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: self.buffers.frame.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
+                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.ink_sampler) },
+                    ],
+                });
+                card.picture = Some((texture, group));
+            }
+            let Some((texture, _)) = &card.picture else { continue };
+            let view = texture.create_view(&Default::default());
+            self.layout(&card.variant, term, None);
+            self.draw(&card.variant, &view);
+        }
+        self.thumbnail = false;
+        self.transition = transition;
+        self.settle_time = settle_time;
+        self.picker = Some(picker);
+    }
+
+    /// The picker over the window: the current look dimmed, a card per
+    /// theme with its name and description, the chosen one outlined, and
+    /// the keys at the bottom.
+    fn draw_picker(&mut self, variant: &Variant, view: &wgpu::TextureView) {
+        let Some(mut picker) = self.picker.take() else { return };
+        let scale = self.window.scale_factor() as f32;
+        let (w, h) = (self.config.width as f32, self.config.height as f32);
+        let cards = picker::cards(picker.cards.len(), w, h, scale);
+        let quiet = variant.palette[8];
+
+        // The veil, the pictures, then the outlines.
+        let mut shapes = vec![Shape::new(0.0, 0.0, w, h, variant.surface_rgb(), 0.95)];
+        for &[x, y, cw, ch] in &cards {
+            let mut picture = Shape::new(x, y, cw, ch, [0; 3], 1.0);
+            picture.params[1] = 6.0 * scale;
+            shapes.push(picture);
+        }
+        for (i, &[x, y, cw, ch]) in cards.iter().enumerate() {
+            let chosen = i == picker.selected;
+            let (t, gap, rgb, alpha) =
+                if chosen { (2.0 * scale, 5.0 * scale, variant.cursor, 1.0) } else { (1.0 * scale, 3.0 * scale, quiet, 0.5) };
+            let (x0, y0, x1, y1) = (x - gap, y - gap, x + cw + gap, y + ch + gap);
+            shapes.extend([
+                Shape::new(x0, y0, x1 - x0, t, rgb, alpha),
+                Shape::new(x0, y1 - t, x1 - x0, t, rgb, alpha),
+                Shape::new(x0, y0, t, y1 - y0, rgb, alpha),
+                Shape::new(x1 - t, y0, t, y1 - y0, rgb, alpha),
+            ]);
+        }
+        let needed = (shapes.len() * std::mem::size_of::<Shape>()) as u64;
+        if needed > self.picker_buffer.size() {
+            self.picker_buffer = Self::create_rect_buffer(&self.device, shapes.len().next_power_of_two());
+        }
+        self.queue.write_buffer(&self.picker_buffer, 0, bytemuck::cast_slice(&shapes));
+
+        // Words, in the current look's font.
+        let family = variant.font_family.clone();
+        let weight = self.weight_for(&family, variant.font_weight);
+        let bold = self.weight_for(&family, variant.font_weight.max(700));
+        let attrs = |rgb: [u8; 3], weight: u16| {
+            let [r, g, b] = rgb;
+            Attrs::new().family(Family::Name(&family)).weight(Weight(weight)).color(Color::rgb(r, g, b))
+        };
+        let set = |buffer: &mut Buffer, fs: &mut FontSystem, text: &str, size: f32, width: f32, wrap: Wrap, attrs: Attrs| {
+            let mut b = buffer.borrow_with(fs);
+            b.set_metrics(Metrics::new(size * scale, (size * 1.4 * scale).round()));
+            b.set_wrap(wrap);
+            b.set_size(Some(width), Some(h));
+            b.set_text(text, &attrs, Shaping::Advanced, None);
+            b.shape_until_scroll(false);
+        };
+        let fs = &mut self.font_system;
+        set(&mut picker.title, fs, "Themes", 18.0, w, Wrap::None, attrs(variant.ink, bold));
+        set(
+            &mut picker.hint,
+            fs,
+            "\u{2190} \u{2192}  choose      return  apply      esc  close      \u{21e7}\u{2318}L  light / dark",
+            12.5,
+            w,
+            Wrap::None,
+            attrs(quiet, weight),
+        );
+        let selected = picker.selected;
+        for (i, (card, &[_, _, cw, _])) in picker.cards.iter_mut().zip(&cards).enumerate() {
+            let name_rgb = if i == selected { variant.cursor } else { variant.ink };
+            set(&mut card.name, fs, card.variant.theme.name(), 15.0, cw, Wrap::None, attrs(name_rgb, bold));
+            set(&mut card.about, fs, card.variant.theme.about(), 12.0, cw, Wrap::Word, attrs(quiet, weight));
+        }
+        let width_of = |b: &Buffer| b.layout_runs().map(|r| r.line_w).fold(0.0, f32::max);
+        let bounds = TextBounds { left: 0, top: 0, right: w as i32, bottom: h as i32 };
+        let area = |buffer, left, top| TextArea {
+            buffer,
+            left,
+            top,
+            scale: 1.0,
+            bounds,
+            default_color: Color::rgb(0, 0, 0),
+            custom_glyphs: &[],
+        };
+        let first = cards.first().copied().unwrap_or([0.0; 4]);
+        let mut areas = vec![
+            area(&picker.title, first[0], first[1] - 44.0 * scale),
+            area(&picker.hint, (w - width_of(&picker.hint)) / 2.0, h - 40.0 * scale),
+        ];
+        for (card, &[x, y, _, ch]) in picker.cards.iter().zip(&cards) {
+            areas.push(area(&card.name, x, y + ch + 12.0 * scale));
+            areas.push(area(&card.about, x, y + ch + 36.0 * scale));
+        }
+        self.picker_text
+            .prepare(&self.device, &self.queue, &mut self.font_system, &mut self.atlas, &self.viewport, areas, &mut self.swash_cache)
+            .expect("prepare picker text");
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("picker") });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("picker"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            let stages = &self.stages[variant.theme.id()];
+            let n = picker.cards.len() as u32;
+            pass.set_vertex_buffer(0, self.picker_buffer.slice(..needed));
+            pass.set_pipeline(&stages.shapes);
+            pass.set_bind_group(0, &self.frame_group, &[]);
+            pass.draw(0..4, 0..1);
+            pass.set_pipeline(&self.picker_pipeline);
+            for (i, card) in picker.cards.iter().enumerate() {
+                if let Some((_, group)) = &card.picture {
+                    pass.set_bind_group(0, group, &[]);
+                    pass.draw(0..4, 1 + i as u32..2 + i as u32);
+                }
+            }
+            pass.set_pipeline(&stages.shapes);
+            pass.set_bind_group(0, &self.frame_group, &[]);
+            pass.draw(0..4, 1 + n..shapes.len() as u32);
+            self.picker_text.render(&self.atlas, &self.viewport, &mut pass).expect("render picker text");
+        }
+        self.queue.submit(Some(encoder.finish()));
+        self.picker = Some(picker);
     }
 
     /// Renders `frames` stills of a light / dark switch from `from` to `to`,
@@ -1257,8 +1422,8 @@ impl Renderer {
     /// `ONEPROMPT_SNAPSHOT_SWITCH` to look at transitions frame by frame.
     pub fn snapshot_switch<L: EventListener>(
         &mut self,
-        from: &Theme,
-        to: &Theme,
+        from: &Variant,
+        to: &Variant,
         term: &Term<L>,
         frames: usize,
         prefix: &std::path::Path,
@@ -1266,12 +1431,12 @@ impl Renderer {
         // Draw the old look once, so the transition has a frame to cut into.
         self.snapshot(from, term, &prefix.with_extension("before.png"));
         self.animation.0 = true;
-        self.start_transition(to.cursor);
-        let Some(mut transition) = self.transition else { return };
+        self.start_transition(to);
+        let Some(mut transition) = self.transition.clone() else { return };
         let started = transition.start;
         for k in 0..frames {
             transition.start = started - transition.duration * k as f32 / frames as f32;
-            self.transition = Some(transition);
+            self.transition = Some(transition.clone());
             let name = format!("{}-{k:02}.png", prefix.display());
             self.snapshot(to, term, std::path::Path::new(&name));
         }
@@ -1280,7 +1445,7 @@ impl Renderer {
 
     /// Renders one frame off screen and saves it as a PNG. Used by
     /// `ONEPROMPT_SNAPSHOT` to preview themes without screen-capture access.
-    pub fn snapshot<L: EventListener>(&mut self, theme: &Theme, term: &Term<L>, path: &std::path::Path) {
+    pub fn snapshot<L: EventListener>(&mut self, variant: &Variant, term: &Term<L>, path: &std::path::Path) {
         let (w, h) = (self.config.width, self.config.height);
         let format = self.config.format;
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -1293,8 +1458,8 @@ impl Renderer {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        self.layout(theme, term, None);
-        self.draw(theme, &texture.create_view(&Default::default()));
+        self.layout(variant, term, None);
+        self.draw(variant, &texture.create_view(&Default::default()));
 
         // Rows in a texture-to-buffer copy must be 256-byte aligned.
         let row = w * 4;
@@ -1360,12 +1525,14 @@ impl Renderer {
     /// Full-screen apps draw their own screens, so none there.
     fn find_struck(
         &mut self,
+        variant: &Variant,
         cells: &[Indexed<&Cell>],
         display_offset: usize,
         strikes: Option<&mut Strikes>,
         full_screen: bool,
-    ) -> Vec<(Struck, f32, f32)> {
-        let Some(strikes) = strikes.filter(|_| !full_screen) else { return Vec::new() };
+    ) -> (Vec<(Struck, f32, f32)>, f32) {
+        let Some(style) = variant.theme.strike() else { return (Vec::new(), 0.0) };
+        let Some(strikes) = strikes.filter(|_| !full_screen) else { return (Vec::new(), 0.0) };
         let (columns, lines) = (self.targets.grid.0 as usize, self.targets.grid.1 as usize);
         let mut chars = vec![' '; columns * lines];
         for indexed in cells {
@@ -1376,18 +1543,18 @@ impl Renderer {
             }
         }
         let now = self.now();
-        let duration = STRIKE_TIME / self.animation.1;
+        let duration = style.duration / self.animation.1;
         let mut found = strikes.find(&chars, columns, now);
         // Mentions of one deletion are cut one after another, in reading order.
         let mut order: HashMap<u32, usize> = HashMap::new();
-        found
+        let found = found
             .drain(..)
             .map(|s| {
                 let k = order.entry(s.born.to_bits()).or_default();
                 let start = s.born + (*k as f32 * STRIKE_STAGGER / self.animation.1).min(0.5);
                 *k += 1;
-                let dry = if self.splatter { SPLATTER_DRY / self.animation.1 } else { 0.0 };
-                self.strikes_until = self.strikes_until.max(start + duration + dry);
+                let linger = style.linger / self.animation.1;
+                self.strikes_until = self.strikes_until.max(start + duration + linger);
                 let (progress, age) = if self.animation.0 {
                     (((now - start) / duration).clamp(0.0, 1.0), (now - start) * self.animation.1)
                 } else {
@@ -1396,12 +1563,13 @@ impl Renderer {
                 (s, progress, age)
             })
             .filter(|&(_, progress, _)| progress > 0.0)
-            .collect()
+            .collect();
+        (found, style.fade)
     }
 
     /// Turns the visible part of the grid into styled text runs plus
     /// rectangles for backgrounds, decorations and the cursor.
-    fn layout<L: EventListener>(&mut self, theme: &Theme, term: &Term<L>, strikes: Option<&mut Strikes>) {
+    fn layout<L: EventListener>(&mut self, variant: &Variant, term: &Term<L>, strikes: Option<&mut Strikes>) {
         let content = term.renderable_content();
         let (pad, top) = self.padding();
         let (cw, ch) = (self.cell_width, self.cell_height);
@@ -1426,23 +1594,25 @@ impl Renderer {
         let (columns, lines) = (self.targets.grid.0 as usize, self.targets.grid.1 as usize);
         let mut chars = vec![' '; columns * lines];
         let mut slots = vec![0.0f32; columns * lines];
-        self.reset_tracer_if_needed(theme);
-        let regular = self.weight_for(&theme.font_family, theme.font_weight);
+        if !self.thumbnail {
+            self.reset_tracer_if_needed(variant);
+        }
+        let regular = self.weight_for(&variant.font_family, variant.font_weight);
         // Bold cells use the bold face; a theme that is already bold has no
         // heavier face to go to, and synthesized weight just blots the ink.
-        let bold = self.weight_for(&theme.font_family, theme.font_weight.max(700));
+        let bold = self.weight_for(&variant.font_family, variant.font_weight.max(700));
 
         // Collect runs of identically styled text: (line, text, color, flags).
         let mut runs: Vec<(usize, String, [u8; 3], Flags)> = Vec::new();
         // Decorations drawn in ink: underlines, box drawing.
-        let mut overlay: Vec<Rect> = Vec::new();
+        let mut overlay: Vec<Shape> = Vec::new();
         self.rects.clear();
         self.ink_rects.clear();
         let cells: Vec<_> = content.display_iter.collect();
         self.loose.clear();
         let metrics_key = {
-            let m = self.metrics(theme);
-            (theme.font_family.clone(), m.font_size.to_bits(), m.line_height.to_bits())
+            let m = self.metrics(variant);
+            (variant.font_family.clone(), m.font_size.to_bits(), m.line_height.to_bits())
         };
         if metrics_key != self.loose_metrics || self.loose_glyphs.len() > 4096 {
             self.loose_glyphs.clear();
@@ -1450,7 +1620,7 @@ impl Renderer {
         }
         let canvas = if self.harmonize { canvas_color(&cells, columns * lines) } else { None };
         let full_screen = term.mode().contains(TermMode::ALT_SCREEN);
-        let struck = self.find_struck(&cells, content.display_offset, strikes, full_screen);
+        let (struck, fade) = self.find_struck(variant, &cells, content.display_offset, strikes, full_screen);
         // How far each cell's strike has got (0: not struck), to fade it.
         let mut struck_cells = vec![0.0f32; columns * lines];
         for &(s, progress, _) in &struck {
@@ -1468,7 +1638,7 @@ impl Renderer {
             if line < lines && col < columns && !flags.contains(Flags::HIDDEN) {
                 let c = cell_char(indexed.cell.c);
                 chars[line * columns + col] = c;
-                if self.animation.0 && c != ' ' && boxdraw::pieces(c, 1.0, 1.0).is_none() {
+                if self.animation.0 && !self.thumbnail && c != ' ' && boxdraw::pieces(c, 1.0, 1.0).is_none() {
                     let key = GlyphKey {
                         c,
                         weight: if flags.contains(Flags::BOLD) { bold } else { regular },
@@ -1476,7 +1646,7 @@ impl Renderer {
                     };
                     slots[line * columns + col] = match self.tracer.slot(key) {
                         Slot::Ready(slot) => slot as f32,
-                        Slot::New(slot) if self.trace_glyph(theme, key, slot) => slot as f32,
+                        Slot::New(slot) if self.trace_glyph(variant, key, slot) => slot as f32,
                         Slot::New(_) => {
                             self.tracer.forget(key);
                             0.0
@@ -1486,65 +1656,65 @@ impl Renderer {
                 }
             }
 
-            let mut fg = resolve(theme, indexed.cell.fg, theme.ink);
+            let mut fg = resolve(variant, indexed.cell.fg, variant.ink);
             let mut bg = match indexed.cell.bg {
                 AnsiColor::Named(NamedColor::Background) => None,
                 // The app's own canvas: the sheet is the canvas here.
                 color if Some(color) == canvas && !flags.contains(Flags::INVERSE) => None,
-                color => Some(resolve(theme, color, theme.surface_rgb())),
+                color => Some(resolve(variant, color, variant.surface_rgb())),
             };
             // Colours the program picked itself were chosen for a plain
             // screen; bring them onto the sheet as inks and washes.
             let mut bg_alpha = CELL_BG_ALPHA;
             if self.harmonize {
                 if program_chosen(indexed.cell.fg) {
-                    fg = color::ink(fg, theme);
+                    fg = color::ink(fg, variant);
                 }
                 if program_chosen(indexed.cell.bg) && !flags.contains(Flags::INVERSE) {
                     // A translucent tint of the program's hue, inked for the
                     // sheet: the paper stays visible underneath.
-                    bg = bg.map(|b| color::ink(b, theme));
-                    bg_alpha = if theme.dark { WASH_ALPHA_DARK } else { WASH_ALPHA_LIGHT };
+                    bg = bg.map(|b| color::ink(b, variant));
+                    bg_alpha = if variant.dark { WASH_ALPHA_DARK } else { WASH_ALPHA_LIGHT };
                 }
             }
             if flags.contains(Flags::INVERSE) {
-                let old_bg = bg.unwrap_or(theme.surface_rgb());
+                let old_bg = bg.unwrap_or(variant.surface_rgb());
                 bg = Some(fg);
                 fg = old_bg;
             }
             if flags.contains(Flags::DIM) {
-                fg = mix(fg, bg.unwrap_or(theme.surface_rgb()), 0.4);
+                fg = mix(fg, bg.unwrap_or(variant.surface_rgb()), 0.4);
             }
             if let Some(&progress) = struck_cells.get(line * columns + col)
                 && progress > 0.0
             {
-                fg = mix(fg, bg.unwrap_or(theme.surface_rgb()), STRIKE_FADE * progress);
+                fg = mix(fg, bg.unwrap_or(variant.surface_rgb()), fade * progress);
             }
             // Selected text is reversed out of a block of ink: the letters
             // take the paper's colour.
             let selected = selection.is_some_and(|s| s.contains(indexed.point));
             if selected {
-                fg = theme.surface_rgb();
-                bg = Some(theme.selection.0);
+                fg = variant.surface_rgb();
+                bg = Some(variant.selection.0);
             }
             let is_cursor = block_cursor && line as i32 == cursor_line && col == cursor_col;
             if is_cursor {
-                fg = bg.unwrap_or(theme.surface_rgb());
+                fg = bg.unwrap_or(variant.surface_rgb());
             }
 
             let width = if flags.contains(Flags::WIDE_CHAR) { 2.0 } else { 1.0 };
             let (x, y) = (cell_x(col), cell_y(line));
             if let Some(bg) = bg {
-                let alpha = if selected { theme.selection.1 } else { bg_alpha };
-                self.rects.push(Rect::new(x, y, cw * width, ch, bg, alpha));
+                let alpha = if selected { variant.selection.1 } else { bg_alpha };
+                self.rects.push(Shape::new(x, y, cw * width, ch, bg, alpha));
             }
             if flags.contains(Flags::UNDERLINE) {
                 let y = y + ch * 0.86;
-                overlay.push(Rect::new(x, y, cw * width, (ch * 0.06).max(1.0), fg, 1.0));
+                overlay.push(Shape::new(x, y, cw * width, (ch * 0.06).max(1.0), fg, 1.0));
             }
             if flags.contains(Flags::STRIKEOUT) {
                 let y = y + ch * 0.5;
-                overlay.push(Rect::new(x, y, cw * width, (ch * 0.06).max(1.0), fg, 1.0));
+                overlay.push(Shape::new(x, y, cw * width, (ch * 0.06).max(1.0), fg, 1.0));
             }
             let drawn = (!flags.contains(Flags::HIDDEN))
                 .then(|| boxdraw::pieces(indexed.cell.c, cw, ch))
@@ -1553,7 +1723,7 @@ impl Renderer {
             let mut ch_str = String::new();
             if let Some(pieces) = drawn {
                 for (px, py, pw, ph, alpha) in pieces {
-                    overlay.push(Rect::new(x + px, y + py, pw, ph, fg, alpha));
+                    overlay.push(Shape::new(x + px, y + py, pw, ph, fg, alpha));
                 }
                 ch_str.push(' ');
             } else if flags.contains(Flags::HIDDEN) {
@@ -1568,7 +1738,7 @@ impl Renderer {
                 // advances by its own width and pushes the rest of the row
                 // off the grid. Such characters are drawn on their own at
                 // their cell; the row keeps blanks in their place.
-                if width > 1.0 || (!c.is_ascii() && !self.covers(&theme.font_family, c)) {
+                if width > 1.0 || (!c.is_ascii() && !self.covers(&variant.font_family, c)) {
                     let weight = if flags.contains(Flags::BOLD) { bold } else { regular };
                     self.loose.push((x, y, (glyph, weight, flags.contains(Flags::ITALIC)), fg));
                     ch_str.push_str(if width > 1.0 { "  " } else { " " });
@@ -1585,55 +1755,47 @@ impl Renderer {
                     // Close the previous line before starting a new one.
                     let prev_line = runs.last().map_or(line, |run| run.0);
                     for _ in prev_line..line {
-                        runs.push((line, "\n".into(), theme.ink, Flags::empty()));
+                        runs.push((line, "\n".into(), variant.ink, Flags::empty()));
                     }
                     runs.push((line, ch_str, fg, style));
                 }
             }
         }
 
-        // The cursor is a dab of seal ink, laid down in the ink layer so it
-        // bleeds and takes the paper's grain like the text. It goes under the
-        // text, so a block cursor shows its character in the paper's colour.
-        // Each cell gets its own dab.
+        // The cursor and struck-out names are the theme's to draw, in the
+        // ink layer; the cursor goes under the text.
+        let ctx = self.ctx();
         if cursor_line >= 0 && cursor_shape != CursorShape::Hidden {
-            let (x, y) = (cell_x(cursor_col), cell_y(cursor_line as usize));
-            let c = theme.cursor;
-            let seed = cursor_col as f32 * 1.37 + cursor_line as f32 * 7.11;
-            let t = (cw * 0.1).max(1.0);
-            match cursor_shape {
-                CursorShape::Beam => {
-                    self.ink_rects.push(Rect::dab(x, y, (cw * 0.18).max(2.5), ch, c, 1.0).rough(0.6, seed))
-                }
-                CursorShape::Underline => self
-                    .ink_rects
-                    .push(Rect::dab(x, y + ch * 0.84, cw, (ch * 0.12).max(2.5), c, 1.0).rough(0.6, seed)),
-                CursorShape::HollowBlock => self.ink_rects.extend([
-                    Rect::new(x, y, cw, t, c, 0.9),
-                    Rect::new(x, y + ch - t, cw, t, c, 0.9),
-                    Rect::new(x, y, t, ch, c, 0.9),
-                    Rect::new(x + cw - t, y, t, ch, c, 0.9),
-                ]),
-                _ => self.ink_rects.push(Rect::dab(x, y + ch * 0.04, cw, ch * 0.92, c, 0.95).rough(1.0, seed)),
-            }
+            let kind = match cursor_shape {
+                CursorShape::Beam => CursorKind::Beam,
+                CursorShape::Underline => CursorKind::Underline,
+                CursorShape::HollowBlock => CursorKind::Hollow,
+                _ => CursorKind::Block,
+            };
+            let cursor = Cursor {
+                cell: [cell_x(cursor_col), cell_y(cursor_line as usize), cw, ch],
+                column: cursor_col,
+                line: cursor_line as usize,
+                kind,
+            };
+            variant.theme.cursor(variant, &ctx, &cursor, &mut self.ink_rects);
         }
-        // Deleted names are cut through in seal ink, a little past each end,
-        // flinging blood off the blade. Seeded without the line, so the cut
-        // and its splatter keep their shape as the text scrolls.
+        // Seeded without the line, so a strike keeps its shape as the text
+        // scrolls.
         for (i, &(s, progress, age)) in struck.iter().enumerate() {
-            let (x, y) = (cell_x(s.col) - cw * 0.3, cell_y(s.line));
-            let w = cw * (s.len as f32 + 0.6);
-            let seed = s.col as f32 * 3.71 + s.len as f32 * 1.93 + s.born;
-            overlay.push(Rect::slash(x, y, w, ch, theme.cursor, progress, seed));
-            if self.splatter && i < MAX_SPLATTERED {
-                // Only over the name itself, not the cut's overhang.
-                splatter(&mut overlay, [cell_x(s.col), y, cw * s.len as f32, ch], age, seed, theme.cursor);
-            }
+            let span = StrikeSpan {
+                word: [cell_x(s.col), cell_y(s.line), cw * s.len as f32, ch],
+                progress,
+                age,
+                seed: s.col as f32 * 3.71 + s.len as f32 * 1.93 + s.born,
+                extras: self.splatter && i < MAX_STRIKE_EXTRAS,
+            };
+            variant.theme.draw_strike(variant, &ctx, &span, &mut overlay);
         }
         self.ink_rects.extend(overlay);
-        self.layout_controls(theme, term.is_focused);
-        self.layout_notice(theme);
-        self.layout_tabs(theme);
+        self.layout_controls(variant, term.is_focused);
+        self.layout_notice(variant);
+        self.layout_tabs(variant);
 
         let now = self.now();
         let writing = Writing {
@@ -1642,7 +1804,9 @@ impl Renderer {
             max_duration: MAX_WRITE / self.animation.1,
             instant: term.mode().contains(TermMode::ALT_SCREEN),
         };
-        let births = self.animator.update(columns, &chars, now, writing);
+        // A preview shows the screen as it is: no writing in, and it leaves
+        // the live screen's record of what was written alone.
+        let births = if self.thumbnail { Vec::new() } else { self.animator.update(columns, &chars, now, writing) };
         if births.len() == columns * lines {
             let cells: Vec<[f32; 2]> = births.iter().zip(&slots).map(|(&b, &s)| [b, s]).collect();
             self.queue.write_texture(
@@ -1657,7 +1821,7 @@ impl Renderer {
             );
         }
 
-        let family = Family::Name(&theme.font_family);
+        let family = Family::Name(&variant.font_family);
         let spans = runs.iter().map(|(_, text, [r, g, b], flags)| {
             let weight = if flags.contains(Flags::BOLD) { bold } else { regular };
             let mut attrs = Attrs::new()
@@ -1669,7 +1833,7 @@ impl Renderer {
             }
             (text.as_str(), attrs)
         });
-        let metrics = self.metrics(theme);
+        let metrics = self.metrics(variant);
         let (w, h) = (self.config.width as f32, self.config.height as f32);
         let mut text = self.text.borrow_with(&mut self.font_system);
         text.set_metrics(metrics);
@@ -1682,7 +1846,7 @@ impl Renderer {
                 continue;
             }
             let mut buffer = Buffer::new(&mut self.font_system, metrics);
-            let mut attrs = Attrs::new().family(Family::Name(&theme.font_family)).weight(Weight(key.1));
+            let mut attrs = Attrs::new().family(Family::Name(&variant.font_family)).weight(Weight(key.1));
             if key.2 {
                 attrs = attrs.style(Style::Italic);
             }
@@ -1698,13 +1862,13 @@ impl Renderer {
     }
 
     /// The notice, set in the theme's font, small, in the bottom margin.
-    fn layout_notice(&mut self, theme: &Theme) {
+    fn layout_notice(&mut self, variant: &Variant) {
         let Some(notice) = &self.notice else { return };
         let scale = self.window.scale_factor() as f32;
         // Errors in the theme's red, confirmations in a quiet ink.
-        let [r, g, b] = if notice.is_error { theme.palette[1] } else { theme.palette[8] };
+        let [r, g, b] = if notice.is_error { variant.palette[1] } else { variant.palette[8] };
         let attrs = Attrs::new()
-            .family(Family::Name(&theme.font_family))
+            .family(Family::Name(&variant.font_family))
             .color(Color::rgb(r, g, b));
         let mut buffer = self.notice_text.borrow_with(&mut self.font_system);
         buffer.set_metrics(Metrics::new(12.5 * scale, 16.0 * scale));
@@ -1716,7 +1880,7 @@ impl Renderer {
     /// Tab labels, evenly spread over the strip right of the controls, the
     /// active one in ink and underlined with a stroke of the brush, the
     /// others in a quiet ink.
-    fn layout_tabs(&mut self, theme: &Theme) {
+    fn layout_tabs(&mut self, variant: &Variant) {
         self.tab_slots.clear();
         if self.tabs.is_empty() {
             return;
@@ -1737,19 +1901,19 @@ impl Renderer {
             buffer.borrow_with(&mut self.font_system).set_wrap(Wrap::None);
             self.tab_text.push(buffer);
         }
-        let weight = self.weight_for(&theme.font_family, theme.font_weight);
+        let weight = self.weight_for(&variant.font_family, variant.font_weight);
         for (i, label) in self.tabs.iter().enumerate() {
             let active = i == self.active_tab;
             let all_selected = self.editing_tab == Some((i, true));
             let [r, g, b] = if all_selected {
-                theme.surface_rgb()
+                variant.surface_rgb()
             } else if active {
-                theme.ink
+                variant.ink
             } else {
-                theme.palette[8]
+                variant.palette[8]
             };
             let attrs =
-                Attrs::new().family(Family::Name(&theme.font_family)).weight(Weight(weight)).color(Color::rgb(r, g, b));
+                Attrs::new().family(Family::Name(&variant.font_family)).weight(Weight(weight)).color(Color::rgb(r, g, b));
             let mut buffer = self.tab_text[i].borrow_with(&mut self.font_system);
             buffer.set_metrics(Metrics::new(12.5 * scale, 16.0 * scale));
             buffer.set_size(Some(slot_w * 4.0), Some(20.0 * scale));
@@ -1765,19 +1929,19 @@ impl Renderer {
             // (where the caret is) stays in view, and the caret follows it.
             let text_x = if editing { text_x.min(slot_left + slot_w - margin - width - 4.0 * scale) } else { text_x };
             if all_selected && width > 0.0 {
-                let (rgb, alpha) = theme.selection;
+                let (rgb, alpha) = variant.selection;
                 let x0 = text_x.max(slot_left + margin) - 2.0 * scale;
                 let w = width.min(slot_w - 2.0 * margin) + 4.0 * scale;
-                self.rects.push(Rect::new(x0, text_y - 1.0 * scale, w, 19.0 * scale, rgb, alpha));
+                self.rects.push(Shape::new(x0, text_y - 1.0 * scale, w, 19.0 * scale, rgb, alpha));
             }
             if editing {
                 let caret_x = (text_x + width + 1.5 * scale).min(slot_left + slot_w - margin);
-                self.ink_rects.push(Rect::new(caret_x, text_y + 1.0 * scale, 1.6 * scale, 15.0 * scale, theme.cursor, 1.0));
+                self.ink_rects.push(Shape::new(caret_x, text_y + 1.0 * scale, 1.6 * scale, 15.0 * scale, variant.cursor, 1.0));
             }
             if active || editing {
                 let w = width.min(slot_w - 2.0 * margin) + 6.0 * scale;
                 let y = text_y + 17.0 * scale;
-                self.ink_rects.push(Rect::new(text_x.max(slot_left + margin) - 3.0 * scale, y, w, 1.8 * scale, theme.cursor, 0.9));
+                self.ink_rects.push(Shape::new(text_x.max(slot_left + margin) - 3.0 * scale, y, w, 1.8 * scale, variant.cursor, 0.9));
             }
             self.tab_slots.push(TabSlot {
                 left: slot_left,
@@ -1804,20 +1968,20 @@ impl Renderer {
     }
 
     /// The window's close / minimize / zoom controls, in the theme's style.
-    fn layout_controls(&mut self, theme: &Theme, focused: bool) {
+    fn layout_controls(&mut self, variant: &Variant, focused: bool) {
         let scale = self.window.scale_factor() as f32;
         // Like macOS: controls fade when the window is in the background.
         let alpha = if focused || self.controls_hover { 1.0 } else { 0.45 };
-        let surface = theme.surface_rgb();
+        let surface = variant.surface_rgb();
         for (i, control) in chrome::CONTROLS.into_iter().enumerate() {
             let (cx, cy, r) = chrome::geometry(control, scale);
-            let color = theme.controls.colors[i];
-            let shape = match theme.controls.style {
-                ControlStyle::Dot => Rect::shape(SHAPE_DISC, cx, cy, r, color, alpha),
+            let color = variant.controls.colors[i];
+            let shape = match variant.controls.style {
+                ControlStyle::Dot => Shape::round(DISC, cx, cy, r, color, alpha),
                 ControlStyle::Brush => {
-                    Rect::shape(SHAPE_DISC, cx, cy, r, color, alpha).rough(0.16, i as f32 + 1.0)
+                    Shape::round(DISC, cx, cy, r, color, alpha).rough(0.16, i as f32 + 1.0)
                 }
-                ControlStyle::Ring => Rect::shape(SHAPE_RING, cx, cy, r, color, alpha)
+                ControlStyle::Ring => Shape::round(RING, cx, cy, r, color, alpha)
                     .stroke(1.6 * scale)
                     .rough(0.08, i as f32 + 1.0),
             };
@@ -1828,87 +1992,91 @@ impl Renderer {
             }
             // Symbols: ring style draws them in the control's colour,
             // filled styles cut them out in the surface colour.
-            let mark = if theme.controls.style == ControlStyle::Ring { color } else { surface };
+            let mark = if variant.controls.style == ControlStyle::Ring { color } else { surface };
             let t = (1.3 * scale).max(1.0);
             let arm = r * 0.5;
             match control {
                 Control::Close => self
                     .ink_rects
-                    .push(Rect::shape(SHAPE_CROSS, cx, cy, arm, mark, 0.9).stroke(t)),
+                    .push(Shape::round(CROSS, cx, cy, arm, mark, 0.9).stroke(t)),
                 Control::Minimize => {
-                    self.ink_rects.push(Rect::new(cx - arm, cy - t / 2.0, arm * 2.0, t, mark, 0.9))
+                    self.ink_rects.push(Shape::new(cx - arm, cy - t / 2.0, arm * 2.0, t, mark, 0.9))
                 }
                 Control::Zoom => self.ink_rects.extend([
-                    Rect::new(cx - arm, cy - t / 2.0, arm * 2.0, t, mark, 0.9),
-                    Rect::new(cx - t / 2.0, cy - arm, t, arm * 2.0, mark, 0.9),
+                    Shape::new(cx - arm, cy - t / 2.0, arm * 2.0, t, mark, 0.9),
+                    Shape::new(cx - t / 2.0, cy - arm, t, arm * 2.0, mark, 0.9),
                 ]),
             }
         }
     }
 
-    fn draw(&mut self, theme: &Theme, view: &wgpu::TextureView) {
+    fn draw(&mut self, variant: &Variant, view: &wgpu::TextureView) {
         let (w, h) = (self.config.width, self.config.height);
         let scale = self.window.scale_factor() as f32;
-        let s = theme.surface;
-        let d = theme.surface_shade;
-        let (accent, splatter) = theme.splatter;
-        let a = accent.map(|c| c as f32 / 255.0);
-        let uniforms = Uniforms {
-            surface: [s[0], s[1], s[2], theme.texture as u32 as f32],
-            surface_shade: [d[0], d[1], d[2], theme.texture_strength],
-            accent: [a[0], a[1], a[2], splatter],
-            resolution: [w as f32, h as f32],
-            seed: self.seed,
-            scale,
-            extra: [theme.stains, 0.0, 0.0, 0.0],
-        };
-        self.queue
-            .write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&uniforms));
-        let globals = RectGlobals { resolution: [w as f32, h as f32], _pad: [0.0; 2] };
-        self.queue
-            .write_buffer(&self.rect_globals, 0, bytemuck::bytes_of(&globals));
-        self.bleed_time = theme.ink_style.bleed_time;
-        let ink = InkParams {
-            resolution: [w as f32, h as f32],
-            bleed: theme.ink_style.bleed * scale,
-            grain: theme.ink_style.grain,
-            edge: theme.ink_style.edge,
-            seed: self.seed,
-            nib: theme.ink_style.nib * scale,
-            time: self.now(),
-            grid_origin: {
-                let (pad, top) = self.padding();
-                [pad, top]
-            },
-            cell: [self.cell_width, self.cell_height],
-            grid_size: [self.targets.grid.0 as f32, self.targets.grid.1 as f32],
-            write_time: if self.animation.0 { WRITE_TIME / self.animation.1 } else { 0.0 },
-            atlas_columns: self.tracer.columns() as f32,
-            slot_size: [self.tracer.slot_size.0 as f32, self.tracer.slot_size.1 as f32],
-            bleed_variation: theme.ink_style.bleed_variation,
-            bleed_time: theme.ink_style.bleed_time / self.animation.1,
-            paper: [scale, theme.texture_strength, theme.ink_style.absorb, 0.0],
-        };
-        self.queue
-            .write_buffer(&self.ink_params, 0, bytemuck::bytes_of(&ink));
-
         let now = self.now();
-        if self.transition.is_some_and(|t| t.done(now)) {
+        if self.transition.as_ref().is_some_and(|t| t.done(now)) {
             self.transition = None;
         }
-        let present = PresentParams::new([w as f32, h as f32], self.seed, self.transition.as_ref().map(|t| (t, now)));
-        self.queue
-            .write_buffer(&self.present_params, 0, bytemuck::bytes_of(&present));
+        let (progress, from_color) = match &self.transition {
+            Some(t) => {
+                let from = match t.from {
+                    animation::From::Color([r, g, b]) => [r, g, b, 1.0],
+                    animation::From::PreviousFrame => [0.0; 4],
+                };
+                (t.progress(now).min(0.999), from)
+            }
+            None => (1.0, [0.0; 4]),
+        };
+        let rgb = |c: [u8; 3]| {
+            let [r, g, b] = c.map(|v| v as f32 / 255.0);
+            [r, g, b, 1.0]
+        };
+        let (pad, top) = self.padding();
+        let frame = Frame {
+            resolution: [w as f32, h as f32],
+            scale,
+            seed: self.seed,
+            time: now,
+            speed: self.animation.1,
+            progress,
+            _pad0: 0.0,
+            from_color,
+            grid_origin: [pad, top],
+            cell: [self.cell_width, self.cell_height],
+            grid_size: [self.targets.grid.0 as f32, self.targets.grid.1 as f32],
+            slot_size: [self.tracer.slot_size.0 as f32, self.tracer.slot_size.1 as f32],
+            write_time: if self.animation.0 && !self.thumbnail { WRITE_TIME / self.animation.1 } else { 0.0 },
+            atlas_columns: self.tracer.columns() as f32,
+            _pad1: [0.0; 2],
+            surface: [variant.surface[0], variant.surface[1], variant.surface[2], 1.0],
+            ink: rgb(variant.ink),
+            accent: rgb(variant.cursor),
+        };
+        self.queue.write_buffer(&self.buffers.frame, 0, bytemuck::bytes_of(&frame));
+        let theme = variant.theme;
+        let mut data = theme.data(variant, &self.ctx());
+        data.resize(api::DATA_SIZE, 0);
+        self.queue.write_buffer(&self.buffers.data, 0, &data);
+        if let Some(t) = &self.transition {
+            let mut plan = t.data.clone();
+            plan.resize(api::PLAN_SIZE, 0);
+            self.queue.write_buffer(&self.buffers.plan, 0, &plan);
+        }
+        self.settle_time = theme.settle_time(variant);
+        if !self.stages.contains_key(theme.id()) {
+            let stages = Stages::new(&self.device, &self.layouts, self.config.format, theme);
+            self.stages.insert(theme.id(), stages);
+        }
 
         // Both rect lists share one buffer: surface rects, then ink rects.
         let surface_count = self.rects.len() as u32;
         let total = self.rects.len() + self.ink_rects.len();
-        let needed = (total * std::mem::size_of::<Rect>()) as u64;
+        let needed = (total * std::mem::size_of::<Shape>()) as u64;
         if needed > self.rect_buffer.size() {
             self.rect_buffer = Self::create_rect_buffer(&self.device, total.next_power_of_two());
         }
         if total > 0 {
-            let all: Vec<Rect> = self.rects.iter().chain(&self.ink_rects).copied().collect();
+            let all: Vec<Shape> = self.rects.iter().chain(&self.ink_rects).copied().collect();
             self.queue
                 .write_buffer(&self.rect_buffer, 0, bytemuck::cast_slice(&all));
         }
@@ -1916,7 +2084,7 @@ impl Renderer {
         self.viewport.update(&self.queue, Resolution { width: w, height: h });
         let (pad, top) = self.padding();
         let bounds = TextBounds { left: 0, top: 0, right: w as i32, bottom: h as i32 };
-        let [r, g, b] = theme.ink;
+        let [r, g, b] = variant.ink;
         let mut areas = vec![TextArea {
             buffer: &self.text,
             left: pad,
@@ -1978,6 +2146,7 @@ impl Renderer {
             )
             .expect("prepare text");
 
+        let stages = &self.stages[theme.id()];
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
@@ -2002,8 +2171,8 @@ impl Renderer {
                 multiview_mask: None,
             });
             if !self.ink_rects.is_empty() {
-                pass.set_pipeline(&self.rect_pipeline);
-                pass.set_bind_group(0, &self.rect_bind_group, &[]);
+                pass.set_pipeline(&stages.shapes);
+                pass.set_bind_group(0, &self.frame_group, &[]);
                 pass.set_vertex_buffer(0, self.rect_buffer.slice(..needed));
                 pass.draw(0..4, surface_count..total as u32);
             }
@@ -2023,18 +2192,18 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.background);
-            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.set_pipeline(&stages.surface);
+            pass.set_bind_group(0, &self.frame_group, &[]);
             pass.draw(0..3, 0..1);
 
             if surface_count > 0 {
-                pass.set_pipeline(&self.rect_pipeline);
-                pass.set_bind_group(0, &self.rect_bind_group, &[]);
+                pass.set_pipeline(&stages.shapes);
+                pass.set_bind_group(0, &self.frame_group, &[]);
                 pass.set_vertex_buffer(0, self.rect_buffer.slice(..needed));
                 pass.draw(0..4, 0..surface_count);
             }
 
-            pass.set_pipeline(&self.ink_pipeline);
+            pass.set_pipeline(&stages.ink);
             pass.set_bind_group(0, &self.targets.ink_bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
@@ -2047,7 +2216,7 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.present_pipeline);
+            pass.set_pipeline(&stages.transition);
             pass.set_bind_group(0, &self.targets.present_bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
@@ -2057,25 +2226,25 @@ impl Renderer {
 
 /// Maps a terminal colour onto the theme. The 16 ANSI colours come from the
 /// theme's palette; 256-colour and true-colour values are used as-is.
-fn resolve(theme: &Theme, color: AnsiColor, default: [u8; 3]) -> [u8; 3] {
+fn resolve(variant: &Variant, color: AnsiColor, default: [u8; 3]) -> [u8; 3] {
     match color {
         AnsiColor::Spec(rgb) => [rgb.r, rgb.g, rgb.b],
-        AnsiColor::Indexed(i) => indexed(theme, i),
+        AnsiColor::Indexed(i) => indexed(variant, i),
         AnsiColor::Named(named) => match named {
-            NamedColor::Foreground | NamedColor::BrightForeground => theme.ink,
-            NamedColor::DimForeground => mix(theme.ink, theme.surface_rgb(), 0.4),
-            NamedColor::Background => theme.surface_rgb(),
-            NamedColor::Cursor => theme.cursor,
-            NamedColor::DimBlack => theme.palette[0],
-            NamedColor::DimRed => theme.palette[1],
-            NamedColor::DimGreen => theme.palette[2],
-            NamedColor::DimYellow => theme.palette[3],
-            NamedColor::DimBlue => theme.palette[4],
-            NamedColor::DimMagenta => theme.palette[5],
-            NamedColor::DimCyan => theme.palette[6],
-            NamedColor::DimWhite => theme.palette[7],
+            NamedColor::Foreground | NamedColor::BrightForeground => variant.ink,
+            NamedColor::DimForeground => mix(variant.ink, variant.surface_rgb(), 0.4),
+            NamedColor::Background => variant.surface_rgb(),
+            NamedColor::Cursor => variant.cursor,
+            NamedColor::DimBlack => variant.palette[0],
+            NamedColor::DimRed => variant.palette[1],
+            NamedColor::DimGreen => variant.palette[2],
+            NamedColor::DimYellow => variant.palette[3],
+            NamedColor::DimBlue => variant.palette[4],
+            NamedColor::DimMagenta => variant.palette[5],
+            NamedColor::DimCyan => variant.palette[6],
+            NamedColor::DimWhite => variant.palette[7],
             other => match (other as usize) < 16 {
-                true => theme.palette[other as usize],
+                true => variant.palette[other as usize],
                 false => default,
             },
         },
@@ -2154,56 +2323,6 @@ type LooseKey = (String, u16, bool);
 /// program's canvas.
 const CANVAS_SHARE: f32 = 0.5;
 
-/// Blood flung off a sword cut through a name in the box (x, y, w, h), `age` seconds
-/// (at speed 1) after the cut began: drops leave the blade as it passes
-/// them and flick a short way, mostly the way it moves, then splat and dry
-/// to a faint stain. Everything stays inside the struck name's own box, so
-/// no blood lands on the text around it. Big drops fall close; small ones
-/// flick further, some with a fine mist.
-fn splatter(out: &mut Vec<Rect>, [x, y, w, h]: [f32; 4], age: f32, seed: f32, rgb: [u8; 3]) {
-    let mut rng = animation::Rng::new(seed.to_bits() as u64 * 0x9e37_79b9 + 7);
-    let drops = 3 + (w / h * 1.2) as usize;
-    // Where drops may be: the line the name is on, end to end.
-    let (top, bottom) = (y + h * 0.12, y + h * 0.95);
-    let inside = |cx: f32, cy: f32, r: f32| (cx.clamp(x + r, x + w - r), cy.clamp(top + r, bottom - r));
-    for _ in 0..drops.min(10) {
-        let along = rng.range(0.1, 0.92);
-        let release = along * STRIKE_TIME;
-        let flight = rng.range(0.1, 0.18);
-        let angle = rng.range(-0.9, 0.9);
-        let reach = rng.unit();
-        let distance = h * mix_f(0.15, 0.9, reach);
-        let radius = h * mix_f(0.13, 0.05, reach) * rng.range(0.75, 1.15);
-        let mist = rng.unit() < 0.35;
-        let mist_seed = rng.unit();
-        if age < release {
-            continue;
-        }
-        let u = ((age - release) / flight).clamp(0.0, 1.0);
-        let eased = 1.0 - (1.0 - u) * (1.0 - u);
-        let origin = (x + w * along, y + h * 0.55);
-        // In flight a drop is smaller; it spreads as it lands.
-        let r = (radius * if u < 1.0 { 0.65 } else { 1.0 }).max(0.8);
-        let (cx, cy) = inside(origin.0 + angle.cos() * distance * eased, origin.1 + angle.sin() * distance * eased, r);
-        let dried = ((age - release - flight - 0.5) / (SPLATTER_DRY - 0.5)).clamp(0.0, 1.0);
-        let alpha = 0.95 - (0.95 - SPLATTER_STAIN) * dried;
-        out.push(Rect::shape(SHAPE_DISC, cx, cy, r, rgb, alpha).rough(0.35, seed + along * 17.0));
-        if mist && u >= 1.0 {
-            let fine = (h * 0.025).max(0.6);
-            for k in 0..3 {
-                let a = (mist_seed + k as f32 * 0.37) * std::f32::consts::TAU;
-                let d = radius * (1.6 + k as f32 * 0.5);
-                let (mx, my) = inside(cx + a.cos() * d, cy + a.sin() * d, fine);
-                out.push(Rect::shape(SHAPE_DISC, mx, my, fine, rgb, alpha * 0.8));
-            }
-        }
-    }
-}
-
-fn mix_f(a: f32, b: f32, t: f32) -> f32 {
-    a + (b - a) * t
-}
-
 /// The background a full-screen app paints everywhere (btop, themed TUIs):
 /// it stands for "the screen", so it is drawn as the bare sheet rather than
 /// tinting the whole window. Only colours set explicitly count.
@@ -2231,20 +2350,20 @@ fn program_chosen(color: AnsiColor) -> bool {
 
 /// The theme's answer for a colour query (OSC 4 / 10 / 11 / 12): palette
 /// entries 0..=255, then foreground, background and cursor.
-pub fn query_color(theme: &Theme, index: usize) -> [u8; 3] {
+pub fn query_color(variant: &Variant, index: usize) -> [u8; 3] {
     match index {
-        0..=255 => indexed(theme, index as u8),
-        256 => theme.ink,
-        257 => theme.surface_rgb(),
-        258 => theme.cursor,
-        _ => theme.ink,
+        0..=255 => indexed(variant, index as u8),
+        256 => variant.ink,
+        257 => variant.surface_rgb(),
+        258 => variant.cursor,
+        _ => variant.ink,
     }
 }
 
 /// xterm's 256-colour table: 16 theme colours, a 6x6x6 cube, then greys.
-fn indexed(theme: &Theme, i: u8) -> [u8; 3] {
+fn indexed(variant: &Variant, i: u8) -> [u8; 3] {
     match i {
-        0..=15 => theme.palette[i as usize],
+        0..=15 => variant.palette[i as usize],
         16..=231 => {
             let i = i - 16;
             let level = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
@@ -2264,6 +2383,22 @@ fn mix(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every stage of every theme compiles and validates, so a shader
+    /// mistake fails here instead of when the theme is first drawn.
+    #[test]
+    fn every_theme_stage_compiles() {
+        use wgpu::naga;
+        for theme in api::all() {
+            for (stage, source) in ["surface", "shapes", "ink", "transition"].iter().zip(stage_sources(theme)) {
+                let module = naga::front::wgsl::parse_str(&source)
+                    .unwrap_or_else(|e| panic!("{} {stage}: {}", theme.id(), e.emit_to_string(&source)));
+                naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+                    .validate(&module)
+                    .unwrap_or_else(|e| panic!("{} {stage}: {}", theme.id(), e.emit_to_string(&source)));
+            }
+        }
+    }
 
     #[test]
     fn control_characters_take_one_blank_cell() {

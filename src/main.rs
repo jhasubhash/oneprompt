@@ -19,10 +19,12 @@ mod color;
 mod config;
 mod input;
 mod menu;
+mod picker;
 mod renderer;
 mod strike;
 mod terminal;
 mod theme;
+mod themes;
 mod trace;
 
 use std::path::PathBuf;
@@ -42,7 +44,7 @@ use config::{Config, OptionAsMeta};
 use menu::Action;
 use renderer::{Notice, Renderer};
 use terminal::{TabId, Terminal, UserEvent};
-use theme::Theme;
+use theme::Variant;
 
 /// How long snapshot mode lets the command run before capturing.
 const SNAPSHOT_DELAY: Duration = Duration::from_millis(1500);
@@ -64,8 +66,14 @@ struct App {
     /// The tab name being edited in the strip.
     renaming: Option<Rename>,
     menu: Option<menu::ContextMenu>,
-    themes: Vec<Theme>,
+    /// Every theme's variants, with the settings applied.
+    themes: Vec<Variant>,
     current: usize,
+    /// Theme chosen in the picker this session (wins over the settings).
+    picked: Option<String>,
+    /// The theme picker is open, with this theme (index in `theme::all()`)
+    /// chosen.
+    picker: Option<usize>,
     mods: ModifiersState,
     /// Which Option keys are held right now: (left, right).
     option_keys: (bool, bool),
@@ -137,7 +145,7 @@ struct Mouse {
 const MULTI_CLICK: Duration = Duration::from_millis(400);
 
 impl App {
-    fn theme(&self) -> &Theme {
+    fn theme(&self) -> &Variant {
         &self.themes[self.current]
     }
 
@@ -389,6 +397,17 @@ impl App {
             Action::FlipAppearance => {
                 self.flip = Some(!self.themes[self.current].dark);
                 self.select_theme();
+                // The picker's cards show the new appearance too.
+                self.update_picker();
+            }
+            Action::Themes => {
+                if self.picker.is_some() {
+                    self.close_picker();
+                } else {
+                    let id = self.themes[self.current].theme.id();
+                    self.picker = Some(theme::all().iter().position(|t| t.id() == id).unwrap_or(0));
+                    self.update_picker();
+                }
             }
             Action::Settings => {
                 if let Err(err) = config::open_in_editor(&self.config_path) {
@@ -425,9 +444,86 @@ impl App {
     }
 
     /// App shortcuts (Cmd+...). Returns true if the key was handled.
+    /// Shows the picker as it is now: per theme, the variant it would show
+    /// for the current appearance.
+    fn update_picker(&mut self) {
+        let Some(selected) = self.picker else { return };
+        let previews: Vec<Variant> = theme::all()
+            .iter()
+            .map(|t| {
+                let i = self.config.theme_index(&self.themes, self.system_dark, self.flip, Some(t.id()));
+                self.themes[i].clone()
+            })
+            .collect();
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_picker(Some((selected, previews)));
+            r.window().request_redraw();
+        }
+    }
+
+    fn close_picker(&mut self) {
+        self.picker = None;
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_picker(None);
+            r.window().request_redraw();
+        }
+    }
+
+    /// Switches to theme `index` (in `theme::all()`) for good: this session,
+    /// and in the settings file.
+    fn apply_picked(&mut self, index: usize) {
+        self.close_picker();
+        let Some(theme) = theme::all().get(index).copied() else { return };
+        self.picked = Some(theme.id().to_string());
+        if let Err(err) = config::save_theme(&self.config_path, theme.id()) {
+            self.show_notice(format!("could not save the theme: {err}"), true);
+        }
+        self.select_theme();
+    }
+
+    /// Keys while the picker is open. Command shortcuts still work (so
+    /// Cmd+Shift+L flips light and dark); nothing reaches the shell.
+    fn picker_key(&mut self, event: &KeyEvent) -> bool {
+        use winit::keyboard::NamedKey;
+        let Some(selected) = self.picker else { return false };
+        if self.mods.super_key() {
+            return false;
+        }
+        let n = theme::all().len();
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => self.close_picker(),
+            Key::Named(NamedKey::Enter) => self.apply_picked(selected),
+            Key::Named(NamedKey::ArrowRight | NamedKey::ArrowDown) => {
+                self.picker = Some((selected + 1) % n);
+                self.update_picker();
+            }
+            Key::Named(NamedKey::Tab) => {
+                self.picker = Some(if self.mods.shift_key() { (selected + n - 1) % n } else { (selected + 1) % n });
+                self.update_picker();
+            }
+            Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowUp) => {
+                self.picker = Some((selected + n - 1) % n);
+                self.update_picker();
+            }
+            _ => {}
+        }
+        true
+    }
+
+    /// The picker card under the pointer.
+    fn picker_card(&self) -> Option<usize> {
+        let r = self.renderer.as_ref()?;
+        picker::card_at(&r.picker_cards(), self.mouse.x as f32, self.mouse.y as f32, r.window().scale_factor() as f32)
+    }
+
     fn shortcut(&mut self, event: &KeyEvent) -> bool {
         if !self.mods.super_key() {
             return false;
+        }
+        // Cmd+Option+T: Option changes the character, so go by the key.
+        if self.mods.alt_key() && event.physical_key == winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyT) {
+            self.menu_action(Action::Themes);
+            return true;
         }
         let Key::Character(key) = &event.logical_key else {
             return false;
@@ -502,14 +598,14 @@ impl App {
     /// Shows the light or dark variant, per the appearance setting, the
     /// system's mode and any Cmd+Shift+L flip.
     fn select_theme(&mut self) {
-        let index = self.config.theme_index(&self.themes, self.system_dark, self.flip);
+        let index = self.config.theme_index(&self.themes, self.system_dark, self.flip, self.picked.as_deref());
         if index != self.current {
-            // Cut the new look in over the old one, a different way each
-            // time, on a new sheet of paper unless the settings pin one.
+            // The incoming theme takes over the window its way, a different
+            // way each time, on a new sheet unless the settings pin one.
             let pinned = self.config.seed.is_some() || std::env::var_os("ONEPROMPT_SEED").is_some();
-            let cut = self.themes[index].cursor;
+            let incoming = self.themes[index].clone();
             if let Some(r) = self.renderer.as_mut() {
-                r.start_transition(cut);
+                r.start_transition(&incoming);
                 if !pinned {
                     r.new_sheet();
                 }
@@ -522,9 +618,13 @@ impl App {
 
     /// Applies a config: themes with overrides, appearance, paper seed.
     fn apply_config(&mut self, config: Config) {
-        // A new appearance setting replaces a Cmd+Shift+L flip.
+        // A new appearance setting replaces a Cmd+Shift+L flip, and a new
+        // theme setting a choice in the picker.
         if config.appearance != self.config.appearance {
             self.flip = None;
+        }
+        if config.theme != self.config.theme {
+            self.picked = None;
         }
         self.themes = config.themes();
         // Snapshots must be deterministic, so they never animate.
@@ -541,7 +641,7 @@ impl App {
             r.set_seed(config.seed);
         }
         self.config = config;
-        self.current = self.config.theme_index(&self.themes, self.system_dark, self.flip);
+        self.current = self.config.theme_index(&self.themes, self.system_dark, self.flip, self.picked.as_deref());
         self.relayout();
     }
 
@@ -568,8 +668,12 @@ impl App {
                 false,
             ),
             Ok(config) => {
+                // The picker saving its choice needs no word.
+                let picked = config.theme.is_some()
+                    && config.theme == self.picked
+                    && Config { theme: self.config.theme.clone(), ..config.clone() } == self.config;
                 self.apply_config(config);
-                if !self.check_font() {
+                if !self.check_font() && !picked {
                     self.show_notice("settings applied".into(), false);
                 }
             }
@@ -649,6 +753,16 @@ impl App {
 
     fn on_mouse_button(&mut self, state: ElementState, button: MouseButton) {
         let pressed = state == ElementState::Pressed;
+        // A click on a card applies it; anywhere else closes the picker.
+        if self.picker.is_some() {
+            if pressed && button == MouseButton::Left {
+                match self.picker_card() {
+                    Some(card) => self.apply_picked(card),
+                    None => self.close_picker(),
+                }
+            }
+            return;
+        }
         // A click anywhere else keeps a name being edited.
         if pressed && self.renaming.is_some() {
             let on_tab = self.renderer.as_ref().and_then(|r| r.tab_at(self.mouse.x));
@@ -719,6 +833,16 @@ impl App {
     }
 
     fn on_mouse_move(&mut self) {
+        // Over the picker, the card under the pointer is the chosen one.
+        if self.picker.is_some() {
+            if let Some(card) = self.picker_card()
+                && self.picker != Some(card)
+            {
+                self.picker = Some(card);
+                self.update_picker();
+            }
+            return;
+        }
         if let Some(r) = self.renderer.as_mut() {
             let over = chrome::over_group(self.mouse.x, self.mouse.y, r.window().scale_factor() as f32);
             if r.set_controls_hover(over) {
@@ -821,16 +945,20 @@ impl ApplicationHandler<UserEvent> for App {
             == Some(winit::window::Theme::Dark);
         let config = self.config.clone();
         self.apply_config(config);
-        // Open the window like the ink paintings it imitates: light paper is
-        // uncovered from a sheet of ink, dark ink floods over the paper.
-        let theme = &self.themes[self.current];
-        let from = if theme.dark {
-            self.themes.iter().find(|t| !t.dark).map_or([226, 196, 142], |t| t.surface_rgb())
+        // The window opens out of its opposite: a light look is uncovered
+        // from its ink colour, a dark one floods over its theme's light
+        // surface.
+        let variant = self.themes[self.current].clone();
+        let from = if variant.dark {
+            self.themes
+                .iter()
+                .find(|v| !v.dark && v.theme.id() == variant.theme.id())
+                .map_or(variant.ink, |v| v.surface_rgb())
         } else {
-            theme.ink
+            variant.ink
         };
         if let Some(r) = self.renderer.as_mut() {
-            r.start_intro(from);
+            r.start_intro(from, &variant);
         }
         if let Some(err) = self.startup_error.take() {
             self.show_notice(format!("settings not applied: {err}"), true);
@@ -935,6 +1063,9 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 if self.renaming.is_some() && self.rename_key(&event) {
+                    return;
+                }
+                if self.picker_key(&event) {
                     return;
                 }
                 if self.shortcut(&event) {
@@ -1079,7 +1210,7 @@ fn main() {
     let themes = config.themes();
     // The window (and with it the system's light/dark mode) does not exist
     // yet; `resumed` picks the right variant.
-    let current = config.theme_index(&themes, false, None);
+    let current = config.theme_index(&themes, false, None, None);
     let mut app = App {
         proxy: event_loop.create_proxy(),
         command,
@@ -1094,6 +1225,8 @@ fn main() {
         menu: None,
         themes,
         current,
+        picked: None,
+        picker: None,
         mods: ModifiersState::empty(),
         option_keys: (false, false),
         config_path,

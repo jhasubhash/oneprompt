@@ -8,11 +8,22 @@ an ink colour and a typeface.
 |---|---|
 | ![](docs/screenshots/tsushima-light.png) | ![](docs/screenshots/tsushima-dark.png) |
 
-## Theme
+| Chalkboard Stone | Chalkboard Slate |
+|---|---|
+| ![](docs/screenshots/chalkboard-stone.png) | ![](docs/screenshots/chalkboard-slate.png) |
 
-A theme is the whole look: surface texture, ink behaviour, palette, font and the
-window controls. There is one for now, **Tsushima**, after the ink-painting cutscenes of
-*Ghost of Tsushima* and *Ghost of Yotei*, in two variants:
+## Themes
+
+A theme is the whole look: surface texture, how ink or chalk behaves on it, palette, font,
+cursor, window controls, and its own animations: how the window opens, how the theme takes
+over when you switch to it, and how it strikes out deleted names. Each comes in a light and
+a dark variant. Cmd+Option+T (or Themes… in the right-click menu) opens the **theme
+picker**: a card per theme showing your current screen as that theme draws it, live.
+Arrow keys or the pointer choose, Return or a click switches (with the theme's own
+transition) and saves it as `theme` in the settings, Esc closes; Cmd+Shift+L still flips
+light and dark so both variants can be compared.
+
+**Tsushima**, after the ink-painting cutscenes of *Ghost of Tsushima* and *Ghost of Yotei*:
 
 - **Light**: golden parchment browning heavily towards the edges, with relief-lit tooth,
   water-stain tide lines, fibers and a flick of crimson splatter; bold near-black sumi swept
@@ -22,6 +33,18 @@ window controls. There is one for now, **Tsushima**, after the ink-painting cuts
   the bottom, different in every cell).
 - **Dark**: the cutscenes inverted: a field of ink with the drawing showing through in
   parchment, the same brushwork, the same seal ink.
+
+**Chalkboard**, writing on a well-used board:
+
+- **Stone** (light): dark charcoal on a slab of white stone, softly mottled, its fine grain
+  lit from the top left, with tiny pits and a few faint grey veins. Pastel colours for the
+  palette, a sanguine cursor.
+- **Slate** (dark): chalk on black slate, with years of eraser swirls, faint ghosts of old
+  lessons, specks of dust and more of it along the chalk tray. Coloured chalks for the
+  palette.
+- On both, strokes are broad and grainy where they skip the surface's tooth, dusty at their
+  edges, and freshly written letters shed a little more dust that settles. A stub cursor,
+  ring controls.
 
 ### Colours from programs
 
@@ -45,38 +68,58 @@ light or dark palette.
   `writing_speed` characters per second, sped up so a batch never takes more than 1.5 s.
   Scrolled text keeps its age; full-screen apps and repaints over existing text appear at
   once.
-- **Reveals**: the window opens like the cutscenes, parchment torn out of a sheet of ink
-  (light) or ink flooding over parchment (dark). Switching light / dark is a sword fight:
+- **Reveals**: the incoming theme plays its own. Tsushima opens the window like the
+  cutscenes, parchment torn out of a sheet of ink (light) or ink flooding over parchment
+  (dark), and switching to it is a sword fight:
   one to five quick slashes (a single sweep, a cross, a claw, a zigzag or a flurry), each
   flinging droplets and edged in seal ink, then the new look runs out of every cut and
   droplet like watercolour on damp paper: quick at first and slowing, its front fingering
   and blooming, pigment pooling in a tide line and settling into the grain, the paper
-  ahead darkening as the water reaches it. No two are alike.
+  ahead darkening as the water reaches it. Chalkboard wipes the old look off with an
+  eraser, back and forth in a few passes, leaving streaky smears and pushing dust along
+  its edge. No two are alike.
 - **Deleted names are struck out**: when a file or folder named on screen is deleted (`rm`,
   a script, the Finder, ...), every mention of it, in `ls` output, the command that
-  deleted it, anywhere, is cut through with a quick sword stroke in seal ink and fades.
-  Words are looked up relative to the shell's working directory; a name that comes back
-  is no longer struck. Blood flies off the blade as it cuts, splats and dries to a faint
-  stain. `strike_deleted = false` turns it all off, `strike_splatter = false` just the
-  blood.
+  deleted it, anywhere, is struck through and fades. Words are looked up relative to the
+  shell's working directory; a name that comes back is no longer struck. Tsushima cuts it
+  with a sword that flings blood, which splats and dries to a faint stain; Chalkboard
+  draws a quick chalk line that knocks off a little dust. `strike_deleted = false` turns it
+  all off, `strike_splatter = false` just the extras (blood, dust).
 - `animation = false` turns it off, `animation_speed` scales it. The app only redraws while
   something is moving.
 
 The variant follows macOS light / dark mode and switches with it; Cmd+Shift+L flips it for the
-session, and `appearance` in the settings pins one. Each switch is brushed in with
-brushwork made up on the spot (a few strokes and drops of ink, soaking outward until the
-window is covered), so no two look alike. Every session, and every switch, gets a new sheet
-of paper (`seed` in the settings or `ONEPROMPT_SEED=<number>` pins one). The renderer still supports the earlier surfaces
-(cotton paper, chalkboard, flat) and control styles for themes to come.
+session, and `appearance` in the settings pins one. Every session, and every switch, gets a
+new sheet (`seed` in the settings or `ONEPROMPT_SEED=<number>` pins one).
 
-Rendering ink is a two-step process: text, line art and controls are drawn into an
-offscreen *ink layer*, then `src/shaders/ink.wgsl` composites it onto the surface with
-a brush nib (glyphs swept along a slanted nib for thick-and-thin strokes), bleed (ink
-wicking along paper fibers), dry-brush grain and pooled rims. The ink also takes on the
-sheet's own grain (`absorb`): the brush skips the paper's raised tooth, leaving flecks in
-the letters where the sheet shows, ink settles in its hollows and fibers lie over it, all
-at the same places the background draws them. Each theme sets those
-amounts and its font weight in `theme.rs`; all zero gives crisp screen text.
+Rendering ink is a two-step process: text, line art, controls, the cursor and strikes are
+drawn into an offscreen *ink layer*, then the theme's ink stage composites it onto its
+surface. Tsushima's (`src/themes/tsushima/ink.wgsl`) sweeps glyphs along a slanted brush
+nib for thick-and-thin strokes, lets the ink bleed along the paper's fibers, adds
+dry-brush grain and pooled rims, and lets it take on the sheet's own grain (`absorb`):
+the brush skips the paper's raised tooth, ink settles in its hollows and fibers lie over
+it, at the same places the surface draws them. Chalkboard's makes chalk of it.
+
+### How themes are built
+
+The app is a framework, and each theme is a module in `src/themes/<name>/` that only uses
+the theme API in `src/theme/mod.rs` (a test checks that no theme reaches past it, or into
+another theme). A theme implements the `Theme` trait:
+
+- **Variants**: colours, palette, fonts, window controls, and values for its settings.
+- **Settings** it declares (name, range, description): the settings file, its template and
+  its validation are generated from them.
+- **Stages** in WGSL, each a function the framework calls: `surface` (the sheet),
+  `theme_ink` (how the ink layer lands on it, with the framework's hand-writing state),
+  `theme_shape` (its own shapes: Tsushima's brush dab and sword slash, Chalkboard's chalk
+  stick and line) and `theme_transition` (its reveals). Each gets a shared prelude (the
+  frame: size, time, seed, grid, colours; and `hash`, `noise`, `rotate`) plus its own data
+  from Rust. A stage it leaves out gets a plain default. A test compiles every stage.
+- **Events**: `reveal` (the window opens), `switch` (switching to it, from its other
+  variant or another theme), `cursor`, and `strike` / `draw_strike` (a deleted name).
+
+Adding a theme is a folder with a `mod.rs` and its shaders, and a line in
+`src/themes/mod.rs`. CONTRIBUTING.md has the details.
 
 On macOS the Metal layer is explicitly tagged sRGB. Left untagged, wide-gamut displays
 colour-match some frames and not others, which shows up as the window flickering in tint
@@ -97,7 +140,8 @@ Milestone 1, a working terminal:
   size) and returns to normal when it exits
 - Box-drawing and block characters drawn as shapes, so borders and bars join without seams
 - Focus reporting, left Option as Meta (right Option still types é, €, ...)
-- Procedural backgrounds in WGSL (`src/shaders/background.wgsl`): paper fibers and grain, chalkboard smudges and dust, flat
+- Themes as isolated modules on a common framework (`src/theme`, `src/themes`), with a live
+  theme picker
 
 | Key | Action |
 |---|---|
@@ -107,11 +151,12 @@ Milestone 1, a working terminal:
 | Cmd+Shift+] / Cmd+Shift+[ | next / previous tab |
 | Cmd+N | new window |
 | Cmd+Shift+L | flip between light and dark |
+| Cmd+Option+T | theme picker |
 | Cmd+W / Cmd+M | close tab (the window with the last one) / minimize; the theme's controls, top left, close or minimize the window |
 | drag top strip | move the window; double-click it to zoom |
 | Cmd+= / Cmd+- / Cmd+0 | bigger / smaller / actual-size text |
 | Cmd+A / Cmd+K | select all (scrollback too) / clear screen and scrollback |
-| right-click | menu: copy, paste, select all, clear, tabs, text size, light / dark, settings (Shift+right-click when an app has the mouse) |
+| right-click | menu: copy, paste, select all, clear, tabs, text size, light / dark, themes, settings (Shift+right-click when an app has the mouse) |
 | Cmd+C | copy selection |
 | Cmd+V | paste (bracketed when the app asks for it) |
 | drag / double / triple click | select text / word / line |
@@ -149,18 +194,20 @@ note at the bottom of the window confirms it, or says what is wrong and keeps th
 settings.
 
 ```toml
+theme = "tsushima"            # tsushima | chalkboard (the picker sets it)
 appearance = "system"         # system | light | dark
 animation = true              # hand-written text, window reveals
 animation_speed = 1.0
 writing_speed = 500           # characters per second for output
 harmonize_colors = true       # program-chosen colours as inks on the sheet
 strike_deleted = true         # strike out names of deleted files on screen
-strike_splatter = true        # with blood flung off the cut
+strike_splatter = true        # with the theme's extras (blood, chalk dust)
 option_as_meta = "left"       # left | both | none
 seed = 11                     # pin the paper; unset = new sheet each session
 
-[themes.tsushima-light]       # each variant: fonts, line_height, bleed, nib, grain, edge,
-font_family = "Courier New"   # and the paper: texture, stains, splatter (1 = built-in, 0 = off)
+[themes.tsushima-light]       # each variant: fonts and line_height, then the theme's own
+font_family = "Courier New"   # settings (Tsushima: bleed, nib, grain, edge, absorb, texture,
+                              # stains, splatter; Chalkboard: grit, dust, smudges, ghosts)
 font_weight = 700
 bleed_variation = 0.5         # per-letter bleed: 0.5 to 1.5 times `bleed`
 bleed_time = 4                # seconds the bleed keeps spreading
@@ -168,8 +215,8 @@ texture = 0.6
 stains = 0
 ```
 
-The file starts with both variants' built-in values as active lines, so editing a number
-just works (`oneprompt --default-config` prints it). Top-level `font_family`, `font_size`
+The file starts with every variant's built-in values as active lines, each theme's settings
+explained above its sections, so editing a number just works (`oneprompt --default-config` prints it). Top-level `font_family`, `font_size`
 and `font_weight` also exist and apply to any variant whose section doesn't set them.
 Font weights snap to the faces the font has (Courier New: 400 and 700); the text engine
 would otherwise fall back to a different, proportional font. A font that is missing or not
@@ -184,16 +231,19 @@ src/input.rs                key presses -> xterm byte sequences
 src/boxdraw.rs              box-drawing and block characters as rectangles
 src/chrome.rs               theme-drawn window controls: layout and hit testing
 src/config.rs               settings file: parsing, theme overrides, live reload
-src/renderer.rs             ink pass (text, line art, controls), main pass (surface, cells, ink composite), present pass
-src/animation.rs            per-cell write times (reading order, scroll-aware) and window reveals
+src/renderer.rs             the passes and each theme's stages: ink layer, surface + cells + ink, transition; the picker
+src/picker.rs               theme picker: card layout and hit testing
+src/animation.rs            per-cell write times (reading order, scroll-aware) and window transitions
 src/strike.rs               names on screen whose files were deleted, to strike out
 src/trace.rs                pen paths: per-glyph stroke order for the hand-writing reveal
 src/color.rs                program-chosen colours mapped onto the sheet (OKLab)
-src/theme.rs                themes as plain data
-src/shaders/background.wgsl procedural textures
-src/shaders/rect.wgsl       rectangles, brush discs, rings and crosses
-src/shaders/ink.wgsl        ink-on-surface composite: nib, bleed, grain, pooled rims, write-in
-src/shaders/present.wgsl    window reveal through a growing brush shape, or sword cuts
+src/theme/mod.rs            the theme API: Theme, Variant, settings, shapes, plans, hooks
+src/themes/mod.rs           the list of themes, and the isolation test
+src/themes/tsushima/        washi and sumi: surface, ink, shapes, brushwork and sword transitions
+src/themes/chalkboard/      slate and chalk: surface, chalk, shapes, eraser transitions
+src/shaders/prelude.wgsl    shared by every stage: the frame, noise
+src/shaders/*_stage.wgsl    the framework's part of each stage; *_default.wgsl its plain defaults
+src/shaders/image.wgsl      picker previews
 ```
 
 ## Roadmap
@@ -204,9 +254,9 @@ src/shaders/present.wgsl    window reveal through a growing brush shape, or swor
 2. **Input and navigation.** IME, clickable links, search in scrollback, splits.
 3. **Brush typography.** Stroke-width variation (pressure) and per-glyph wobble, a
    brush-style monospace face for Tsushima.
-4. **Theme files.** TOML themes with hot reload, image textures (scanned paper, linen)
-   alongside procedural ones, and per-role fonts (prompt, output, bold, italic).
-5. **Polish.** Cursor styles (nib, chalk stub), selection as highlighter, ligatures, IME.
+4. **More themes.** Image textures (scanned paper, linen) alongside procedural ones,
+   and per-role fonts (prompt, output, bold, italic).
+5. **Polish.** Selection as highlighter, ligatures, IME.
 
 ## License
 

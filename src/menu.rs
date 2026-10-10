@@ -25,11 +25,12 @@ pub enum Action {
     Smaller,
     ActualSize,
     FlipAppearance,
+    Themes,
     Settings,
 }
 
 impl Action {
-    const ALL: [Action; 13] = [
+    const ALL: [Action; 14] = [
         Action::Copy,
         Action::Paste,
         Action::SelectAll,
@@ -42,6 +43,7 @@ impl Action {
         Action::Smaller,
         Action::ActualSize,
         Action::FlipAppearance,
+        Action::Themes,
         Action::Settings,
     ];
 
@@ -99,6 +101,7 @@ impl ContextMenu {
             &item(Action::Smaller, "Smaller Text", cmd(Code::Minus)),
             &item(Action::ActualSize, "Actual Size", cmd(Code::Digit0)),
             &flip,
+            &item(Action::Themes, "Themes…", Some(Accelerator::new(Modifiers::META | Modifiers::ALT, Code::KeyT))),
             &PredefinedMenuItem::separator(),
             &item(Action::Settings, "Settings…", cmd(Code::Comma)),
         ]);

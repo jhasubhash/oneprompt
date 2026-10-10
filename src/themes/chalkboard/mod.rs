@@ -1,0 +1,254 @@
+//! Chalkboard: writing on a well-used board. The light variant is charcoal
+//! on a slab of white stone, the dark one chalk on black slate. Strokes are
+//! grainy where they skip the surface's tooth and dusty at their edges; the
+//! surface carries old eraser smudges and ghosts of earlier lessons.
+//!
+//! The window is wiped clean with an eraser, back and forth, when it opens
+//! and when switching to Chalkboard; deleted names get a quick chalk line
+//! through them that knocks a little dust off.
+
+use crate::theme::{
+    self, ControlStyle, Controls, Ctx, Cursor, CursorKind, Param, Plan, Rng, Shape, Shaders, Strike, StrikeSpan,
+    Theme, Variant, CUSTOM, DISC,
+};
+
+pub static CHALKBOARD: Chalkboard = Chalkboard;
+
+pub struct Chalkboard;
+
+/// Shape kinds drawn by shapes.wgsl.
+const STICK: f32 = CUSTOM;
+const LINE: f32 = CUSTOM + 1.0;
+
+/// How long the eraser takes, at speed 1.
+const REVEAL_TIME: f32 = 1.3;
+const SWITCH_TIME: f32 = 1.8;
+/// Fresh chalk sheds dust this long.
+const SETTLE_TIME: f32 = 1.0;
+/// The chalk line through a deleted name, and the dust it knocks off.
+const STRIKE_TIME: f32 = 0.25;
+const DUST_TIME: f32 = 1.4;
+
+const PARAMS: &[Param] = &[
+    Param { key: "grit", about: "how broken chalk strokes are where they skip the board, 0..1", min: 0.0, max: 1.0 },
+    Param { key: "dust", about: "the haze of chalk dust around strokes, 0..1", min: 0.0, max: 1.0 },
+    Param { key: "smudges", about: "old eraser swirls and dust on the board: 1 built-in, 0 none, up to 3", min: 0.0, max: 3.0 },
+    Param { key: "ghosts", about: "faint traces of old writing: 1 built-in, 0 none, up to 3", min: 0.0, max: 3.0 },
+];
+
+/// What common.wgsl reads (its `Chalkboard` struct).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct Data {
+    grit: f32,
+    dust: f32,
+    smudges: f32,
+    ghosts: f32,
+    settle: f32,
+    stone: f32,
+    _pad: [f32; 2],
+}
+
+/// What transition.wgsl reads (its `Plan` struct).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct PlanData {
+    passes: f32,
+    angle: f32,
+    seed: f32,
+    upward: f32,
+}
+
+impl Theme for Chalkboard {
+    fn id(&self) -> &'static str {
+        "chalkboard"
+    }
+
+    fn name(&self) -> &'static str {
+        "Chalkboard"
+    }
+
+    fn about(&self) -> &'static str {
+        "Charcoal on white stone in the light, chalk on black slate in the dark."
+    }
+
+    fn variants(&'static self) -> Vec<Variant> {
+        vec![
+            Variant {
+                theme: self,
+                name: "Chalkboard Stone",
+                dark: false,
+                surface: [0.905, 0.894, 0.866],
+                ink: [26, 25, 24],
+                cursor: [168, 72, 46],
+                selection: ([34, 32, 30], 0.85),
+                palette: [
+                    [30, 29, 28],    // black: charcoal
+                    [160, 56, 46],   // red: sanguine
+                    [66, 104, 62],   // green: green pastel
+                    [150, 110, 34],  // yellow: ochre
+                    [46, 76, 128],   // blue
+                    [122, 62, 118],  // magenta
+                    [40, 108, 108],  // cyan
+                    [112, 109, 104], // "white": thin charcoal
+                    [86, 83, 79],
+                    [184, 70, 56],
+                    [82, 126, 76],
+                    [176, 132, 44],
+                    [62, 96, 156],
+                    [146, 80, 140],
+                    [54, 130, 128],
+                    [140, 136, 130],
+                ],
+                font_family: "Menlo".into(),
+                font_size: 16.0,
+                font_weight: 400,
+                line_height: 24.0,
+                controls: Controls { style: ControlStyle::Ring, colors: [[168, 72, 46], [112, 109, 104], [112, 109, 104]] },
+                //       grit dust smudges ghosts
+                params: vec![0.4, 0.4, 1.0, 1.0],
+            },
+            Variant {
+                theme: self,
+                name: "Chalkboard Slate",
+                dark: true,
+                surface: [0.078, 0.086, 0.086],
+                ink: [226, 228, 222],
+                cursor: [240, 200, 110],
+                selection: ([226, 228, 222], 0.8),
+                palette: [
+                    [92, 98, 96],    // black: grey chalk, still visible on slate
+                    [236, 132, 132], // red: pink chalk
+                    [160, 212, 142], // green
+                    [240, 214, 120], // yellow
+                    [142, 186, 230], // blue
+                    [206, 158, 218], // magenta
+                    [142, 210, 204], // cyan
+                    [206, 208, 200], // white
+                    [128, 134, 130],
+                    [248, 160, 152],
+                    [188, 228, 168],
+                    [248, 230, 160],
+                    [174, 208, 242],
+                    [226, 188, 232],
+                    [176, 228, 222],
+                    [244, 244, 236],
+                ],
+                font_family: "Menlo".into(),
+                font_size: 16.0,
+                font_weight: 400,
+                line_height: 24.0,
+                controls: Controls { style: ControlStyle::Ring, colors: [[236, 132, 132], [240, 214, 120], [160, 212, 142]] },
+                params: vec![0.55, 0.45, 1.0, 1.0],
+            },
+        ]
+    }
+
+    fn params(&self) -> &'static [Param] {
+        PARAMS
+    }
+
+    fn shaders(&self) -> Shaders {
+        Shaders {
+            common: include_str!("common.wgsl"),
+            surface: Some(include_str!("surface.wgsl")),
+            ink: Some(include_str!("ink.wgsl")),
+            shapes: Some(include_str!("shapes.wgsl")),
+            transition: Some(include_str!("transition.wgsl")),
+        }
+    }
+
+    fn data(&self, v: &Variant, ctx: &Ctx) -> Vec<u8> {
+        theme::bytes(&Data {
+            grit: v.param("grit"),
+            dust: v.param("dust"),
+            smudges: v.param("smudges"),
+            ghosts: v.param("ghosts"),
+            settle: SETTLE_TIME / ctx.speed,
+            stone: if v.dark { 0.0 } else { 1.0 },
+            _pad: [0.0; 2],
+        })
+    }
+
+    fn reveal(&self, _v: &Variant, rng: &mut Rng, _aspect: f32) -> Option<Plan> {
+        Some(wipe(rng, 2.0, 3.0, REVEAL_TIME))
+    }
+
+    fn switch(&self, _v: &Variant, rng: &mut Rng, _aspect: f32) -> Option<Plan> {
+        Some(wipe(rng, 3.0, 5.0, SWITCH_TIME))
+    }
+
+    fn settle_time(&self, _v: &Variant) -> f32 {
+        SETTLE_TIME
+    }
+
+    /// The cursor is rubbed in with the side of the chalk.
+    fn cursor(&self, v: &Variant, ctx: &Ctx, cursor: &Cursor, out: &mut Vec<Shape>) {
+        let [x, y, cw, ch] = cursor.cell;
+        let seed = cursor.column as f32 * 1.91 + cursor.line as f32 * 5.37;
+        let stick = |x, y, w, h, alpha| {
+            let mut s = Shape::new(x, y, w, h, v.cursor, alpha).kind(STICK);
+            s.params[1] = 1.0;
+            s.params[3] = seed;
+            s
+        };
+        match cursor.kind {
+            CursorKind::Block => out.push(stick(x, y + ch * 0.06, cw, ch * 0.88, 0.85)),
+            CursorKind::Beam => out.push(stick(x, y, (cw * 0.2).max(2.5), ch, 1.0)),
+            CursorKind::Underline => out.push(stick(x, y + ch * 0.82, cw, (ch * 0.14).max(2.5), 1.0)),
+            CursorKind::Hollow => theme::plain_cursor(v, ctx, cursor, out),
+        }
+    }
+
+    fn strike(&self) -> Option<Strike> {
+        Some(Strike { duration: STRIKE_TIME, linger: DUST_TIME, fade: 0.5 })
+    }
+
+    /// A quick chalk line through the name, a little past each end; as extras,
+    /// a few motes of dust knocked off it drift down and fade.
+    fn draw_strike(&self, v: &Variant, ctx: &Ctx, span: &StrikeSpan, out: &mut Vec<Shape>) {
+        let [x, y, w, h] = span.word;
+        let cw = ctx.cell[0];
+        let mut line = Shape::new(x - cw * 0.25, y, w + cw * 0.5, h, v.ink, 0.95).kind(LINE);
+        line.params[1] = span.progress;
+        line.params[3] = span.seed;
+        out.push(line);
+        if span.extras {
+            dust(out, span.word, span.age, span.seed, v.ink);
+        }
+    }
+}
+
+/// An eraser wipe in `lo..=hi` passes, taking `duration`.
+fn wipe(rng: &mut Rng, lo: f32, hi: f32, duration: f32) -> Plan {
+    let data = PlanData {
+        passes: rng.range(lo, hi + 0.99).floor(),
+        angle: rng.range(-0.12, 0.12),
+        seed: rng.unit() * 100.0,
+        upward: if rng.unit() < 0.25 { 1.0 } else { 0.0 },
+    };
+    Plan { duration, ease: 1.3, data: theme::bytes(&data) }
+}
+
+/// Motes of chalk dust knocked off a line through the box (x, y, w, h),
+/// `age` seconds after it began: each leaves the line as the chalk passes,
+/// drifts down within the name's own line and fades.
+fn dust(out: &mut Vec<Shape>, [x, y, w, h]: [f32; 4], age: f32, seed: f32, rgb: [u8; 3]) {
+    let mut rng = Rng::new(seed.to_bits() as u64 * 0x2545_f491 + 3);
+    let motes = 4 + (w / h * 1.5) as usize;
+    for _ in 0..motes.min(14) {
+        let along = rng.range(0.05, 0.95);
+        let release = along * STRIKE_TIME;
+        let fall = h * rng.range(0.1, 0.4);
+        let drift = h * rng.range(-0.25, 0.25);
+        let radius = (h * rng.range(0.03, 0.07)).max(0.7);
+        if age < release {
+            continue;
+        }
+        let u = ((age - release) / (DUST_TIME - release)).clamp(0.0, 1.0);
+        let eased = 1.0 - (1.0 - u) * (1.0 - u);
+        let cx = (x + w * along + drift * eased).clamp(x, x + w);
+        let cy = (y + h * 0.55 + fall * eased).min(y + h * 0.95);
+        out.push(Shape::round(DISC, cx, cy, radius, rgb, 0.7 * (1.0 - u)));
+    }
+}

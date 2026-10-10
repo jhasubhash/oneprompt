@@ -12,7 +12,7 @@ use serde::Deserialize;
 use winit::event_loop::EventLoopProxy;
 
 use crate::terminal::UserEvent;
-use crate::theme::Theme;
+use crate::theme::{self, Variant, key};
 
 /// Which Option key sends Meta (ESC + key) instead of composing characters.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -36,35 +36,28 @@ pub enum Appearance {
     Dark,
 }
 
-/// Per-theme overrides: `[themes.tsushima-light]` and so on.
+/// Per-variant overrides: `[themes.tsushima-light]` and so on. Fonts are
+/// the same for every theme; the rest are the theme's own settings
+/// (`Theme::params`), checked against what it declares.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct ThemeOverride {
     pub font_family: Option<String>,
     pub font_size: Option<f32>,
     pub font_weight: Option<u16>,
     pub line_height: Option<f32>,
-    pub bleed: Option<f32>,
-    pub grain: Option<f32>,
-    pub edge: Option<f32>,
-    pub nib: Option<f32>,
-    /// Per-character spread of the bleed, 0..1: 0 every letter alike.
-    pub bleed_variation: Option<f32>,
-    /// Seconds the bleed keeps spreading after a letter is written.
-    pub bleed_time: Option<f32>,
-    /// How much the ink takes on the paper's grain, 0..1.
-    pub absorb: Option<f32>,
-    /// Paper texture strength (mottling, relief, fibers): 1 built-in, 0 flat.
-    pub texture: Option<f32>,
-    /// Water-stain strength: 1 built-in, 0 none.
-    pub stains: Option<f32>,
-    /// Ink splatter in the corner: 1 built-in, 0 none.
-    pub splatter: Option<f32>,
+    #[serde(flatten)]
+    pub params: HashMap<String, f32>,
 }
+
+/// Settings every variant has, whatever its theme.
+const FONT_SETTINGS: [&str; 4] = ["font_family", "font_size", "font_weight", "line_height"];
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    /// Which theme (`Theme::id`); unset is the first one.
+    pub theme: Option<String>,
     /// Light or dark variant; Cmd+Shift+L flips it for the session.
     pub appearance: Appearance,
     /// Pin the paper pattern; unset gives a new sheet every session.
@@ -82,7 +75,8 @@ pub struct Config {
     /// Strike out names of files and folders deleted while on screen.
     /// Default on.
     pub strike_deleted: Option<bool>,
-    /// Blood flung off the sword cut when a name is struck. Default on.
+    /// Extras on top of the strike (Tsushima: blood flung off the sword).
+    /// Default on.
     pub strike_splatter: Option<bool>,
     /// Font settings for every theme (per-theme sections win).
     pub font_family: Option<String>,
@@ -96,10 +90,14 @@ pub struct Config {
 /// (an all-commented template invites editing a line that stays a comment).
 /// Generated from the themes, so it never drifts from the defaults.
 pub fn template() -> String {
-    let themes = crate::theme::builtin();
-    let mut out = String::from(
+    let themes = theme::all();
+    let ids: Vec<String> = themes.iter().map(|t| format!("\"{}\"", t.id())).collect();
+    let mut out = format!(
         r#"# oneprompt settings. Save the file and changes apply immediately.
 # Lines starting with # are comments and are ignored.
+
+# Which theme: {}. Cmd+Option+T opens the theme picker.
+theme = "{}"
 
 # Light or dark: "system" follows macOS and switches with it; "light" or
 # "dark" pins one. Cmd+Shift+L flips between them for the session.
@@ -111,9 +109,8 @@ appearance = "system"
 # Which Option key acts as Meta (Alt+B, Alt+F, ...): "left", "both" or "none".
 option_as_meta = "left"
 
-# Ink animations: new characters are brushed in and dry, the window is
-# revealed with a brush when it opens, and cut in with a sword when light /
-# dark switches.
+# Animations: new characters are written in by hand, and the theme reveals
+# the window when it opens and when the look switches.
 animation = true
 animation_speed = 1.0        # 2 = twice as fast, 0.5 = half speed
 # Output (ls, cat, ...) is written left to right, line by line, at this many
@@ -126,69 +123,63 @@ writing_speed = 500
 harmonize_colors = true
 
 # When a file or folder named on screen is deleted (rm, a script, the
-# Finder, ...), every mention of it is struck through with a sword cut.
+# Finder, ...), every mention of it is struck through, as the theme does it.
 strike_deleted = true
-strike_splatter = true       # blood flung off the cut; false: a clean cut
+strike_splatter = true       # extras: Tsushima's blood; false: a clean strike
 
-# The light and dark variants, set to their built-in values; change any of them.
+# Each theme's variants, set to their built-in values; change any of them.
 # Fonts must be monospace. font_weight snaps to the weights the font has
 # (Courier New and PT Mono: 400 regular, 700 bold).
-#   bleed  how far ink wicks past strokes (pixels)
-#   bleed_variation  how much the bleed differs per letter, 0..1 (0.35: each
-#                    letter bleeds 0.65 to 1.35 times `bleed`)
-#   bleed_time       seconds the bleed keeps spreading after a letter is written
-#   nib    brush nib length: thick-and-thin strokes (pixels, 0 = off)
-#   grain  dry-brush streaks, 0..1
-#   edge   pigment pooling at stroke rims, 0..1
-#   absorb how much the ink takes on the paper's grain, 0..1 (0 = ink sits on top)
-#   texture   paper texture (mottling, relief, fibers): 1 built-in, 0 flat, up to 3
-#   stains    water-stain tide lines: 1 built-in, 0 none, up to 3
-#   splatter  ink flecks in the top-right corner: 1 built-in, 0 none, up to 3
 "#,
+        ids.join(", "),
+        themes[0].id(),
     );
-    for theme in &themes {
-        let ink = theme.ink_style;
-        out += &format!(
-            "\n[themes.{key}]\nfont_family = \"{family}\"\nfont_size = {size}\nfont_weight = {weight}\n\
-             line_height = {line}\nbleed = {bleed}\nbleed_variation = {variation}\nbleed_time = {bleed_time}\nnib = {nib}\ngrain = {grain}\nedge = {edge}\nabsorb = {absorb}\n\
-             texture = {texture}\nstains = {stains}\nsplatter = {splatter}\n",
-            key = key(theme.name),
-            family = theme.font_family,
-            size = theme.font_size,
-            weight = theme.font_weight,
-            line = theme.line_height,
-            bleed = ink.bleed,
-            variation = ink.bleed_variation,
-            bleed_time = ink.bleed_time,
-            nib = ink.nib,
-            grain = ink.grain,
-            edge = ink.edge,
-            absorb = ink.absorb,
-            texture = theme.texture_strength,
-            stains = theme.stains,
-            splatter = theme.splatter.1,
-        );
+    for theme in themes {
+        out += "\n";
+        out += &wrap(theme.about(), &format!("# {}: ", theme.name()), "#   ");
+        for param in theme.params() {
+            out += &wrap(param.about, &format!("#   {:<16}", param.key), &format!("#   {:16}", ""));
+        }
+        for variant in theme.variants() {
+            out += &format!(
+                "\n[themes.{}]\nfont_family = \"{}\"\nfont_size = {}\nfont_weight = {}\nline_height = {}\n",
+                variant.key(),
+                variant.font_family,
+                variant.font_size,
+                variant.font_weight,
+                variant.line_height,
+            );
+            for (param, value) in theme.params().iter().zip(&variant.params) {
+                out += &format!("{} = {value}\n", param.key);
+            }
+        }
     }
     out
 }
 
-/// Settings that belong to a variant, under `[themes.<name>]`.
-const THEME_SETTINGS: [&str; 14] = [
-    "font_family",
-    "font_size",
-    "font_weight",
-    "line_height",
-    "bleed",
-    "bleed_variation",
-    "bleed_time",
-    "absorb",
-    "nib",
-    "grain",
-    "edge",
-    "texture",
-    "stains",
-    "splatter",
-];
+/// `text` as comment lines of at most 80 characters, the first starting
+/// with `first`, the others with `rest`.
+fn wrap(text: &str, first: &str, rest: &str) -> String {
+    let mut out = String::new();
+    let mut line = first.to_string();
+    let mut empty = true;
+    for word in text.split_whitespace() {
+        if !empty && line.chars().count() + 1 + word.chars().count() > 80 {
+            out += &line;
+            out += "\n";
+            line = rest.to_string();
+            empty = true;
+        }
+        if !empty {
+            line.push(' ');
+        }
+        line += word;
+        empty = false;
+    }
+    out += &line;
+    out += "\n";
+    out
+}
 
 /// A parse error in words that say how to fix it. The most common mistake
 /// is a per-theme setting outside its section, which toml reports as an
@@ -197,9 +188,14 @@ fn explain(message: &str) -> String {
     let Some(name) = message.strip_prefix("unknown field `").and_then(|rest| rest.split('`').next()) else {
         return message.trim().to_string();
     };
-    if THEME_SETTINGS.contains(&name) {
-        let sections: Vec<String> = crate::theme::builtin().iter().map(|t| format!("[themes.{}]", key(t.name))).collect();
-        return format!("`{name}` is set per theme: put it under {}", sections.join(" or "));
+    let sections: Vec<String> = theme::builtin()
+        .iter()
+        .filter(|v| FONT_SETTINGS.contains(&name) || v.theme.params().iter().any(|p| p.key == name))
+        .map(|v| format!("[themes.{}]", v.key()))
+        .collect();
+    if !sections.is_empty() {
+        let sections = if sections.len() > 2 { format!("{} or ...", sections[..2].join(", ")) } else { sections.join(" or ") };
+        return format!("`{name}` is set per theme: put it under {sections}");
     }
     format!("unknown setting `{name}`")
 }
@@ -215,11 +211,6 @@ pub fn path() -> PathBuf {
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
         .unwrap_or_else(|| PathBuf::from("."));
     base.join("oneprompt").join("config.toml")
-}
-
-/// Theme names as they appear in section headers: "Tsushima Dark" -> "tsushima-dark".
-pub fn key(name: &str) -> String {
-    name.trim().to_lowercase().replace([' ', '_'], "-")
 }
 
 impl Config {
@@ -239,28 +230,29 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), String> {
-        let names: Vec<String> = crate::theme::builtin().iter().map(|t| key(t.name)).collect();
-        if let Some(name) = self.themes.keys().find(|k| !names.contains(&key(k))) {
-            return Err(format!("unknown theme section [themes.{name}]"));
+        let ids: Vec<&str> = theme::all().iter().map(|t| t.id()).collect();
+        if let Some(name) = self.theme.as_deref().filter(|name| !ids.contains(name)) {
+            return Err(format!("unknown theme \"{name}\" (there are: {})", ids.join(", ")));
+        }
+        let variants = theme::builtin();
+        for (section, o) in &self.themes {
+            let Some(variant) = variants.iter().find(|v| v.key() == key(section)) else {
+                return Err(format!("unknown theme section [themes.{section}]"));
+            };
+            for (name, &value) in &o.params {
+                let Some(param) = variant.theme.params().iter().find(|p| p.key == name) else {
+                    return Err(format!("unknown setting `{name}` in [themes.{section}]"));
+                };
+                if !(param.min..=param.max).contains(&value) {
+                    return Err(format!("{name} {value} is out of range ({} to {})", param.min, param.max));
+                }
+            }
         }
         let sizes = std::iter::once(self.font_size)
             .chain(self.themes.values().map(|o| o.font_size))
             .flatten();
         if let Some(size) = sizes.into_iter().find(|s| !(4.0..=96.0).contains(s)) {
             return Err(format!("font_size {size} is out of range (4 to 96)"));
-        }
-        let paper = self.themes.values().flat_map(|o| [o.texture, o.stains, o.splatter]).flatten();
-        if let Some(v) = paper.into_iter().find(|v| !(0.0..=3.0).contains(v)) {
-            return Err(format!("texture / stains / splatter {v} is out of range (0 to 3)"));
-        }
-        if let Some(v) = self.themes.values().find_map(|o| o.bleed_variation.filter(|v| !(0.0..=1.0).contains(v))) {
-            return Err(format!("bleed_variation {v} is out of range (0 to 1)"));
-        }
-        if let Some(v) = self.themes.values().find_map(|o| o.absorb.filter(|v| !(0.0..=1.0).contains(v))) {
-            return Err(format!("absorb {v} is out of range (0 to 1)"));
-        }
-        if let Some(v) = self.themes.values().find_map(|o| o.bleed_time.filter(|v| !(0.0..=30.0).contains(v))) {
-            return Err(format!("bleed_time {v} is out of range (0 to 30 seconds)"));
         }
         if let Some(speed) = self.animation_speed
             && !(0.1..=10.0).contains(&speed)
@@ -284,47 +276,48 @@ impl Config {
         )
     }
 
-    /// The built-in themes with this config's overrides applied.
-    pub fn themes(&self) -> Vec<Theme> {
-        let mut themes = crate::theme::builtin();
-        for theme in &mut themes {
-            apply_fonts(theme, &self.font_family, self.font_size, self.font_weight);
-            let Some(o) = self.themes.iter().find(|(k, _)| key(k) == key(theme.name)).map(|(_, o)| o)
-            else {
+    /// Every theme's variants with this config's overrides applied.
+    pub fn themes(&self) -> Vec<Variant> {
+        let mut variants = theme::builtin();
+        for variant in &mut variants {
+            apply_fonts(variant, &self.font_family, self.font_size, self.font_weight);
+            let Some(o) = self.themes.iter().find(|(k, _)| key(k) == variant.key()).map(|(_, o)| o) else {
                 continue;
             };
-            apply_fonts(theme, &o.font_family, o.font_size, o.font_weight);
+            apply_fonts(variant, &o.font_family, o.font_size, o.font_weight);
             if let Some(v) = o.line_height {
-                theme.line_height = v;
+                variant.line_height = v;
             }
-            theme.texture_strength = o.texture.unwrap_or(theme.texture_strength);
-            theme.stains = o.stains.unwrap_or(theme.stains);
-            theme.splatter.1 = o.splatter.unwrap_or(theme.splatter.1);
-            let ink = &mut theme.ink_style;
-            ink.bleed = o.bleed.unwrap_or(ink.bleed);
-            ink.grain = o.grain.unwrap_or(ink.grain);
-            ink.edge = o.edge.unwrap_or(ink.edge);
-            ink.nib = o.nib.unwrap_or(ink.nib);
-            ink.bleed_variation = o.bleed_variation.unwrap_or(ink.bleed_variation);
-            ink.bleed_time = o.bleed_time.unwrap_or(ink.bleed_time);
-            ink.absorb = o.absorb.unwrap_or(ink.absorb);
+            for (i, param) in variant.theme.params().iter().enumerate() {
+                if let (Some(&value), Some(slot)) = (o.params.get(param.key), variant.params.get_mut(i)) {
+                    *slot = value;
+                }
+            }
         }
-        themes
+        variants
     }
 
-    /// Index of the theme to show, given whether the system is in dark mode
-    /// and any session override from Cmd+Shift+L.
-    pub fn theme_index(&self, themes: &[Theme], system_dark: bool, flip: Option<bool>) -> usize {
+    /// Index of the variant to show: of the chosen theme (`picked` in the
+    /// picker this session, else the settings, else the first), the one for
+    /// the appearance, given whether the system is in dark mode and any
+    /// session override from Cmd+Shift+L.
+    pub fn theme_index(&self, variants: &[Variant], system_dark: bool, flip: Option<bool>, picked: Option<&str>) -> usize {
         let dark = flip.unwrap_or(match self.appearance {
             Appearance::System => system_dark,
             Appearance::Light => false,
             Appearance::Dark => true,
         });
-        themes.iter().position(|t| t.dark == dark).unwrap_or(0)
+        let id = picked.or(self.theme.as_deref()).unwrap_or_else(|| theme::all()[0].id());
+        let of_theme = |v: &Variant| v.theme.id() == id;
+        variants
+            .iter()
+            .position(|v| of_theme(v) && v.dark == dark)
+            .or_else(|| variants.iter().position(of_theme))
+            .unwrap_or(0)
     }
 }
 
-fn apply_fonts(theme: &mut Theme, family: &Option<String>, size: Option<f32>, weight: Option<u16>) {
+fn apply_fonts(theme: &mut Variant, family: &Option<String>, size: Option<f32>, weight: Option<u16>) {
     if let Some(family) = family {
         theme.font_family = family.clone();
     }
@@ -336,6 +329,33 @@ fn apply_fonts(theme: &mut Theme, family: &Option<String>, size: Option<f32>, we
     if let Some(weight) = weight {
         theme.font_weight = weight.clamp(100, 900);
     }
+}
+
+/// Makes `id` the theme in the settings file: replaces its `theme = ...`
+/// line, or adds one before the first setting, keeping everything else as
+/// the user wrote it. A missing file is created from the template.
+pub fn save_theme(path: &Path, id: &str) -> std::io::Result<()> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => template(),
+        Err(err) => return Err(err),
+    };
+    let line = format!("theme = \"{id}\"");
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    // Only top-level lines count: before the first [section].
+    let top = lines.iter().position(|l| l.trim_start().starts_with('[')).unwrap_or(lines.len());
+    let is_theme = |l: &String| l.split('=').next().is_some_and(|k| k.trim() == "theme") && l.contains('=');
+    match lines[..top].iter().position(is_theme) {
+        Some(i) => lines[i] = line,
+        None => {
+            let first = lines[..top].iter().position(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'));
+            lines.insert(first.unwrap_or(top), line);
+        }
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, lines.join("\n") + "\n")
 }
 
 /// Creates the settings file from the template if needed, then opens it in
@@ -387,7 +407,7 @@ mod tests {
     #[test]
     fn template_holds_exactly_the_builtin_look() {
         let config = Config::parse(&template()).unwrap();
-        let (ours, builtin) = (config.themes(), crate::theme::builtin());
+        let (ours, builtin) = (config.themes(), theme::builtin());
         assert_eq!(ours.len(), builtin.len());
         for (a, b) in ours.iter().zip(&builtin) {
             assert_eq!(
@@ -396,8 +416,7 @@ mod tests {
                 "{}",
                 a.name
             );
-            let (x, y) = (a.ink_style, b.ink_style);
-            assert_eq!((x.bleed, x.nib, x.grain, x.edge), (y.bleed, y.nib, y.grain, y.edge));
+            assert_eq!(a.params, b.params, "{}", a.name);
         }
         assert_eq!(config.appearance, Appearance::System);
     }
@@ -406,7 +425,7 @@ mod tests {
     fn paper_strengths_are_settable() {
         let config = Config::parse("[themes.tsushima-light]\ntexture = 0.5\nstains = 0\nsplatter = 2").unwrap();
         let light = config.themes().into_iter().find(|t| !t.dark).unwrap();
-        assert_eq!((light.texture_strength, light.stains, light.splatter.1), (0.5, 0.0, 2.0));
+        assert_eq!((light.param("texture"), light.param("stains"), light.param("splatter")), (0.5, 0.0, 2.0));
         assert!(Config::parse("[themes.tsushima-light]\nstains = 5").unwrap_err().contains("out of range"));
     }
 
@@ -421,7 +440,7 @@ mod tests {
     fn bleed_animation_is_settable() {
         let config = Config::parse("[themes.tsushima-light]\nbleed_variation = 0.6\nbleed_time = 4").unwrap();
         let light = config.themes().into_iter().find(|t| !t.dark).unwrap();
-        assert_eq!((light.ink_style.bleed_variation, light.ink_style.bleed_time), (0.6, 4.0));
+        assert_eq!((light.param("bleed_variation"), light.param("bleed_time")), (0.6, 4.0));
         assert!(Config::parse("[themes.tsushima-light]\nbleed_variation = 2").is_err());
         assert!(Config::parse("[themes.tsushima-light]\nbleed_time = -1").is_err());
     }
@@ -448,7 +467,7 @@ mod tests {
         let light = themes.iter().find(|t| !t.dark).unwrap();
         assert_eq!(light.font_size, 20.0);
         assert_eq!(light.font_family, "Menlo");
-        assert_eq!(light.ink_style.nib, 0.5);
+        assert_eq!(light.param("nib"), 0.5);
         // Line height scales with the size: 24 at 17pt becomes 28 at 20pt.
         assert_eq!(light.line_height, 28.0);
         // The global size reaches the dark variant; the light-only font does not.
@@ -459,10 +478,10 @@ mod tests {
 
     #[test]
     fn appearance_picks_the_variant() {
-        let themes = crate::theme::builtin();
+        let themes = theme::builtin();
         let pick = |text: &str, system_dark, flip| {
             let config = Config::parse(text).unwrap();
-            themes[config.theme_index(&themes, system_dark, flip)].dark
+            themes[config.theme_index(&themes, system_dark, flip, None)].dark
         };
         assert!(!pick("", false, None)); // follows the system...
         assert!(pick("", true, None));
@@ -483,6 +502,27 @@ mod tests {
         assert_eq!(Config::parse("animation = false").unwrap().animation(), (false, 1.0, 500.0));
         assert_eq!(Config::parse("writing_speed = 120").unwrap().animation().2, 120.0);
         assert!(Config::parse("writing_speed = 1").unwrap_err().contains("out of range"));
+        assert!(Config::parse("theme = \"nope\"").unwrap_err().contains("tsushima"));
+        assert!(Config::parse("theme = \"tsushima\"").is_ok());
+    }
+
+    #[test]
+    fn saving_a_theme_keeps_the_rest_of_the_file() {
+        let dir = std::env::temp_dir().join(format!("oneprompt-save-theme-{}", std::process::id()));
+        let path = dir.join("config.toml");
+        // No file: the template, with the theme set.
+        save_theme(&path, "chalkboard").unwrap();
+        assert_eq!(Config::load(&path).unwrap().theme.as_deref(), Some("chalkboard"));
+        // An existing line is replaced; a file without one gets one on top.
+        save_theme(&path, "tsushima").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("theme = ").count(), 1);
+        std::fs::write(&path, "# mine\nappearance = \"dark\"\n[themes.tsushima-dark]\nnib = 2\n").unwrap();
+        save_theme(&path, "chalkboard").unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!((config.theme.as_deref(), config.appearance), (Some("chalkboard"), Appearance::Dark));
+        assert!(std::fs::read_to_string(&path).unwrap().starts_with("# mine\ntheme = \"chalkboard\"\n"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -16,7 +16,8 @@ cargo clippy --release         # keep it warning-free
 ## After every change
 
 1. Build, test and lint as above.
-2. Look at the result, in **Tsushima Light**, unless the change only affects dark mode.
+2. Look at the result, in **Tsushima Light** (or the light variant of the theme you
+   changed), unless the change only affects dark mode.
    Test windows get their own settings file, so the user's is never touched:
    ```sh
    printf 'appearance = "light"\nseed = 11\n' > /tmp/op-test.toml
@@ -50,8 +51,11 @@ cargo clippy --release         # keep it warning-free
   out; British spelling in prose ("colour").
 - Colours are authored in sRGB; shaders work on those values directly (the Metal layer is
   tagged sRGB). Texture and ink sizes are in logical pixels, scaled by the window's scale.
-- Look and feel belongs in the theme (`src/theme.rs`) and settings (`src/config.rs`, whose
-  template is generated from the themes), not in constants scattered through the renderer.
+- Look and feel belongs in a theme (`src/themes/<name>/`), never in the framework. Themes
+  use only `crate::theme` (the API) and never each other (`themes::tests` checks it); what
+  a theme needs that the API lacks goes into the API. CONTRIBUTING.md says how to add one.
+- Theme settings are declared by the theme (`Theme::params`); the settings template and
+  validation are generated from them.
 - New settings: validate their range, apply them live, add them to the template, document
   them in README.md.
 

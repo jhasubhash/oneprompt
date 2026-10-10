@@ -5,7 +5,7 @@
 //! OKLab (perceptual lightness), keeping the hue and most of the colour.
 //! (Their background colours become translucent washes in the renderer.)
 
-use crate::theme::Theme;
+use crate::theme::Variant;
 
 /// Lightness range text may have, as OKLab L: dark inks on light sheets,
 /// light inks on dark ones.
@@ -17,7 +17,7 @@ const CHROMA: f32 = 0.8;
 const INK_TINT: f32 = 0.12;
 
 /// A program's text colour, as ink on this theme's surface.
-pub fn ink(rgb: [u8; 3], theme: &Theme) -> [u8; 3] {
+pub fn ink(rgb: [u8; 3], theme: &Variant) -> [u8; 3] {
     let (lo, hi) = if theme.dark { DARK_SHEET } else { LIGHT_SHEET };
     let [l, a, b] = to_oklab(rgb);
     let mapped = [lo + l.clamp(0.0, 1.0) * (hi - lo), a * CHROMA, b * CHROMA];
