@@ -12,6 +12,10 @@ an ink colour and a typeface.
 |---|---|
 | ![](docs/screenshots/chalkboard-stone.png) | ![](docs/screenshots/chalkboard-slate.png) |
 
+| Logbook Day | Logbook Night |
+|---|---|
+| ![](docs/screenshots/logbook-day.png) | ![](docs/screenshots/logbook-night.png) |
+
 ## Install
 
 With [Homebrew](https://brew.sh):
@@ -59,6 +63,23 @@ light and dark so both variants can be compared.
 - On both, strokes are broad and grainy where they skip the surface's tooth, dusty at their
   edges, and freshly written letters shed a little more dust that settles. A stub cursor,
   ring controls.
+
+**Logbook**, an old ship's log:
+
+- **Day**: iron-gall ink on cream ledger paper, ruled in faded blue under every line of text
+  with a red double margin, laid lines from the paper mould, brown foxing spots, toned
+  edges, a compass rose drawn faintly in the bottom-right corner. Fresh ink goes on
+  blue-black and browns as it dries; old ink browns further and fades. Prussian blue,
+  verdigris, ochre and madder for the palette.
+- **Night**: the same log read below deck by lamplight: a brown page with the lamp's warm
+  pool in the middle, the rules and rose in faint amber, the ink in parchment, glinting
+  while it is fresh.
+- On both, the ink feathers a little along the fibers. Opening, switching, closing and
+  clearing turn a page (its back the old page's own paper, the writing showing through
+  faintly; closing turns to the marbled inside of the cover); deleted names are lined
+  through with the quill, which leaves a spreading blot; a failed command gets a red cross
+  in the margin, a long one a wax seal pressed with an anchor (a broken seal if it failed);
+  splits are a red double rule.
 
 ### Colours from programs
 
@@ -308,7 +329,7 @@ Saving it applies changes immediately; a note at the bottom of the window confir
 says what is wrong and keeps the previous settings (the panel says so too).
 
 ```toml
-theme = "tsushima"            # tsushima | chalkboard (the picker sets it)
+theme = "tsushima"            # tsushima | chalkboard | logbook (the picker sets it)
 appearance = "system"         # system | light | dark
 animation = true              # hand-written text, window reveals
 animation_speed = 1.0
@@ -342,7 +363,8 @@ seed = 11                     # pin the paper; unset = new sheet each session
 
 [themes.tsushima-light]       # each variant: fonts and line_height, then the theme's own
 font_family = "Courier New"   # settings (Tsushima: bleed, nib, grain, edge, absorb, texture,
-                              # stains, splatter; Chalkboard: grit, dust, smudges, ghosts)
+                              # stains, splatter; Chalkboard: grit, dust, smudges, ghosts;
+                              # Logbook: rules, foxing, feather, rose)
 font_weight = 700
 bleed_variation = 0.5         # per-letter bleed: 0.5 to 1.5 times `bleed`
 bleed_time = 4                # seconds the bleed keeps spreading
@@ -398,6 +420,7 @@ src/theme/mod.rs            the theme API: Theme, Variant, settings, shapes, pla
 src/themes/mod.rs           the list of themes, and the isolation test
 src/themes/tsushima/        washi and sumi: surface, ink, shapes, brushwork and sword transitions
 src/themes/chalkboard/      slate and chalk: surface, chalk, shapes, eraser transitions
+src/themes/logbook/         a ship's log: ledger paper, iron-gall ink, quill and seal shapes, page turns
 src/shaders/prelude.wgsl    shared by every stage: the frame, noise
 src/shaders/*_stage.wgsl    the framework's part of each stage; *_default.wgsl its plain defaults
 src/shaders/image.wgsl      picker previews

@@ -3,13 +3,14 @@
 //! `Theme`, its shaders next to it, and a line in `all()`.
 
 mod chalkboard;
+mod logbook;
 mod tsushima;
 
 use crate::theme::Theme;
 
 /// Every theme, in picker order. The first is the default.
 pub fn all() -> Vec<&'static dyn Theme> {
-    vec![&tsushima::TSUSHIMA, &chalkboard::CHALKBOARD]
+    vec![&tsushima::TSUSHIMA, &chalkboard::CHALKBOARD, &logbook::LOGBOOK]
 }
 
 #[cfg(test)]
