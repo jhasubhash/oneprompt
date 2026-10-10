@@ -370,6 +370,9 @@ struct PaneState {
     births: wgpu::Texture,
     ink_bind_group: wgpu::BindGroup,
     animator: TextAnimator,
+    /// How far back into the scrollback it was shown last frame: scrolling
+    /// through what is already written shows it as it is, not written in.
+    offset: usize,
 }
 
 /// A divider between panes: which (stable while it exists), the line
@@ -1040,7 +1043,7 @@ impl Renderer {
             view_formats: &[],
         });
         let ink_bind_group = self.ink_bind_group(&births);
-        self.panes.insert(id, PaneState { grid, births, ink_bind_group, animator: TextAnimator::default() });
+        self.panes.insert(id, PaneState { grid, births, ink_bind_group, animator: TextAnimator::default(), offset: 0 });
     }
 
     /// The pane being drawn's grid, columns and lines.
@@ -3363,11 +3366,18 @@ impl Renderer {
         }
 
         let now = self.now();
+        let offset = term.grid().display_offset();
+        let scrolled = self.panes.get(&self.pane).is_some_and(|p| p.offset != offset);
+        if let Some(pane) = self.panes.get_mut(&self.pane) {
+            pane.offset = offset;
+        }
         let writing = Writing {
             enabled: self.animation.0,
             speed: self.writing_speed,
             max_duration: MAX_WRITE / self.animation.1,
-            instant: term.mode().contains(TermMode::ALT_SCREEN),
+            // Full-screen apps, and text scrolled into view from the
+            // scrollback, appear as they are.
+            instant: term.mode().contains(TermMode::ALT_SCREEN) || scrolled,
             // Text pasted in the last moment lands together, as one splash.
             together: self.paste.is_some_and(|(pane, _, _, at)| pane == self.pane && (now - at) * self.animation.1 < PASTE_LANDS),
         };

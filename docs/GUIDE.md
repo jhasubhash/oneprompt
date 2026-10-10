@@ -87,8 +87,9 @@ light or dark palette.
   its own load of ink, so some bleed more than others. Output that arrives together
   (`ls`, `cat`) is written in reading order, left to right and line by line, at
   `writing_speed` characters per second, sped up so a batch never takes more than 1.5 s.
-  Scrolled text keeps its age; full-screen apps and repaints over existing text appear at
-  once.
+  Scrolled text keeps its age, and scrolling back through the scrollback shows what is
+  there as it is, never written in again; full-screen apps and repaints over existing text
+  appear at once.
 - **Reveals**: the incoming theme plays its own. Tsushima opens the window like the
   cutscenes, parchment torn out of a sheet of ink (light) or ink flooding over parchment
   (dark), and switching to it is a sword fight:
