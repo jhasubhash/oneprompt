@@ -12,6 +12,20 @@ an ink colour and a typeface.
 |---|---|
 | ![](docs/screenshots/chalkboard-stone.png) | ![](docs/screenshots/chalkboard-slate.png) |
 
+## Install
+
+With [Homebrew](https://brew.sh):
+
+```sh
+brew install --cask jhasubhash/tap/oneprompt
+```
+
+`brew upgrade --cask oneprompt` updates it, and the `oneprompt` command is on your PATH too
+(`oneprompt -e "command"`). Or download the dmg from the
+[releases](https://github.com/jhasubhash/oneprompt/releases) and drag oneprompt into
+Applications. Either way it is signed and notarized, runs on Apple silicon and Intel, and
+needs macOS 11 or later. These are alphas: expect rough edges.
+
 ## Themes
 
 A theme is the whole look: surface texture, how ink or chalk behaves on it, palette, font,
@@ -200,7 +214,9 @@ latest `cargo build --release`: no need to remake it after changes.
 
 To make a release, `scripts/release.sh` builds a self-contained universal app and a
 signed, notarized `target/dist/oneprompt-<version>.dmg` (setup steps are at the top of
-the script).
+the script). Once the dmg is published as a GitHub release, `scripts/update-cask.sh`
+points the Homebrew cask ([jhasubhash/homebrew-tap](https://github.com/jhasubhash/homebrew-tap))
+at it.
 
 Not yet: running a pane's full-screen app shrunk to fit, and a search that takes regular
 expressions.

@@ -11,6 +11,9 @@
 #       --apple-id <your Apple ID> --team-id <team ID>
 #     (asks for an app-specific password from account.apple.com)
 #
+# Then publish the dmg as a GitHub release and run scripts/update-cask.sh,
+# which points the Homebrew cask at it.
+#
 # SIGN_IDENTITY overrides the signing certificate (default: the first
 # "Developer ID Application" one in the keychain); NOTARY_PROFILE the
 # notarytool profile; NOTARIZE=0 skips notarizing, for a local check.
