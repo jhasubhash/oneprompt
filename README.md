@@ -100,6 +100,11 @@ light or dark palette.
 - **Paste splashes**: pasted text lands all at once, as a splash of sumi thrown out along
   the line it fills that soaks into the paper as the letters appear (a puff of chalk dust
   on the Chalkboard), instead of being written in. `paste_splash = false` turns it off.
+- **Progress in ink**: programs that report their progress (OSC 9;4, as winget, some build
+  tools and scripts send it: `printf '\e]9;4;1;40\e\\'` is 40%) get a stroke of sumi
+  brushed along the title strip, its end still wet; seal red if the program reports an
+  error, a short stroke sweeping to and fro when it can't say how far along. The
+  Chalkboard draws it in chalk. `show_progress = false` turns it off.
 - **Sounds** (off unless `sounds = true`; `sound_volume`, 0.4): Tsushima has a brush
   scratching over washi as you type, the sword's shing as a deleted name is cut and as the
   screen is cleared, a seal's thud for a stamp, the sheet catching fire as it closes; the
@@ -190,7 +195,8 @@ another theme). A theme implements the `Theme` trait:
   `draw_divider` (the line between split panes, drawn in when the split is made), and
   `mark_time` / `draw_failure` (a command that failed, beside its prompt) and
   `stamp_time` / `draw_stamp` (a long command that finished), `splash_time` /
-  `draw_splash` (pasted text landing), `draw_weather` (rain and snow), `sound` (which of
+  `draw_splash` (pasted text landing), `draw_weather` (rain and snow), `draw_progress` (a
+  program's progress, along the title strip), `sound` (which of
   the framework's sounds goes with typing, strikes, marks, clearing, closing), and
   `idle_time` /
   `draw_idle` (what happens on a window nobody is using).
@@ -316,6 +322,7 @@ ink_aging = 0.3               # how far ink an hour old fades, 0..1
 cursor_trail = true           # the cursor flicks a trail when it jumps
 cursor_pulse = true           # a still cursor beats gently
 paste_splash = true           # pasted text lands as a splash of ink
+show_progress = true          # programs' progress as a stroke along the title strip
 sounds = false                # brush, sword, seal, chalk; quiet
 sound_volume = 0.4
 paper_aging = true            # a tab's sheet yellows and creases with use
@@ -380,7 +387,7 @@ src/picker.rs               theme picker: card layout and hit testing
 src/animation.rs            per-cell write times (reading order, scroll-aware) and window transitions
 src/strike.rs               names on screen whose files were deleted, to strike out
 src/sound.rs                the themes' sounds, made from noise and tones, played with afplay
-src/marks.rs                shell integration: prompt and command marks (OSC 133) read from the PTY, zsh's setup
+src/marks.rs                shell integration: prompt and command marks (OSC 133) and progress (OSC 9;4) read from the PTY, zsh's setup
 src/shell/zshenv            the zsh integration
 src/panes.rs                splits: each tab's tree of panes, their boxes, dividers and neighbours
 src/search.rs               find: matches in the scrollback, the current one, scrolling to it

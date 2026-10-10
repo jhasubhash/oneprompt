@@ -1106,6 +1106,7 @@ impl App {
             r.set_effects(config.close_effect.unwrap_or(true), config.clear_effect.unwrap_or(true));
             r.set_cursor_life(config.cursor_trail.unwrap_or(true), config.cursor_pulse.unwrap_or(true));
             r.set_splash(config.paste_splash.unwrap_or(true));
+            r.set_show_progress(config.show_progress.unwrap_or(true));
             r.set_wear_hours(config.paper_aging.unwrap_or(true).then(|| config.paper_aging_hours.unwrap_or(8.0)));
             let amount = config.weather_amount.unwrap_or(0.5);
             r.set_weather(match config.weather {
@@ -1874,7 +1875,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         // A beating cursor needs a frame now and then, not every vsync, and
         // falling rain or snow a few more.
-        let weather = self.renderer.as_ref().is_some_and(|r| r.is_weathering());
+        let weather = self.renderer.as_ref().is_some_and(|r| r.is_weathering() || r.is_busy());
         if weather || self.renderer.as_ref().is_some_and(|r| r.is_pulsing()) {
             let every = if weather { WEATHER_FRAME } else { PULSE_FRAME };
             if self.pulse_at.elapsed() >= every {
@@ -1927,6 +1928,12 @@ impl ApplicationHandler<UserEvent> for App {
                 None => {}
             },
             UserEvent::ConfigChanged => self.reload_config(),
+            UserEvent::Progress(id, report) => {
+                if let Some(r) = self.renderer.as_mut() {
+                    r.set_progress(id, report);
+                }
+                self.redraw();
+            }
             UserEvent::Command(id, n, finished) => {
                 if let Some(r) = self.renderer.as_mut() {
                     r.finish_command(id, n, finished);

@@ -12,7 +12,7 @@ mod brush;
 
 use crate::theme::{
     self, CommandSpan, ControlStyle, Controls, Ctx, Cursor, CursorKind, DividerSpan, IdleSpan, Param, Plan, Rng, Shape,
-    Shaders, Sound, SoundEvent, SplashSpan, Strike, StrikeSpan, Theme, Variant, Weather, WeatherSpan, CUSTOM, DISC,
+    ProgressSpan, ProgressState, Shaders, Sound, SoundEvent, SplashSpan, Strike, StrikeSpan, Theme, Variant, Weather, WeatherSpan, CUSTOM, DISC,
 };
 
 use brush::{Brush, PlanData};
@@ -337,6 +337,33 @@ impl Theme for Tsushima {
 
     fn stamp_time(&self) -> f32 {
         STAMP_TIME
+    }
+
+    /// Progress is a stroke of sumi brushed along the title strip, its end
+    /// still wet and ragged; seal red if the program failed, thinner while
+    /// paused, and when the program can't say how far along, a short stroke
+    /// sweeping to and fro.
+    fn draw_progress(&self, v: &Variant, ctx: &Ctx, span: &ProgressSpan, out: &mut Vec<Shape>) {
+        let [x, y, w, h] = span.strip;
+        let s = ctx.scale;
+        let thick = if span.state == ProgressState::Paused { 2.2 * s } else { 3.4 * s };
+        let rgb = if span.state == ProgressState::Error { v.cursor } else { v.ink };
+        let (from, len) = match span.state {
+            ProgressState::Busy => {
+                let u = (span.time * 0.7).sin() * 0.5 + 0.5;
+                (u * w * 0.78, w * 0.22)
+            }
+            _ => (0.0, w * span.share),
+        };
+        if len < 1.0 {
+            return;
+        }
+        let top = y + h - thick - 1.5 * s;
+        out.push(dab(x + from, top, len, thick, rgb, 0.85 * span.fade).rough(0.8, 7.0));
+        // The brush's end, pressed a little wider.
+        if span.state != ProgressState::Busy && span.share < 0.999 {
+            out.push(Shape::round(DISC, x + from + len, top + thick / 2.0, thick * 0.8, rgb, 0.85 * span.fade).rough(0.5, 3.0));
+        }
     }
 
     /// A brush over washi as you type, the sword for strikes and the clear,

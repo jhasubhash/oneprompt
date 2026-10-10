@@ -105,6 +105,9 @@ pub struct Config {
     /// worn sheet; a new tab starts fresh. Default on.
     pub paper_aging: Option<bool>,
     pub paper_aging_hours: Option<f32>,
+    /// Programs' progress (OSC 9;4) as a stroke along the title strip.
+    /// Default on.
+    pub show_progress: Option<bool>,
     /// The theme's sounds, at `sound_volume` (0..1, default 0.4). Default off.
     pub sounds: Option<bool>,
     pub sound_volume: Option<f32>,
@@ -204,6 +207,11 @@ paste_splash = true
 # a fresh sheet.
 paper_aging = true
 paper_aging_hours = 8
+
+# Programs that report their progress (OSC 9;4: winget, some build tools and
+# scripts) get a stroke of ink growing along the title strip: sumi in Tsushima,
+# seal red if it fails; a chalk line on the Chalkboard.
+show_progress = true
 
 # Sounds, quiet and off unless turned on: a brush scratching over paper as you
 # type, the sword's shing as a deleted name is cut and the screen cleared, a

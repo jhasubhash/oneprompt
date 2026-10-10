@@ -56,6 +56,10 @@ const PADDING: f32 = 24.0;
 const FULL_SCREEN_MIN: (usize, usize) = (80, 24);
 /// Text shrinks to no less than this share of its size.
 const MIN_FIT: f32 = 0.5;
+/// Progress shown eases towards what is reported over about this long, and
+/// fades out over PROGRESS_FADE once the program is done (seconds).
+const PROGRESS_EASE: f32 = 0.25;
+const PROGRESS_FADE: f32 = 0.8;
 /// Output this soon after a paste is the pasted text (seconds at speed 1).
 const PASTE_LANDS: f32 = 0.4;
 /// A jumping cursor's trail fades over this long; a still one starts
@@ -632,6 +636,12 @@ pub struct Renderer {
     splash_until: f32,
     /// Rain or snow, and how heavy (None: clear skies).
     weather: Option<(api::Weather, f32)>,
+    /// Each pane's progress as last reported: the state, the share it is
+    /// heading for, the share shown (eased towards it), and when it was
+    /// cleared (it fades out); whether progress is shown at all.
+    progress: HashMap<u64, (api::ProgressState, f32, f32, Option<f32>)>,
+    show_progress: bool,
+    progress_until: f32,
     /// What happened in the frames drawn since the app last asked (strikes,
     /// marks), for its sounds; and the newest strike and mark heard of.
     events: Vec<api::SoundEvent>,
@@ -870,6 +880,9 @@ impl Renderer {
             splash: true,
             splash_until: f32::NEG_INFINITY,
             weather: None,
+            progress: HashMap::new(),
+            show_progress: true,
+            progress_until: f32::NEG_INFINITY,
             events: Vec::new(),
             newest_strike: f32::NEG_INFINITY,
             newest_mark: f32::NEG_INFINITY,
@@ -1030,6 +1043,7 @@ impl Renderer {
         self.panes.remove(&id);
         self.commands.remove(&id);
         self.cursor_moves.remove(&id);
+        self.progress.remove(&id);
         self.full_screen.remove(&id);
         self.pane_metrics.remove(&id);
         self.divider_births.remove(&id);
@@ -1333,6 +1347,69 @@ impl Renderer {
         self.cursor_life = (trail, pulse);
     }
 
+    /// Whether programs' progress is drawn along the title strip.
+    pub fn set_show_progress(&mut self, on: bool) {
+        self.show_progress = on;
+    }
+
+    /// Pane `pane`'s program reported its progress.
+    pub fn set_progress(&mut self, pane: u64, report: crate::marks::Progress) {
+        use crate::marks::Progress;
+        let now = self.now();
+        let shown = self.progress.get(&pane).map_or(0.0, |p| p.2);
+        let (state, share) = match report {
+            Progress::Clear => {
+                if let Some(p) = self.progress.get_mut(&pane) {
+                    p.3.get_or_insert(now);
+                    self.progress_until = self.progress_until.max(now + PROGRESS_FADE);
+                }
+                return;
+            }
+            Progress::Running(s) => (api::ProgressState::Running, s),
+            Progress::Error(s) => (api::ProgressState::Error, s),
+            Progress::Busy => (api::ProgressState::Busy, shown),
+            Progress::Paused(s) => (api::ProgressState::Paused, s),
+        };
+        self.progress.insert(pane, (state, share, shown, None));
+        self.progress_until = self.progress_until.max(now + PROGRESS_EASE * 4.0);
+    }
+
+    /// A program is busy with no idea how far along: the app wakes now and
+    /// then to move its stroke.
+    pub fn is_busy(&self) -> bool {
+        self.show_progress && self.animation.0 && self.progress.values().any(|p| p.0 == api::ProgressState::Busy && p.3.is_none())
+    }
+
+    /// The focused pane's progress, as the theme draws it along the title
+    /// strip (chrome ink).
+    fn progress_shapes(&mut self, variant: &Variant, out: &mut Vec<Shape>) {
+        if !self.show_progress || self.thumbnail {
+            return;
+        }
+        let now = self.now();
+        let pane = self.focused_pane;
+        let Some(p) = self.progress.get_mut(&pane) else { return };
+        // Ease the share shown towards the reported one.
+        let k = if self.animation.0 { (1.0 / (PROGRESS_EASE * 60.0)).min(1.0) } else { 1.0 };
+        p.2 += (p.1 - p.2) * k;
+        let fade = p.3.map_or(1.0, |at| 1.0 - ((now - at) / PROGRESS_FADE).clamp(0.0, 1.0));
+        if fade <= 0.0 {
+            self.progress.remove(&pane);
+            return;
+        }
+        let (state, share) = (p.0, p.2);
+        let scale = self.window.scale_factor() as f32;
+        let span = api::ProgressSpan {
+            strip: [0.0, 0.0, self.config.width as f32, TITLE_STRIP * scale],
+            share,
+            state,
+            time: now * self.animation.1,
+            fade,
+        };
+        let ctx = self.ctx();
+        variant.theme.draw_progress(variant, &ctx, &span, out);
+    }
+
     /// What has happened since the last call, for sounds.
     pub fn take_events(&mut self) -> Vec<api::SoundEvent> {
         std::mem::take(&mut self.events)
@@ -1407,6 +1484,7 @@ impl Renderer {
             || now < self.idle_until
             || now < self.trail_until
             || now < self.splash_until
+            || now < self.progress_until
             || (self.animation.0
                 && self.panes.values().any(|p| now - p.animator.latest_birth() < (write_time * 4.0).max(settle_time)))
     }
@@ -1808,6 +1886,7 @@ impl Renderer {
         }
         let mut idle = Vec::new();
         self.idle_shapes(variant, &mut idle);
+        self.progress_shapes(variant, &mut idle);
         if let Some((kind, amount)) = self.weather.filter(|_| self.animation.0 && !self.thumbnail) {
             let span = api::WeatherSpan { kind, area: self.window_rect(), time: now * self.animation.1, amount, seed: self.seed + 3.0 };
             variant.theme.draw_weather(variant, &ctx, &span, &mut idle);

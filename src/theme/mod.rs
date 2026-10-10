@@ -137,6 +137,11 @@ pub trait Theme: Sync + 'static {
     fn draw_weather(&self, variant: &Variant, ctx: &Ctx, span: &WeatherSpan, out: &mut Vec<Shape>) {
         plain_weather(variant, ctx, span, out);
     }
+    /// Draws a program's progress (see [`ProgressSpan`]) along the title
+    /// strip. The default is a thin bar in the cursor colour.
+    fn draw_progress(&self, variant: &Variant, ctx: &Ctx, span: &ProgressSpan, out: &mut Vec<Shape>) {
+        plain_progress(variant, ctx, span, out);
+    }
     /// The sound that goes with `event` (when sounds are on); None: none.
     fn sound(&self, _event: SoundEvent) -> Option<Sound> {
         None
@@ -278,6 +283,42 @@ pub fn plain_stamp(variant: &Variant, ctx: &Ctx, span: &CommandSpan, out: &mut V
     let r = h * 0.42 * (1.4 - 0.4 * span.progress);
     let rgb = if span.failed { variant.palette[1] } else { variant.cursor };
     out.push(Shape::round(RING, x + w * 1.5, y + h * 0.5, r, rgb, 0.9 * span.progress).stroke(2.0 * ctx.scale));
+}
+
+/// How a program's progress stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProgressState {
+    Running,
+    Error,
+    /// Busy, with no idea how far along: `share` is meaningless.
+    Busy,
+    Paused,
+}
+
+/// A program's progress, for the title strip.
+#[derive(Clone, Copy, Debug)]
+pub struct ProgressSpan {
+    /// The title strip (x, y, w, h), physical pixels.
+    pub strip: [f32; 4],
+    /// How far along, 0..1, eased as it changes.
+    pub share: f32,
+    pub state: ProgressState,
+    /// Seconds, at speed 1 (for a busy stroke to move).
+    pub time: f32,
+    /// 1 while on show; falling to 0 as it goes once the program is done.
+    pub fade: f32,
+}
+
+/// The plain progress bar: a thin line along the bottom of the title strip.
+pub fn plain_progress(variant: &Variant, ctx: &Ctx, span: &ProgressSpan, out: &mut Vec<Shape>) {
+    let [x, y, w, h] = span.strip;
+    let t = 2.0 * ctx.scale;
+    let rgb = if span.state == ProgressState::Error { variant.palette[1] } else { variant.cursor };
+    let (from, len) = match span.state {
+        ProgressState::Busy => (((span.time * 0.6).sin() * 0.5 + 0.5) * w * 0.75, w * 0.25),
+        _ => (0.0, w * span.share),
+    };
+    out.push(Shape::new(x + from, y + h - t, len, t, rgb, 0.8 * span.fade));
 }
 
 /// What a sound can go with.

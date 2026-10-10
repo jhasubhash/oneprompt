@@ -351,6 +351,12 @@ pub fn items(config: &Config, variant: &Variant, fonts: &Fonts) -> Vec<Item> {
         "paste_splash",
     ));
     items.push(top(
+        "Show progress",
+        "Programs that report progress get a stroke of ink along the title strip.",
+        Control::Toggle(config.show_progress.unwrap_or(true)),
+        "show_progress",
+    ));
+    items.push(top(
         "Sounds",
         "A brush as you type, the sword's shing, a seal's thud; chalk on the board.",
         Control::Toggle(config.sounds.unwrap_or(false)),

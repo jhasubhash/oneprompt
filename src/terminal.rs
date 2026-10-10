@@ -43,6 +43,8 @@ pub enum UserEvent {
     /// A command finished (shell integration): the pane, the number of the
     /// prompt it was typed at, and how it ended.
     Command(PaneId, u64, crate::marks::Finished),
+    /// A program reported its progress (OSC 9;4).
+    Progress(PaneId, crate::marks::Progress),
 }
 
 #[derive(Clone)]

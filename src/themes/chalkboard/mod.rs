@@ -9,7 +9,7 @@
 
 use crate::theme::{
     self, CommandSpan, ControlStyle, Controls, Ctx, Cursor, CursorKind, DividerSpan, IdleSpan, Param, Plan, Rng, Shape,
-    Shaders, Sound, SoundEvent, SplashSpan, Strike, StrikeSpan, Theme, Variant, Weather, WeatherSpan, CUSTOM, DISC,
+    ProgressSpan, ProgressState, Shaders, Sound, SoundEvent, SplashSpan, Strike, StrikeSpan, Theme, Variant, Weather, WeatherSpan, CUSTOM, DISC,
     RING,
 };
 
@@ -274,6 +274,25 @@ impl Theme for Chalkboard {
 
     fn stamp_time(&self) -> f32 {
         TICK_TIME
+    }
+
+    /// Progress is a chalk line drawn along the title strip, in the board's
+    /// red if the program failed; a short dash moving to and fro when it
+    /// can't say how far along.
+    fn draw_progress(&self, v: &Variant, _ctx: &Ctx, span: &ProgressSpan, out: &mut Vec<Shape>) {
+        let [x, y, w, h] = span.strip;
+        let rgb = if span.state == ProgressState::Error { v.palette[1] } else { v.ink };
+        let (from, len) = match span.state {
+            ProgressState::Busy => ((((span.time * 0.7).sin() * 0.5 + 0.5) * w * 0.8), w * 0.2),
+            _ => (0.0, w * span.share),
+        };
+        if len < 1.0 {
+            return;
+        }
+        let mut line = Shape::new(x + from, y + h * 0.55, len, h * 0.45, rgb, 0.8 * span.fade).kind(LINE);
+        line.params[1] = 1.0;
+        line.params[3] = 11.0;
+        out.push(line);
     }
 
     /// Chalk tapping as you type and as it marks, the eraser for clearing

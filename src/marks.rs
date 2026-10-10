@@ -7,6 +7,10 @@
 //! app puts first (`env`); fish 4 sends them itself; bash needs two lines
 //! (README.md).
 //!
+//! Programs report progress the same way, with OSC 9;4 (`ESC ] 9 ; 4 ; state
+//! ; percent`, as ConEmu, Windows Terminal and Ghostty read it): those are
+//! taken out too, and sent as `UserEvent::Progress`.
+//!
 //! alacritty_terminal ignores these marks, and they only mean something
 //! with their place in the grid, which is known once the terminal has
 //! parsed the bytes before them. So the PTY is read through `Marked`, which
@@ -39,6 +43,38 @@ pub fn prompt_number(uri: &str) -> Option<u64> {
     uri.strip_prefix(PROMPT_URI)?.parse().ok()
 }
 
+/// What a program says about its progress (OSC 9;4).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Progress {
+    /// Done, or never mind: nothing to show.
+    Clear,
+    /// This share done, 0..1.
+    Running(f32),
+    /// Stopped with an error, at this share.
+    Error(f32),
+    /// Busy, with no idea how far along.
+    Busy,
+    /// Paused at this share.
+    Paused(f32),
+}
+
+impl Progress {
+    /// From OSC 9;4's state and percent.
+    fn parse(text: &str) -> Option<Progress> {
+        let mut parts = text.split(';');
+        let state = parts.next()?.trim();
+        let share = parts.next().and_then(|p| p.trim().parse::<f32>().ok()).unwrap_or(0.0).clamp(0.0, 100.0) / 100.0;
+        Some(match state {
+            "0" => Progress::Clear,
+            "1" => Progress::Running(share),
+            "2" => Progress::Error(share),
+            "3" => Progress::Busy,
+            "4" => Progress::Paused(share),
+            _ => return None,
+        })
+    }
+}
+
 /// How a command ended.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Finished {
@@ -66,9 +102,14 @@ impl Marked {
         // A second handle on the same open file: the event loop polls the
         // PTY's own and reads through this one.
         let file = pty.file().try_clone()?;
-        Ok(Self { pty, reader: Reader::new(file, Box::new(move |n, finished| {
+        let progress = proxy.clone();
+        let mut reader = Reader::new(file, Box::new(move |n, finished| {
             let _ = proxy.send_event(UserEvent::Command(pane, n, finished));
-        })) })
+        }));
+        reader.progress = Some(Box::new(move |p| {
+            let _ = progress.send_event(UserEvent::Progress(pane, p));
+        }));
+        Ok(Self { pty, reader })
     }
 }
 
@@ -109,8 +150,9 @@ impl OnResize for Marked {
     }
 }
 
-/// Where a mark starts.
+/// Where a mark starts: a prompt mark, or a progress report.
 const MARK: &[u8] = b"\x1b]133;";
+const PROGRESS: &[u8] = b"\x1b]9;4;";
 /// A mark longer than this is not one; it passes through as it is.
 const MAX_MARK: usize = 256;
 
@@ -127,11 +169,12 @@ pub struct Reader {
     prompt: u64,
     started: Option<Instant>,
     done: Box<dyn FnMut(u64, Finished) + Send>,
+    progress: Option<Box<dyn FnMut(Progress) + Send>>,
 }
 
 impl Reader {
     fn new(source: impl Read + Send + 'static, done: Box<dyn FnMut(u64, Finished) + Send>) -> Self {
-        Self { source: Box::new(source), out: Vec::new(), at: 0, carry: Vec::new(), raw: vec![0; 0x10000], prompt: 0, started: None, done }
+        Self { source: Box::new(source), out: Vec::new(), at: 0, carry: Vec::new(), raw: vec![0; 0x10000], prompt: 0, started: None, done, progress: None }
     }
 
     /// Takes the marks out of `bytes` (after any carried over) into `out`.
@@ -142,19 +185,21 @@ impl Reader {
         let mut i = 0;
         while let Some(j) = input[i..].iter().position(|&b| b == 0x1b).map(|j| i + j) {
             let rest = &input[j..];
-            if rest.len() < MARK.len() {
-                if MARK.starts_with(rest) {
-                    self.out.extend_from_slice(&input[from..j]);
-                    self.carry = rest.to_vec();
-                    return;
-                }
-                break;
+            // Possibly the start of one, cut off by the end of the read.
+            if rest.len() < PROGRESS.len().max(MARK.len()) && (MARK.starts_with(rest) || PROGRESS.starts_with(rest)) {
+                self.out.extend_from_slice(&input[from..j]);
+                self.carry = rest.to_vec();
+                return;
             }
-            if !rest.starts_with(MARK) {
+            let prefix = if rest.starts_with(MARK) {
+                MARK
+            } else if rest.starts_with(PROGRESS) {
+                PROGRESS
+            } else {
                 i = j + 1;
                 continue;
-            }
-            let body = &rest[MARK.len()..];
+            };
+            let body = &rest[prefix.len()..];
             let end = body.iter().enumerate().find_map(|(k, &b)| match b {
                 0x07 => Some((k, 1)),
                 0x1b if body.get(k + 1) == Some(&b'\\') => Some((k, 2)),
@@ -171,8 +216,12 @@ impl Reader {
             };
             self.out.extend_from_slice(&input[from..j]);
             let body = body[..len].to_vec();
-            self.mark(&body);
-            from = j + MARK.len() + len + terminator;
+            if prefix == MARK {
+                self.mark(&body);
+            } else if let (Some(report), Some(p)) = (self.progress.as_mut(), Progress::parse(&String::from_utf8_lossy(&body))) {
+                report(p);
+            }
+            from = j + prefix.len() + len + terminator;
             i = from;
         }
         self.out.extend_from_slice(&input[from..]);
@@ -219,7 +268,7 @@ impl Read for Reader {
                 Ok(got) => got,
                 // Nothing more for now: a bare start of a sequence held back
                 // in case it was a mark is handed on after all.
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock && !self.carry.is_empty() && self.carry.len() < MARK.len() => {
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock && !self.carry.is_empty() && self.carry.len() < PROGRESS.len().max(MARK.len()) => {
                     self.raw = raw;
                     self.out = std::mem::take(&mut self.carry);
                     break;
@@ -334,6 +383,18 @@ mod tests {
         assert_eq!(done, vec![(1, 1)]);
         let (out, _) = run(&[b"plain \x1b[0m text"]);
         assert_eq!(out, b"plain \x1b[0m text");
+    }
+
+    #[test]
+    fn progress_reports_are_taken_out() {
+        assert_eq!(Progress::parse("1;40"), Some(Progress::Running(0.4)));
+        assert_eq!(Progress::parse("2;250"), Some(Progress::Error(1.0)));
+        assert_eq!(Progress::parse("3"), Some(Progress::Busy));
+        assert_eq!(Progress::parse("0;0"), Some(Progress::Clear));
+        assert_eq!(Progress::parse("9;1"), None);
+        let (out, _) = run(&[b"a\x1b]9;4;1;5", b"0\x1b\\b\x1b]9;1;notify\x07"]);
+        // The progress report goes; another OSC 9 (a notification) stays.
+        assert_eq!(out, b"ab\x1b]9;1;notify\x07");
     }
 
     #[test]
