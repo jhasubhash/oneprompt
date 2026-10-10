@@ -24,8 +24,11 @@ pub enum Layout {
 
 /// A divider between the two parts of a split: the line between them, the
 /// split's box, and the way to the split from the top (false: first part).
+/// `id` stays the same while the divider exists (the pane the split made,
+/// the first in its second part), so a new divider can be drawn in.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Divider {
+    pub id: PaneId,
     pub line: [f32; 4],
     pub across: bool,
     pub split: [f32; 4],
@@ -49,14 +52,15 @@ impl Layout {
     pub fn dividers(&self, rect: [f32; 4], width: f32) -> Vec<Divider> {
         let mut out = Vec::new();
         self.walk(rect, &mut Vec::new(), &mut |layout, rect, path| {
-            if let Layout::Split { across, ratio, .. } = layout {
+            if let Layout::Split { across, ratio, second, .. } = layout {
                 let [x, y, w, h] = rect;
                 let line = if *across {
                     [x + (w * ratio).round() - width / 2.0, y, width, h]
                 } else {
                     [x, y + (h * ratio).round() - width / 2.0, w, width]
                 };
-                out.push(Divider { line, across: *across, split: rect, path: path.to_vec() });
+                let id = second.ids()[0];
+                out.push(Divider { id, line, across: *across, split: rect, path: path.to_vec() });
             }
         });
         out
@@ -180,6 +184,7 @@ mod tests {
         assert_eq!(dividers.len(), 2);
         assert_eq!(dividers[0].line, [48.0, 0.0, 4.0, 60.0]);
         assert_eq!(dividers[1].path, vec![true]);
+        assert_eq!((dividers[0].id, dividers[1].id), (2, 3));
         layout.set_ratio(&dividers[1].path, 0.0);
         assert_eq!(layout.rects([0.0, 0.0, 100.0, 60.0])[1].1, [50.0, 0.0, 50.0, 6.0]);
 

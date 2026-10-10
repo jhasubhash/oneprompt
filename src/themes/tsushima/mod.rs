@@ -11,8 +11,8 @@
 mod brush;
 
 use crate::theme::{
-    self, ControlStyle, Controls, Ctx, Cursor, CursorKind, Param, Plan, Rng, Shape, Shaders, Strike, StrikeSpan,
-    Theme, Variant, CUSTOM, DISC,
+    self, ControlStyle, Controls, Ctx, Cursor, CursorKind, DividerSpan, Param, Plan, Rng, Shape, Shaders, Strike,
+    StrikeSpan, Theme, Variant, CUSTOM, DISC,
 };
 
 use brush::{Brush, PlanData};
@@ -24,6 +24,9 @@ pub struct Tsushima;
 /// Shape kinds drawn by shapes.wgsl.
 const DAB: f32 = CUSTOM;
 const SLASH: f32 = CUSTOM + 1.0;
+const CUT: f32 = CUSTOM + 2.0;
+/// A new divider between panes is cut in this fast, at speed 1.
+const CUT_TIME: f32 = 0.32;
 
 /// Window reveal on opening and switching, at speed 1.
 const REVEAL_TIME: f32 = 1.6;
@@ -237,6 +240,19 @@ impl Theme for Tsushima {
             ]),
             CursorKind::Block => out.push(dab(x, y + ch * 0.04, cw, ch * 0.92, c, 0.95).rough(1.0, seed)),
         }
+    }
+
+    fn divider_time(&self) -> f32 {
+        CUT_TIME
+    }
+
+    /// Panes are divided with one stroke of the sword: a long cut in sumi
+    /// from end to end, with the hairline its edge scratched beside it.
+    fn draw_divider(&self, v: &Variant, _ctx: &Ctx, span: &DividerSpan, out: &mut Vec<Shape>) {
+        let [x, y, w, h] = span.rect;
+        let mut cut = Shape::new(x, y, w, h, v.ink, 0.8);
+        cut.params = [CUT, span.progress, if span.upright { 1.0 } else { 0.0 }, span.seed];
+        out.push(cut);
     }
 
     fn strike(&self) -> Option<Strike> {

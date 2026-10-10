@@ -116,7 +116,8 @@ another theme). A theme implements the `Theme` trait:
   frame: size, time, seed, grid, colours; and `hash`, `noise`, `rotate`) plus its own data
   from Rust. A stage it leaves out gets a plain default. A test compiles every stage.
 - **Events**: `reveal` (the window opens), `switch` (switching to it, from its other
-  variant or another theme), `cursor`, and `strike` / `draw_strike` (a deleted name).
+  variant or another theme), `cursor`, `strike` / `draw_strike` (a deleted name), and
+  `draw_divider` (the line between split panes, drawn in when the split is made).
 
 Adding a theme is a folder with a `mod.rs` and its shaders, and a line in
 `src/themes/mod.rs`. CONTRIBUTING.md has the details.
@@ -140,7 +141,9 @@ Milestone 1, a working terminal:
   size) and returns to normal when it exits (in a window without splits)
 - Splits: panes side by side (Cmd+D) or one above the other (Cmd+Shift+D), each its own
   shell started in the same folder, on one continuous sheet; the panes without the keyboard
-  are veiled a little, and the dividers between them can be dragged
+  are veiled a little, and the dividers between them can be dragged. Each theme draws its
+  dividers in when a split is made: Tsushima cuts them with one stroke of the sword,
+  Chalkboard rules them in chalk
 - Find (Cmd+F): every match in the scrollback and on screen highlighted, the current one in
   the cursor's colour; Return / Shift+Return (or Cmd+G / Cmd+Shift+G, ↑ / ↓) go to older and
   newer ones, and Esc leaves the current one selected. Lowercase matches either case

@@ -348,6 +348,17 @@ struct PaneState {
     animator: TextAnimator,
 }
 
+/// A divider between panes: which (stable while it exists), the line
+/// between them (x, y, w, h; thin across), and whether it runs up and down.
+pub struct Divider {
+    pub id: u64,
+    pub line: [f32; 4],
+    pub upright: bool,
+}
+
+/// How wide the box a divider is drawn in is, logical pixels.
+const DIVIDER_WIDTH: f32 = 14.0;
+
 /// A pane to draw: its terminal, where it is in the window (physical
 /// pixels), and whether it has the keyboard.
 pub struct PaneView<'a, L: EventListener> {
@@ -575,9 +586,15 @@ pub struct Renderer {
     pane: u64,
     pane_rect: [f32; 4],
     pane_focused: bool,
-    /// Drawn over every pane's ink with the last one: dividers, and a veil
-    /// over the panes without the keyboard.
+    /// Drawn over every pane's ink with the last one: a veil over the
+    /// panes without the keyboard.
     after_ink: Vec<Shape>,
+    /// Drawn into the last pane's ink: the dividers.
+    chrome_ink: Vec<Shape>,
+    /// When each divider was first drawn, and until when one is still
+    /// being drawn in.
+    divider_births: HashMap<u64, f32>,
+    dividers_until: f32,
     transition: Option<Transition>,
     /// For themes' made-up-at-random reveals.
     rng: animation::Rng,
@@ -771,6 +788,9 @@ impl Renderer {
             pane_rect: [0.0, 0.0, config_size.0, config_size.1],
             pane_focused: true,
             after_ink: Vec::new(),
+            chrome_ink: Vec::new(),
+            divider_births: HashMap::new(),
+            dividers_until: f32::NEG_INFINITY,
             transition: None,
             rng: animation::Rng::new(random_seed()),
             tracer: Tracer::new((1, 1), TRACE_ATLAS),
@@ -913,6 +933,7 @@ impl Renderer {
     /// Lets go of a closed pane's state.
     pub fn forget_pane(&mut self, id: u64) {
         self.panes.remove(&id);
+        self.divider_births.remove(&id);
     }
 
     /// Starts the pen-path atlas over when the glyphs would come out
@@ -1083,6 +1104,7 @@ impl Renderer {
         let settle_time = self.settle_time / self.animation.1;
         self.transition.as_ref().is_some_and(|t| !t.done(now))
             || now < self.strikes_until
+            || now < self.dividers_until
             || (self.animation.0
                 && self.panes.values().any(|p| now - p.animator.latest_birth() < (write_time * 4.0).max(settle_time)))
     }
@@ -1366,7 +1388,7 @@ impl Renderer {
     /// Draws a frame: every pane, with `dividers` between them. A pane's
     /// `strikes`, when given, finds names of deleted files on its screen to
     /// strike out.
-    pub fn render<L: EventListener>(&mut self, variant: &Variant, panes: &mut [PaneView<L>], dividers: &[[f32; 4]]) {
+    pub fn render<L: EventListener>(&mut self, variant: &Variant, panes: &mut [PaneView<L>], dividers: &[Divider]) {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
@@ -1433,23 +1455,46 @@ impl Renderer {
         &mut self,
         variant: &Variant,
         panes: &mut [PaneView<L>],
-        dividers: &[[f32; 4]],
+        dividers: &[Divider],
         view: &wgpu::TextureView,
         strikes: bool,
     ) {
         let n = panes.len();
         let scale = self.window.scale_factor() as f32;
+        let reach = DIVIDER_WIDTH * scale / 2.0;
+        // The panes without the keyboard are veiled a little, up to the
+        // dividers (which stay as drawn).
         let mut after = Vec::new();
         if n > 1 {
+            let (w, h) = (self.config.width as f32, self.config.height as f32);
             for pane in panes.iter().filter(|p| !p.focused) {
-                let [x, y, w, h] = pane.rect;
-                after.push(Shape::new(x, y, w, h, variant.surface_rgb(), 0.3));
+                let [x, y, pw, ph] = pane.rect;
+                let inset = |inner: bool| if inner { reach } else { 0.0 };
+                let (l, t) = (inset(x > 0.5), inset(y > 0.5));
+                let (r, b) = (inset(x + pw < w - 0.5), inset(y + ph < h - 0.5));
+                after.push(Shape::new(x + l, y + t, pw - l - r, ph - t - b, variant.surface_rgb(), 0.3));
             }
         }
-        for &[x, y, w, h] in dividers {
-            let t = (1.0 * scale).max(1.0);
-            let line = if w < h { [x + (w - t) / 2.0, y, t, h] } else { [x, y + (h - t) / 2.0, w, t] };
-            after.push(Shape::new(line[0], line[1], line[2], line[3], variant.palette[8], 0.4));
+        // The dividers, drawn by the theme into the last pane's ink, a new
+        // one drawn in over the theme's time for it.
+        let now = self.now();
+        let ctx = self.ctx();
+        let time = variant.theme.divider_time().max(1e-3) / self.animation.1;
+        self.chrome_ink.clear();
+        for divider in dividers {
+            let born = *self.divider_births.entry(divider.id).or_insert(now);
+            let progress = if self.animation.0 && !self.thumbnail { ((now - born) / time).clamp(0.0, 1.0) } else { 1.0 };
+            self.dividers_until = self.dividers_until.max(born + time);
+            let [x, y, w, h] = divider.line;
+            let rect = if divider.upright {
+                [x + w / 2.0 - reach, y, reach * 2.0, h]
+            } else {
+                [x, y + h / 2.0 - reach, w, reach * 2.0]
+            };
+            let span = api::DividerSpan { rect, upright: divider.upright, progress, seed: divider.id as f32 * 7.13 % 97.0 };
+            let mut shapes = Vec::new();
+            variant.theme.draw_divider(variant, &ctx, &span, &mut shapes);
+            self.chrome_ink.extend(shapes);
         }
         for (i, pane) in panes.iter_mut().enumerate() {
             let last = i + 1 == n;
@@ -1465,7 +1510,7 @@ impl Renderer {
 
     /// Draws each picker card's picture: the screen as its variant draws it,
     /// with no writing in and no transition.
-    fn draw_previews<L: EventListener>(&mut self, panes: &mut [PaneView<L>], dividers: &[[f32; 4]]) {
+    fn draw_previews<L: EventListener>(&mut self, panes: &mut [PaneView<L>], dividers: &[Divider]) {
         let Some(mut picker) = self.picker.take() else { return };
         let transition = self.transition.take();
         let settle_time = self.settle_time;
@@ -2282,6 +2327,7 @@ impl Renderer {
             view_formats: &[],
         });
         let mut panes = [PaneView { id: self.pane, term, strikes: None, rect: self.pane_rect, focused: true }];
+        self.chrome_ink.clear();
         self.draw_panes(variant, &mut panes, &[], &texture.create_view(&Default::default()), false);
 
         // Rows in a texture-to-buffer copy must be 256-byte aligned.
@@ -2639,6 +2685,7 @@ impl Renderer {
         }
         self.ink_rects.extend(overlay);
         if chrome {
+            self.ink_rects.extend_from_slice(&self.chrome_ink);
             self.layout_controls(variant, self.window.has_focus());
             self.layout_notice(variant);
             self.layout_tabs(variant);
@@ -3129,6 +3176,14 @@ fn resolve(variant: &Variant, color: AnsiColor, default: [u8; 3]) -> [u8; 3] {
 /// presented in quick succession). Tagging the layer as sRGB makes every
 /// frame go through the same conversion. Configuring resets the tag, so this
 /// runs after every configure.
+///
+/// While the window is being resized, macOS shows the last frame until the
+/// next one arrives, stretched to the new size by default: the text would
+/// swell and snap back with every step. Each frame is presented in the same
+/// Core Animation transaction as the window's change of size (the app draws
+/// one as soon as it is resized), so the two arrive together; and a frame
+/// shown in a window of another size stays pinned to the top-left corner,
+/// where the grid and the window's controls are.
 fn configure_surface(
     surface: &wgpu::Surface<'static>,
     device: &wgpu::Device,
@@ -3142,7 +3197,12 @@ fn configure_surface(
         use objc2_core_graphics::{CGColorSpace, kCGColorSpaceSRGB};
         if let Some(hal) = surface.as_hal::<wgpu::hal::api::Metal>() {
             let srgb = CGColorSpace::with_name(Some(kCGColorSpaceSRGB));
-            hal.render_layer().lock().setColorspace(srgb.as_deref());
+            let layer = hal.render_layer().lock();
+            layer.setColorspace(srgb.as_deref());
+            // The layer's contents are flipped (the view's origin is its top
+            // left), so "bottom left" is the top left on screen.
+            layer.setContentsGravity(objc2_quartz_core::kCAGravityBottomLeft);
+            layer.setPresentsWithTransaction(true);
         }
     }
 }

@@ -6,6 +6,9 @@
 //   slash  a sword cut across the box, rising slightly: tapered to points,
 //          ragged, with a hairline scratch beside it (params.y = how far it
 //          has been drawn, 0..1, params.w = seed)
+//   cut    the long cut dividing two panes, end to end along the box
+//          (params.y = how far it has been drawn, params.z = 1 when it runs
+//          up and down, params.w = seed)
 
 fn theme_shape(s: ShapeIn) -> vec4<f32> {
     let kind = u32(s.params.x + 0.5);
@@ -14,6 +17,9 @@ fn theme_shape(s: ShapeIn) -> vec4<f32> {
     }
     if (kind == 17u) {
         return slash(s);
+    }
+    if (kind == 18u) {
+        return cut(s);
     }
     return vec4<f32>(0.0);
 }
@@ -74,5 +80,47 @@ fn slash(in: ShapeIn) -> vec4<f32> {
     let line = centre + h * 0.13 + (noise(vec2<f32>(p.x * 0.2, 9.0) + seed) - 0.5) * 1.5;
     let span = smoothstep(0.12, 0.3, t) * (1.0 - smoothstep(0.62, 0.82, t));
     let hair = clamp(0.5 - (abs(p.y - line) - 0.5), 0.0, 1.0) * span * 0.7;
+    return vec4<f32>(in.color.rgb, in.color.a * max(alpha, hair));
+}
+
+// The cut dividing two panes: one stroke of the blade down (or across) the
+// whole box, fast. Sharp at both ends and at the tip while it is still
+// moving, swelling and thinning a little along the way, ragged where the
+// paper tore, with dry gaps near the ends and a hairline scratch beside it
+// over its middle stretch.
+fn cut(in: ShapeIn) -> vec4<f32> {
+    let seed = vec2<f32>(in.params.w * 7.31, in.params.w * 3.17);
+    let upright = in.params.z > 0.5;
+    let along = select(in.local.x, in.local.y, upright);
+    let across = select(in.local.y, in.local.x, upright);
+    let len = max(select(in.size.x, in.size.y, upright), 1.0);
+    let wide = select(in.size.y, in.size.x, upright);
+    let s = frame.scale;
+    let reached = in.params.y * len;
+    if (along > reached) {
+        return vec4<f32>(0.0);
+    }
+    let end = 90.0 * s;
+    let ends = min(along, len - along) / end;
+    let tip = select(smoothstep(0.0, 28.0 * s, reached - along), 1.0, in.params.y >= 1.0);
+    let taper = pow(clamp(ends, 0.0, 1.0), 0.8) * tip;
+    // The blade bites in and lifts: thick and thin along the stroke.
+    let swell = 0.35 + 1.0 * noise(vec2<f32>(along * 0.006, 2.0) + seed) * noise(vec2<f32>(along * 0.017, 6.0) + seed);
+    let thick = 2.0 * s * swell * taper + 0.35 * s * tip;
+    // The blade's line drifts gently, and the paper tears raggedly.
+    let centre = wide * 0.5 + (noise(vec2<f32>(along * 0.006, 0.0) + seed) - 0.5) * wide * 0.18;
+    let ragged = (noise(vec2<f32>(along * 0.45, 5.0) + seed) - 0.5) * thick * 0.5;
+    let d = abs(across - centre + ragged) - thick * 0.5;
+    var alpha = clamp(0.5 - d, 0.0, 1.0);
+    // Dry gaps where the blade skimmed, more towards the ends, and fine
+    // scratches through the stroke.
+    let dry = smoothstep(0.55, 0.8, noise(vec2<f32>(along * 0.05, 4.0) + seed * 1.3));
+    alpha *= 1.0 - 0.75 * dry * (1.0 - 0.5 * clamp(ends * 0.5, 0.0, 1.0));
+    alpha *= 1.0 - 0.45 * smoothstep(0.7, 0.9, noise(vec2<f32>(along * 0.9, across * 0.6) + seed * 2.1));
+
+    let t = along / len;
+    let hairline = centre + 2.6 * s + (noise(vec2<f32>(along * 0.05, 9.0) + seed) - 0.5) * 1.2 * s;
+    let span = smoothstep(0.08, 0.2, t) * (1.0 - smoothstep(0.7, 0.9, t)) * tip;
+    let hair = clamp(0.5 - (abs(across - hairline) - 0.35 * s), 0.0, 1.0) * span * 0.55;
     return vec4<f32>(in.color.rgb, in.color.a * max(alpha, hair));
 }

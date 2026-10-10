@@ -4,6 +4,9 @@
 //              across, 0..1; params.w = seed)
 //   17 line    a quick chalk line across the box, a little wavy and rising,
 //              drawn in up to params.y of the way (params.w = seed)
+//   18 rule    the line ruled between two panes, end to end along the box
+//              (params.y = how far it has been drawn, params.z = 1 when it
+//              runs up and down, params.w = seed)
 
 fn theme_shape(s: ShapeIn) -> vec4<f32> {
     let kind = u32(s.params.x + 0.5);
@@ -12,6 +15,9 @@ fn theme_shape(s: ShapeIn) -> vec4<f32> {
     }
     if (kind == 17u) {
         return chalk_line(s);
+    }
+    if (kind == 18u) {
+        return rule(s);
     }
     return vec4<f32>(0.0);
 }
@@ -52,4 +58,35 @@ fn chalk_line(s: ShapeIn) -> vec4<f32> {
     let inside = clamp(0.5 - d, 0.0, 1.0);
     let catches = smoothstep(0.22, 0.58, grain(p, seed));
     return vec4<f32>(s.color.rgb, s.color.a * inside * mix(0.35, 1.0, catches));
+}
+
+// A line ruled in chalk between two panes: steady but not machine-straight,
+// pressed harder in places, broken where the chalk skipped the board's
+// tooth, with a faint haze of dust along it. The stick's end is rounder
+// while it is still moving.
+fn rule(s: ShapeIn) -> vec4<f32> {
+    let seed = vec2<f32>(s.params.w * 5.3, s.params.w * 2.9);
+    let upright = s.params.z > 0.5;
+    let along = select(s.local.x, s.local.y, upright);
+    let across = select(s.local.y, s.local.x, upright);
+    let len = max(select(s.size.x, s.size.y, upright), 1.0);
+    let wide = select(s.size.y, s.size.x, upright);
+    let px = frame.scale;
+    let reached = s.params.y * len;
+    if (along > reached + 2.0 * px) {
+        return vec4<f32>(0.0);
+    }
+    let centre = wide * 0.5 + (noise(vec2<f32>(along * 0.004, 1.0) + seed) - 0.5) * wide * 0.12;
+    let press = 0.7 + 0.5 * noise(vec2<f32>(along * 0.01, 3.0) + seed);
+    let thick = 2.2 * px * press;
+    var d = abs(across - centre) - thick * 0.5;
+    // The rounded end of the stick at the front while it moves.
+    if (s.params.y < 1.0 && along > reached - thick) {
+        d = max(d, length(vec2<f32>(along - (reached - thick * 0.5), across - centre)) - thick * 0.5);
+    }
+    let inside = clamp(0.5 - d, 0.0, 1.0);
+    let p = vec2<f32>(along, across);
+    let catches = smoothstep(0.22, 0.58, grain(p, seed));
+    let haze = clamp(1.0 - abs(across - centre) / (wide * 0.45), 0.0, 1.0) * grain(p * 0.7, seed * 1.7) * 0.12;
+    return vec4<f32>(s.color.rgb, s.color.a * max(inside * mix(0.35, 1.0, catches), haze));
 }

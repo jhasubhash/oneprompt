@@ -8,8 +8,8 @@
 //! through them that knocks a little dust off.
 
 use crate::theme::{
-    self, ControlStyle, Controls, Ctx, Cursor, CursorKind, Param, Plan, Rng, Shape, Shaders, Strike, StrikeSpan,
-    Theme, Variant, CUSTOM, DISC,
+    self, ControlStyle, Controls, Ctx, Cursor, CursorKind, DividerSpan, Param, Plan, Rng, Shape, Shaders, Strike,
+    StrikeSpan, Theme, Variant, CUSTOM, DISC,
 };
 
 pub static CHALKBOARD: Chalkboard = Chalkboard;
@@ -19,6 +19,9 @@ pub struct Chalkboard;
 /// Shape kinds drawn by shapes.wgsl.
 const STICK: f32 = CUSTOM;
 const LINE: f32 = CUSTOM + 1.0;
+const RULE: f32 = CUSTOM + 2.0;
+/// A new divider between panes is ruled in this fast, at speed 1.
+const RULE_TIME: f32 = 0.45;
 
 /// How long the eraser takes, at speed 1.
 const REVEAL_TIME: f32 = 1.3;
@@ -198,6 +201,18 @@ impl Theme for Chalkboard {
             CursorKind::Underline => out.push(stick(x, y + ch * 0.82, cw, (ch * 0.14).max(2.5), 1.0)),
             CursorKind::Hollow => theme::plain_cursor(v, ctx, cursor, out),
         }
+    }
+
+    fn divider_time(&self) -> f32 {
+        RULE_TIME
+    }
+
+    /// Panes are divided by a line ruled in chalk, end to end.
+    fn draw_divider(&self, v: &Variant, _ctx: &Ctx, span: &DividerSpan, out: &mut Vec<Shape>) {
+        let [x, y, w, h] = span.rect;
+        let mut rule = Shape::new(x, y, w, h, v.ink, 0.7);
+        rule.params = [RULE, span.progress, if span.upright { 1.0 } else { 0.0 }, span.seed];
+        out.push(rule);
     }
 
     fn strike(&self) -> Option<Strike> {

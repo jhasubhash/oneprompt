@@ -1272,6 +1272,76 @@ impl App {
         true
     }
 
+    /// Draws every pane of the active tab, with the dividers between them.
+    fn draw_frame(&mut self) {
+        if self.snapshot_dir.is_some() {
+            return;
+        }
+        // Matches follow the text as it scrolls and changes.
+        self.update_search(false);
+        let theme = self.themes[self.current].clone();
+        let strike = self.config.strike_deleted.unwrap_or(true);
+        if let (Some(r), Some(tab)) = (self.renderer.as_mut(), self.tabs.get_mut(self.active)) {
+            let window = r.window_rect();
+            let rects = tab.layout.rects(window);
+            let scale = r.window().scale_factor() as f32;
+            // Dividers start below the title strip, which runs across.
+            let strip = renderer::TITLE_STRIP * scale;
+            let dividers: Vec<renderer::Divider> = tab
+                .layout
+                .dividers(window, scale)
+                .into_iter()
+                .map(|d| renderer::Divider {
+                    id: d.id,
+                    line: match d.line {
+                        [x, y, w, h] if d.across && y < strip => [x, strip, w, h - (strip - y)],
+                        line => line,
+                    },
+                    upright: d.across,
+                })
+                .collect();
+            let focus = tab.focus;
+            // Every pane's screen, held still while it is drawn.
+            let mut held = Vec::new();
+            for pane in tab.panes.iter_mut() {
+                let Some(&(_, rect)) = rects.iter().find(|(id, _)| *id == pane.id) else { continue };
+                let Pane { id, terminal, strikes, .. } = pane;
+                held.push((*id, rect, terminal.term.lock(), strike.then_some(strikes)));
+            }
+            let mut views: Vec<renderer::PaneView<_>> = held
+                .iter_mut()
+                .map(|(id, rect, term, strikes)| renderer::PaneView {
+                    id: *id,
+                    term: &**term,
+                    strikes: strikes.as_deref_mut(),
+                    rect: *rect,
+                    focused: *id == focus,
+                })
+                .collect();
+            // In reading order, the focused pane last so the window's
+            // marks are drawn with it.
+            views.sort_by_key(|v| rects.iter().position(|(id, _)| *id == v.id));
+            r.render(&theme, &mut views, &dividers);
+            drop(views);
+            drop(held);
+            // The input method's candidates open by the cursor.
+            let area = r.ime_area();
+            if area != self.ime_area {
+                self.ime_area = area;
+                let [x, y, w, h] = area;
+                r.window().set_ime_cursor_area(
+                    winit::dpi::PhysicalPosition::new(x as f64, y as f64),
+                    winit::dpi::PhysicalSize::new(w as f64, h as f64),
+                );
+            }
+            // Keep drawing while ink is still being brushed in or a
+            // reveal is running; vsync paces it, idle costs nothing.
+            if r.is_animating() {
+                r.window().request_redraw();
+            }
+        }
+    }
+
     /// Finds the link under the pointer while Cmd is held, underlines it
     /// and shows the pointing hand; otherwise clears them.
     fn update_link(&mut self) {
@@ -1762,6 +1832,9 @@ impl ApplicationHandler<UserEvent> for App {
                     r.resize(size.width, size.height);
                 }
                 self.relayout();
+                // Drawn now, not on the next redraw, so the frame for the
+                // new size goes out with the resize itself.
+                self.draw_frame();
             }
             WindowEvent::ScaleFactorChanged { .. } => self.relayout(),
             WindowEvent::ThemeChanged(theme) => {
@@ -1876,65 +1949,7 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
-                // Matches follow the text as it scrolls and changes.
-                self.update_search(false);
-                let theme = self.themes[self.current].clone();
-                let strike = self.config.strike_deleted.unwrap_or(true);
-                if let (Some(r), Some(tab)) = (self.renderer.as_mut(), self.tabs.get_mut(self.active)) {
-                    let window = r.window_rect();
-                    let rects = tab.layout.rects(window);
-                    let scale = r.window().scale_factor() as f32;
-                    // Dividers start below the title strip, which runs across.
-                    let strip = renderer::TITLE_STRIP * scale;
-                    let dividers: Vec<[f32; 4]> = tab
-                        .layout
-                        .dividers(window, scale)
-                        .into_iter()
-                        .map(|d| match d.line {
-                            [x, y, w, h] if d.across && y < strip => [x, strip, w, h - (strip - y)],
-                            line => line,
-                        })
-                        .collect();
-                    let focus = tab.focus;
-                    // Every pane's screen, held still while it is drawn.
-                    let mut held = Vec::new();
-                    for pane in tab.panes.iter_mut() {
-                        let Some(&(_, rect)) = rects.iter().find(|(id, _)| *id == pane.id) else { continue };
-                        let Pane { id, terminal, strikes, .. } = pane;
-                        held.push((*id, rect, terminal.term.lock(), strike.then_some(strikes)));
-                    }
-                    let mut views: Vec<renderer::PaneView<_>> = held
-                        .iter_mut()
-                        .map(|(id, rect, term, strikes)| renderer::PaneView {
-                            id: *id,
-                            term: &**term,
-                            strikes: strikes.as_deref_mut(),
-                            rect: *rect,
-                            focused: *id == focus,
-                        })
-                        .collect();
-                    // In reading order, the focused pane last so the window's
-                    // marks are drawn with it.
-                    views.sort_by_key(|v| rects.iter().position(|(id, _)| *id == v.id));
-                    r.render(&theme, &mut views, &dividers);
-                    drop(views);
-                    drop(held);
-                    // The input method's candidates open by the cursor.
-                    let area = r.ime_area();
-                    if area != self.ime_area {
-                        self.ime_area = area;
-                        let [x, y, w, h] = area;
-                        r.window().set_ime_cursor_area(
-                            winit::dpi::PhysicalPosition::new(x as f64, y as f64),
-                            winit::dpi::PhysicalSize::new(w as f64, h as f64),
-                        );
-                    }
-                    // Keep drawing while ink is still being brushed in or a
-                    // reveal is running; vsync paces it, idle costs nothing.
-                    if r.is_animating() {
-                        r.window().request_redraw();
-                    }
-                }
+                self.draw_frame();
             }
             _ => {}
         }

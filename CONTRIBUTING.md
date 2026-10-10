@@ -57,7 +57,8 @@ include a screenshot or short recording in your pull request.
    `theme_shape`, `theme_transition`. Leave out what it doesn't need; the framework's
    plain defaults fill in. Values come from `Theme::data` (and `Plan` for transitions)
    into a struct the theme declares.
-3. Give it its reactions: `reveal`, `switch`, `cursor`, `strike` / `draw_strike`.
+3. Give it its reactions: `reveal`, `switch`, `cursor`, `strike` / `draw_strike`, and
+   `draw_divider` for the line between split panes (drawn in when a split is made).
 4. Add it to `all()` in `src/themes/mod.rs`. It then appears in the picker, the
    settings panel (a slider per setting it declares) and the settings template, and
    `cargo test` compiles its shaders.

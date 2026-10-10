@@ -86,6 +86,16 @@ pub trait Theme: Sync + 'static {
     }
     /// Draws one struck-out name (see [`Strike`]) into the ink layer.
     fn draw_strike(&self, _variant: &Variant, _ctx: &Ctx, _span: &StrikeSpan, _out: &mut Vec<Shape>) {}
+    /// How long a new divider between panes takes to be drawn in, seconds
+    /// at speed 1.
+    fn divider_time(&self) -> f32 {
+        0.3
+    }
+    /// Draws a divider between panes (see [`DividerSpan`]) into the ink
+    /// layer, `progress` of the way in.
+    fn draw_divider(&self, variant: &Variant, ctx: &Ctx, span: &DividerSpan, out: &mut Vec<Shape>) {
+        plain_divider(variant, ctx, span, out);
+    }
 }
 
 impl fmt::Debug for dyn Theme {
@@ -146,6 +156,35 @@ pub struct Strike {
     pub duration: f32,
     pub linger: f32,
     pub fade: f32,
+}
+
+/// A divider between two panes.
+#[derive(Clone, Copy, Debug)]
+pub struct DividerSpan {
+    /// The box it is drawn in (x, y, w, h), physical pixels: centred on
+    /// the line between the panes, the full length of it, and wide enough
+    /// for a stroke with ragged edges.
+    pub rect: [f32; 4],
+    /// It runs up and down, between panes side by side.
+    pub upright: bool,
+    /// How far it has been drawn in, 0..1.
+    pub progress: f32,
+    /// Stable for this divider while it exists (also while it is dragged).
+    pub seed: f32,
+}
+
+/// The plain divider: a hairline in a quiet ink, growing from its middle.
+pub fn plain_divider(variant: &Variant, ctx: &Ctx, span: &DividerSpan, out: &mut Vec<Shape>) {
+    let [x, y, w, h] = span.rect;
+    let t = ctx.scale.max(1.0);
+    let rgb = variant.palette[8];
+    if span.upright {
+        let len = h * span.progress;
+        out.push(Shape::new(x + (w - t) / 2.0, y + (h - len) / 2.0, t, len, rgb, 0.45));
+    } else {
+        let len = w * span.progress;
+        out.push(Shape::new(x + (w - len) / 2.0, y + (h - t) / 2.0, len, t, rgb, 0.45));
+    }
 }
 
 /// One struck-out name on screen.
