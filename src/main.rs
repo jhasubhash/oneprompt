@@ -10,6 +10,7 @@
 //!   oneprompt --position X,Y  open the window there (logical pixels; Cmd+N)
 //!   oneprompt --default-config   print the settings file Cmd+, would create
 //!   ONEPROMPT_SNAPSHOT=dir    render every theme to dir/<theme>.png and exit
+//!   ONEPROMPT_SNAPSHOT_SWITCH=n   with it, also n frames of each switch
 
 mod animation;
 mod boxdraw;
@@ -493,11 +494,12 @@ impl App {
     fn select_theme(&mut self) {
         let index = self.config.theme_index(&self.themes, self.system_dark, self.flip);
         if index != self.current {
-            // Brush the new look in over the old one, a different way each
+            // Cut the new look in over the old one, a different way each
             // time, on a new sheet of paper unless the settings pin one.
             let pinned = self.config.seed.is_some() || std::env::var_os("ONEPROMPT_SEED").is_some();
+            let cut = self.themes[index].cursor;
             if let Some(r) = self.renderer.as_mut() {
-                r.start_transition();
+                r.start_transition(cut);
                 if !pinned {
                     r.new_sheet();
                 }
@@ -743,6 +745,22 @@ impl App {
             if let (Some(r), Some(t)) = (self.renderer.as_mut(), self.tabs.get(self.active).map(|t| &t.terminal)) {
                 let term = t.term.lock();
                 r.snapshot(&theme, &term, &dir.join(format!("{name}.png")));
+            }
+        }
+        // Frames of the switch into each theme from the one before it.
+        let frames = std::env::var("ONEPROMPT_SNAPSHOT_SWITCH").ok().and_then(|n| n.parse().ok()).unwrap_or(0);
+        if frames == 0 {
+            return;
+        }
+        for i in 0..self.themes.len() {
+            let from = self.themes[(i + self.themes.len() - 1) % self.themes.len()].clone();
+            self.current = i;
+            self.relayout();
+            let to = self.themes[i].clone();
+            let name = to.name.to_lowercase().replace(' ', "-");
+            if let (Some(r), Some(t)) = (self.renderer.as_mut(), self.tabs.get(self.active).map(|t| &t.terminal)) {
+                let term = t.term.lock();
+                r.snapshot_switch(&from, &to, &term, frames, &dir.join(format!("to-{name}")));
             }
         }
     }

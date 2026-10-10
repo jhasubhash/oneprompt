@@ -95,8 +95,13 @@ struct PresentParams {
     edge: [f32; 4],
     /// Number of marks, 1 / latest arrival, noise seed, soak speed.
     info: [f32; 4],
-    /// Two per mark: (x, y, angle, half width), (delay, speed, bend, drop).
-    marks: [[f32; 4]; 2 * animation::MAX_MARKS],
+    /// Colour of the fresh edge of sword cuts (rgb), how strong.
+    cut: [f32; 4],
+    /// How the front runs: progress × x + y; z: how the wash slows.
+    front: [f32; 4],
+    /// Three per mark: (x, y, angle, half width), (delay, speed, bend, kind),
+    /// and for cuts (length, hold, droplet side, splatter).
+    marks: [[f32; 4]; 3 * animation::MAX_MARKS],
 }
 
 impl PresentParams {
@@ -108,7 +113,9 @@ impl PresentParams {
             from_color: [0.0; 4],
             edge: [0.0; 4],
             info: [0.0; 4],
-            marks: [[0.0; 4]; 2 * animation::MAX_MARKS],
+            cut: [0.0; 4],
+            front: [0.0; 4],
+            marks: [[0.0; 4]; 3 * animation::MAX_MARKS],
         };
         let Some((t, now)) = transition else { return params };
         let b = &t.brush;
@@ -118,9 +125,18 @@ impl PresentParams {
         }
         params.edge = [b.lobes, b.chunks, b.bristles, b.lobe_scale];
         params.info = [b.count as f32, b.norm, b.shape, b.soak];
+        let [r, g, bl] = t.cut.map(|c| c as f32 / 255.0);
+        params.cut = [r, g, bl, 0.9];
+        params.front = [b.front[0], b.front[1], animation::WASH_SPREAD, 0.0];
         for (i, m) in b.marks[..b.count].iter().enumerate() {
-            params.marks[2 * i] = [m.at[0], m.at[1], m.angle, m.width];
-            params.marks[2 * i + 1] = [m.delay, m.speed, m.bend, if m.drop { 1.0 } else { 0.0 }];
+            let kind = match m.kind {
+                animation::Kind::Stroke => 0.0,
+                animation::Kind::Drop => 1.0,
+                animation::Kind::Slash => 2.0,
+            };
+            params.marks[3 * i] = [m.at[0], m.at[1], m.angle, m.width];
+            params.marks[3 * i + 1] = [m.delay, m.speed, m.bend, kind];
+            params.marks[3 * i + 2] = [m.length, m.hold, m.side, m.splatter];
         }
         params
     }
@@ -132,7 +148,7 @@ const WRITE_TIME: f32 = 0.38;
 const TRACE_ATLAS: (u32, u32) = (2048, 2048);
 /// Window reveal on startup and between light and dark, at speed 1.
 const INTRO_TIME: f32 = 1.6;
-const SWITCH_TIME: f32 = 1.9;
+const SWITCH_TIME: f32 = 2.8;
 /// Longest a batch of output takes to write, at speed 1.
 const MAX_WRITE: f32 = 1.5;
 
@@ -917,12 +933,14 @@ impl Renderer {
             duration: INTRO_TIME / self.animation.1,
             from: animation::From::Color(color),
             brush,
+            cut: [0; 3],
         });
     }
 
     /// Reveals the next frames over the last one shown (light / dark
-    /// switch), with brushwork made up at random and a slightly varied pace.
-    pub fn start_transition(&mut self) {
+    /// switch): a flurry of sword cuts made up at random, edged in `cut`
+    /// (the new look's seal ink), at a slightly varied pace.
+    pub fn start_transition(&mut self, cut: [u8; 3]) {
         if !self.animation.0 {
             return;
         }
@@ -933,13 +951,15 @@ impl Renderer {
             wgpu::Extent3d { width: self.config.width, height: self.config.height, depth_or_array_layers: 1 },
         );
         self.queue.submit(Some(encoder.finish()));
-        let brush = self.new_brush();
+        let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
+        let brush = animation::Brush::sword(&mut self.rng, aspect);
         let pace = self.rng.range(0.85, 1.2);
         self.transition = Some(Transition {
             start: self.now(),
             duration: SWITCH_TIME * pace / self.animation.1,
             from: animation::From::PreviousFrame,
             brush,
+            cut,
         });
     }
 
@@ -1193,6 +1213,32 @@ impl Renderer {
         self.draw(theme, &view);
         self.queue.present(frame);
         self.atlas.trim();
+    }
+
+    /// Renders `frames` stills of a light / dark switch from `from` to `to`,
+    /// evenly through it, as `<prefix>-NN.png`. Used by
+    /// `ONEPROMPT_SNAPSHOT_SWITCH` to look at transitions frame by frame.
+    pub fn snapshot_switch<L: EventListener>(
+        &mut self,
+        from: &Theme,
+        to: &Theme,
+        term: &Term<L>,
+        frames: usize,
+        prefix: &std::path::Path,
+    ) {
+        // Draw the old look once, so the transition has a frame to cut into.
+        self.snapshot(from, term, &prefix.with_extension("before.png"));
+        self.animation.0 = true;
+        self.start_transition(to.cursor);
+        let Some(mut transition) = self.transition else { return };
+        let started = transition.start;
+        for k in 0..frames {
+            transition.start = started - transition.duration * k as f32 / frames as f32;
+            self.transition = Some(transition);
+            let name = format!("{}-{k:02}.png", prefix.display());
+            self.snapshot(to, term, std::path::Path::new(&name));
+        }
+        self.transition = None;
     }
 
     /// Renders one frame off screen and saves it as a PNG. Used by

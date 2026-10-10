@@ -46,8 +46,12 @@ light or dark palette.
   Scrolled text keeps its age; full-screen apps and repaints over existing text appear at
   once.
 - **Reveals**: the window opens like the cutscenes, parchment torn out of a sheet of ink
-  (light) or ink flooding over parchment (dark), and switching light / dark slowly brushes
-  the new look in over the old one.
+  (light) or ink flooding over parchment (dark). Switching light / dark is a sword fight:
+  one to five quick slashes (a single sweep, a cross, a claw, a zigzag or a flurry), each
+  flinging droplets and edged in seal ink, then the new look runs out of every cut and
+  droplet like watercolour on damp paper: quick at first and slowing, its front fingering
+  and blooming, pigment pooling in a tide line and settling into the grain, the paper
+  ahead darkening as the water reaches it. No two are alike.
 - `animation = false` turns it off, `animation_speed` scales it. The app only redraws while
   something is moving.
 
@@ -175,7 +179,7 @@ src/theme.rs                themes as plain data
 src/shaders/background.wgsl procedural textures
 src/shaders/rect.wgsl       rectangles, brush discs, rings and crosses
 src/shaders/ink.wgsl        ink-on-surface composite: nib, bleed, grain, pooled rims, write-in
-src/shaders/present.wgsl    window reveal through a growing brush shape
+src/shaders/present.wgsl    window reveal through a growing brush shape, or sword cuts
 ```
 
 ## Roadmap

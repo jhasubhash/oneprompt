@@ -107,7 +107,8 @@ appearance = "system"
 option_as_meta = "left"
 
 # Ink animations: new characters are brushed in and dry, the window is
-# revealed with a brush when it opens and when light / dark switches.
+# revealed with a brush when it opens, and cut in with a sword when light /
+# dark switches.
 animation = true
 animation_speed = 1.0        # 2 = twice as fast, 0.5 = half speed
 # Output (ls, cat, ...) is written left to right, line by line, at this many
