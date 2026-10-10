@@ -630,6 +630,8 @@ pub struct Renderer {
     paste: Option<(u64, [f32; 4], f32, f32)>,
     splash: bool,
     splash_until: f32,
+    /// Rain or snow, and how heavy (None: clear skies).
+    weather: Option<(api::Weather, f32)>,
     /// Whether struck names fling blood.
     splatter: bool,
     /// Every pane's grid and writing state, by pane id, and the one being
@@ -858,6 +860,7 @@ impl Renderer {
             paste: None,
             splash: true,
             splash_until: f32::NEG_INFINITY,
+            weather: None,
             splatter: true,
             panes: HashMap::new(),
             pane: 0,
@@ -1313,6 +1316,16 @@ impl Renderer {
         self.cursor_life = (trail, pulse);
     }
 
+    /// The weather over the window, and how heavy it is.
+    pub fn set_weather(&mut self, weather: Option<(api::Weather, f32)>) {
+        self.weather = weather;
+    }
+
+    /// Rain or snow is falling: the app should wake now and then to draw it.
+    pub fn is_weathering(&self) -> bool {
+        self.weather.is_some() && self.animation.0 && self.window.has_focus()
+    }
+
     /// Whether pasted text lands as a splash of ink.
     pub fn set_splash(&mut self, on: bool) {
         self.splash = on;
@@ -1763,6 +1776,10 @@ impl Renderer {
         }
         let mut idle = Vec::new();
         self.idle_shapes(variant, &mut idle);
+        if let Some((kind, amount)) = self.weather.filter(|_| self.animation.0 && !self.thumbnail) {
+            let span = api::WeatherSpan { kind, area: self.window_rect(), time: now * self.animation.1, amount, seed: self.seed + 3.0 };
+            variant.theme.draw_weather(variant, &ctx, &span, &mut idle);
+        }
         self.chrome_ink.extend(idle);
         for (i, pane) in panes.iter_mut().enumerate() {
             let last = i + 1 == n;

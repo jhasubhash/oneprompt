@@ -132,6 +132,11 @@ pub trait Theme: Sync + 'static {
     /// Draws the splash of ink pasted text lands with, at `span.cell` (the
     /// cursor where it was pasted), `span.age` seconds in.
     fn draw_splash(&self, _variant: &Variant, _ctx: &Ctx, _span: &SplashSpan, _out: &mut Vec<Shape>) {}
+    /// Draws the weather over the window (see [`WeatherSpan`]). The default
+    /// is plain streaks and dots in a quiet ink.
+    fn draw_weather(&self, variant: &Variant, ctx: &Ctx, span: &WeatherSpan, out: &mut Vec<Shape>) {
+        plain_weather(variant, ctx, span, out);
+    }
     /// How long a stamp takes to land (see [`Theme::draw_stamp`]), seconds
     /// at speed 1.
     fn stamp_time(&self) -> f32 {
@@ -266,6 +271,75 @@ pub fn plain_stamp(variant: &Variant, ctx: &Ctx, span: &CommandSpan, out: &mut V
     let r = h * 0.42 * (1.4 - 0.4 * span.progress);
     let rgb = if span.failed { variant.palette[1] } else { variant.cursor };
     out.push(Shape::round(RING, x + w * 1.5, y + h * 0.5, r, rgb, 0.9 * span.progress).stroke(2.0 * ctx.scale));
+}
+
+/// Rain or snow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Weather {
+    Rain,
+    Snow,
+}
+
+/// The weather as it stands.
+#[derive(Clone, Copy, Debug)]
+pub struct WeatherSpan {
+    pub kind: Weather,
+    /// The whole window (x, y, w, h), physical pixels.
+    pub area: [f32; 4],
+    /// Seconds, at speed 1, on a clock that keeps running.
+    pub time: f32,
+    /// How heavy it is, 0..1.
+    pub amount: f32,
+    /// New for every session's sheet.
+    pub seed: f32,
+}
+
+/// Where particle `i` of the weather is at `span.time`: (x, y) in the window,
+/// how far through its fall (0..1), and a value of its own (0..1). Each
+/// particle falls from above the window to below it and starts again, at
+/// its own place, pace and drift; `fall` is seconds per pass, `drift` the
+/// sideways share of a window height it moves per pass.
+pub fn weather_particle(span: &WeatherSpan, i: usize, fall: f32, drift: f32) -> (f32, f32, f32, f32) {
+    let [ax, ay, aw, ah] = span.area;
+    let mut rng = Rng::new(scramble((span.seed.to_bits() as u64) << 20 ^ i as u64));
+    let x0 = rng.unit();
+    let pace = fall * rng.range(0.75, 1.3);
+    let phase = rng.unit();
+    let own = rng.unit();
+    let t = (span.time / pace + phase).fract();
+    let y = ay - ah * 0.1 + t * ah * 1.2;
+    let x = ax + (x0 * (aw + ah * drift.abs()) - if drift > 0.0 { ah * drift } else { 0.0 }) + t * ah * drift;
+    (x, y, t, own)
+}
+
+/// `seed` well mixed (splitmix64), so seeds next to each other (particle 1,
+/// 2, 3, ...) give unrelated [`Rng`]s.
+pub fn scramble(seed: u64) -> u64 {
+    let mut z = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
+/// The plain weather: thin streaks (rain) or dots (snow) in a quiet ink.
+pub fn plain_weather(variant: &Variant, ctx: &Ctx, span: &WeatherSpan, out: &mut Vec<Shape>) {
+    let s = ctx.scale;
+    let rgb = variant.palette[8];
+    match span.kind {
+        Weather::Rain => {
+            for i in 0..(span.amount * 140.0) as usize {
+                let (x, y, _, own) = weather_particle(span, i, 0.9, 0.18);
+                out.push(Shape::new(x, y, s, (10.0 + 14.0 * own) * s, rgb, 0.35));
+            }
+        }
+        Weather::Snow => {
+            for i in 0..(span.amount * 120.0) as usize {
+                let (x, y, t, own) = weather_particle(span, i, 9.0, 0.05);
+                let sway = (t * 12.0 + own * 6.0).sin() * 8.0 * s;
+                out.push(Shape::round(DISC, x + sway, y, (1.0 + 2.0 * own) * s, rgb, 0.5));
+            }
+        }
+    }
 }
 
 /// A paste landing.

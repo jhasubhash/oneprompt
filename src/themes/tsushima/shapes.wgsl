@@ -12,6 +12,8 @@
 //   leaf   a leaf painted in one go, filling the box: a five-lobed maple
 //          (params.z = 0) or a willow leaf (1), turned by params.y radians,
 //          veins left a little lighter, with its stem (params.w = seed)
+//   rain   a stroke of rain, from the box's top-right corner to its bottom-
+//          left: thin, tapered at both ends, a little dry (params.w = seed)
 //   seal   a hanko pressed onto the paper, filling the box (params.y = how
 //          far it has come down, 0..1: it prints fully once it lands;
 //          params.z = 1 for a failed command's empty, slashed seal;
@@ -33,6 +35,9 @@ fn theme_shape(s: ShapeIn) -> vec4<f32> {
     }
     if (kind == 20u) {
         return leaf(s);
+    }
+    if (kind == 21u) {
+        return rain(s);
     }
     return vec4<f32>(0.0);
 }
@@ -229,5 +234,22 @@ fn leaf(in: ShapeIn) -> vec4<f32> {
     ink = max(ink * (1.0 - 0.45 * vein), stem * 0.9);
     // The brush's grain across it.
     ink *= 0.78 + 0.22 * noise(p * vec2<f32>(3.0, 14.0) + seed);
+    return vec4<f32>(in.color.rgb, in.color.a * ink);
+}
+
+// A stroke of rain as an ink painting has it: a fine line slanting down
+// from the top-right to the bottom-left of the box, swelling in the middle,
+// tapering to nothing at both ends, the brush running a little dry.
+fn rain(in: ShapeIn) -> vec4<f32> {
+    let seed = vec2<f32>(in.params.w * 3.7, in.params.w * 1.3);
+    let size = max(in.size, vec2<f32>(1.0));
+    let a = vec2<f32>(size.x, 0.0);
+    let b = vec2<f32>(0.0, size.y);
+    let dir = b - a;
+    let t = clamp(dot(in.local - a, dir) / dot(dir, dir), 0.0, 1.0);
+    let d = length(in.local - (a + dir * t));
+    let thick = max(frame.scale * 1.1, 1.0) * pow(sin(3.14159265 * t), 0.7);
+    var ink = clamp(0.5 - (d - thick * 0.5), 0.0, 1.0);
+    ink *= 0.6 + 0.4 * noise(vec2<f32>(t * 9.0, 0.0) + seed);
     return vec4<f32>(in.color.rgb, in.color.a * ink);
 }

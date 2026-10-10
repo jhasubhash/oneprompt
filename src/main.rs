@@ -55,8 +55,9 @@ use theme::Variant;
 
 /// How long snapshot mode lets the command run before capturing.
 const SNAPSHOT_DELAY: Duration = Duration::from_millis(1500);
-/// A beating cursor is drawn this often.
+/// A beating cursor is drawn this often, and falling weather this often.
 const PULSE_FRAME: Duration = Duration::from_millis(50);
+const WEATHER_FRAME: Duration = Duration::from_millis(33);
 
 struct App {
     proxy: EventLoopProxy<UserEvent>,
@@ -1095,6 +1096,12 @@ impl App {
             r.set_effects(config.close_effect.unwrap_or(true), config.clear_effect.unwrap_or(true));
             r.set_cursor_life(config.cursor_trail.unwrap_or(true), config.cursor_pulse.unwrap_or(true));
             r.set_splash(config.paste_splash.unwrap_or(true));
+            let amount = config.weather_amount.unwrap_or(0.5);
+            r.set_weather(match config.weather {
+                config::WeatherSetting::None => None,
+                config::WeatherSetting::Rain => Some((theme::Weather::Rain, amount)),
+                config::WeatherSetting::Snow => Some((theme::Weather::Snow, amount)),
+            });
         }
         // ONEPROMPT_SEED (used for screenshots) wins over the file.
         if std::env::var_os("ONEPROMPT_SEED").is_none()
@@ -1848,13 +1855,16 @@ impl ApplicationHandler<UserEvent> for App {
             }
             None => {}
         }
-        // A beating cursor needs a frame now and then, not every vsync.
-        if self.renderer.as_ref().is_some_and(|r| r.is_pulsing()) {
-            if self.pulse_at.elapsed() >= PULSE_FRAME {
+        // A beating cursor needs a frame now and then, not every vsync, and
+        // falling rain or snow a few more.
+        let weather = self.renderer.as_ref().is_some_and(|r| r.is_weathering());
+        if weather || self.renderer.as_ref().is_some_and(|r| r.is_pulsing()) {
+            let every = if weather { WEATHER_FRAME } else { PULSE_FRAME };
+            if self.pulse_at.elapsed() >= every {
                 self.pulse_at = Instant::now();
                 self.redraw();
             }
-            let next = self.pulse_at + PULSE_FRAME;
+            let next = self.pulse_at + every;
             wake = Some(wake.map_or(next, |w| w.min(next)));
         }
         event_loop.set_control_flow(wake.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));

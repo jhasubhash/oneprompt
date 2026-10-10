@@ -12,7 +12,7 @@
 //! This file is the rows and what changing them writes; the renderer draws
 //! them (`Renderer::set_settings`) and main.rs routes keys and clicks.
 
-use crate::config::{Appearance, Config, Edit, OptionAsMeta, Value};
+use crate::config::{Appearance, Config, Edit, OptionAsMeta, Value, WeatherSetting};
 use crate::theme::{self, Variant};
 
 /// A row's control.
@@ -350,6 +350,18 @@ pub fn items(config: &Config, variant: &Variant, fonts: &Fonts) -> Vec<Item> {
         Control::Toggle(config.paste_splash.unwrap_or(true)),
         "paste_splash",
     ));
+    let weather = match config.weather {
+        WeatherSetting::None => "none",
+        WeatherSetting::Rain => "rain",
+        WeatherSetting::Snow => "snow",
+    };
+    items.push(top(
+        "Weather",
+        "Rain or snow over the paper. Draws while the window has focus.",
+        choice(&[("None", "none"), ("Rain", "rain"), ("Snow", "snow")], weather),
+        "weather",
+    ));
+    items.push(top("Weather amount", "A few drops to a downpour.", slider(config.weather_amount.unwrap_or(0.5), 0.0, 1.0), "weather_amount"));
     items.push(top(
         "Closing",
         "A closed tab or window burns away, or is wiped off the board.",

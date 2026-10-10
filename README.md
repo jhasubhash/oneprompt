@@ -100,6 +100,11 @@ light or dark palette.
 - **Paste splashes**: pasted text lands all at once, as a splash of sumi thrown out along
   the line it fills that soaks into the paper as the letters appear (a puff of chalk dust
   on the Chalkboard), instead of being written in. `paste_splash = false` turns it off.
+- **Weather**: `weather = "rain"` paints rain over the sheet as sumi-e does, long fine
+  strokes slanting down, drops blotting where they land and fading; `"snow"` drifts flakes of
+  paper white (parchment on the dark sheet); the Chalkboard does both in chalk.
+  `weather_amount` (0..1) is how heavy. Off by default: it draws 30 times a second while the
+  window has focus, and stops when it hasn't.
 - **Closing burns the sheet**: closing a tab or the window takes its sheet away the theme's
   way. Tsushima sets it alight near a corner: a ragged front of fire spreads across it,
   browning and charring the paper ahead and leaving ash and embers, the next tab showing
@@ -173,7 +178,7 @@ another theme). A theme implements the `Theme` trait:
   `draw_divider` (the line between split panes, drawn in when the split is made), and
   `mark_time` / `draw_failure` (a command that failed, beside its prompt) and
   `stamp_time` / `draw_stamp` (a long command that finished), `splash_time` /
-  `draw_splash` (pasted text landing), and `idle_time` /
+  `draw_splash` (pasted text landing), `draw_weather` (rain and snow), and `idle_time` /
   `draw_idle` (what happens on a window nobody is using).
 
 Adding a theme is a folder with a `mod.rs` and its shaders, and a line in
@@ -297,6 +302,8 @@ ink_aging = 0.3               # how far ink an hour old fades, 0..1
 cursor_trail = true           # the cursor flicks a trail when it jumps
 cursor_pulse = true           # a still cursor beats gently
 paste_splash = true           # pasted text lands as a splash of ink
+weather = "none"              # none | rain | snow
+weather_amount = 0.5          # how heavy, 0..1
 close_effect = true           # closing burns / wipes the sheet away
 clear_effect = true           # Cmd+K cuts the screen in two / sweeps it
 idle_scene = true             # leaves fall / dust settles on an idle window
