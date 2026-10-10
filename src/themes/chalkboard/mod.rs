@@ -8,8 +8,8 @@
 //! through them that knocks a little dust off.
 
 use crate::theme::{
-    self, CommandSpan, ControlStyle, Controls, Ctx, Cursor, CursorKind, DividerSpan, Param, Plan, Rng, Shape, Shaders,
-    Strike, StrikeSpan, Theme, Variant, CUSTOM, DISC, RING,
+    self, CommandSpan, ControlStyle, Controls, Ctx, Cursor, CursorKind, DividerSpan, IdleSpan, Param, Plan, Rng, Shape,
+    Shaders, Strike, StrikeSpan, Theme, Variant, CUSTOM, DISC, RING,
 };
 
 pub static CHALKBOARD: Chalkboard = Chalkboard;
@@ -25,6 +25,9 @@ const STROKE: f32 = CUSTOM + 3.0;
 const CROSS_TIME: f32 = 0.4;
 /// A long command's circled tick, at speed 1.
 const TICK_TIME: f32 = 0.55;
+/// Motes of chalk dust that settle on an idle board, over this long.
+const MOTES: usize = 70;
+const SETTLING: f32 = 24.0;
 /// A new divider between panes is ruled in this fast, at speed 1.
 const RULE_TIME: f32 = 0.45;
 
@@ -246,6 +249,43 @@ impl Theme for Chalkboard {
         TICK_TIME
     }
 
+    fn idle_time(&self) -> f32 {
+        SETTLING + 14.0
+    }
+
+    /// Left alone, chalk dust drifts down the board and settles along its
+    /// bottom edge, as on a chalk tray. A key or a click puffs it away.
+    fn draw_idle(&self, v: &Variant, ctx: &Ctx, span: &IdleSpan, out: &mut Vec<Shape>) {
+        let [ax, ay, aw, ah] = span.area;
+        let s = ctx.scale;
+        let mut rng = Rng::new(span.seed.to_bits() as u64 * 0x9e37_79b9 + 11);
+        for i in 0..MOTES {
+            let start = rng.range(0.0, SETTLING);
+            let x0 = ax + rng.unit() * aw;
+            let drift = rng.range(-40.0, 40.0) * s;
+            let rest_y = ay + ah - rng.range(2.0, 9.0) * s;
+            let fall = rng.range(8.0, 13.0);
+            let r = rng.range(0.7, 2.1) * s;
+            let wobble = rng.range(0.3, 0.8);
+            let (puff_x, puff_y) = (rng.range(-1.0, 1.0), rng.range(0.3, 1.0));
+            let t = span.elapsed - start;
+            if t < 0.0 {
+                continue;
+            }
+            let u = (t / fall).min(1.0);
+            let mut x = x0 + drift * u + (t * wobble + i as f32).sin() * 6.0 * s * (1.0 - u);
+            let mut y = mix(ay + ah * 0.05, rest_y, u);
+            let mut alpha = 0.5 * (t / 1.5).min(1.0);
+            if span.sweep > 0.0 {
+                let puff = 1.0 - (1.0 - span.sweep) * (1.0 - span.sweep);
+                x += puff_x * puff * 60.0 * s;
+                y -= puff_y * puff * 50.0 * s;
+                alpha *= 1.0 - span.sweep;
+            }
+            out.push(Shape::round(DISC, x, y, r, v.ink, alpha).rough(0.4, span.seed + i as f32));
+        }
+    }
+
     /// A long command gets a circle chalked after it when it finishes, then
     /// a tick in it (a cross if it failed), as a teacher marks work.
     fn draw_stamp(&self, v: &Variant, ctx: &Ctx, span: &CommandSpan, out: &mut Vec<Shape>) {
@@ -330,4 +370,8 @@ fn dust(out: &mut Vec<Shape>, [x, y, w, h]: [f32; 4], age: f32, seed: f32, rgb: 
         let cy = (y + h * 0.55 + fall * eased).min(y + h * 0.95);
         out.push(Shape::round(DISC, cx, cy, radius, rgb, 0.7 * (1.0 - u)));
     }
+}
+
+fn mix(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
 }

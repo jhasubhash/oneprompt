@@ -11,8 +11,8 @@
 mod brush;
 
 use crate::theme::{
-    self, CommandSpan, ControlStyle, Controls, Ctx, Cursor, CursorKind, DividerSpan, Param, Plan, Rng, Shape, Shaders,
-    Strike, StrikeSpan, Theme, Variant, CUSTOM, DISC,
+    self, CommandSpan, ControlStyle, Controls, Ctx, Cursor, CursorKind, DividerSpan, IdleSpan, Param, Plan, Rng, Shape,
+    Shaders, Strike, StrikeSpan, Theme, Variant, CUSTOM, DISC,
 };
 
 use brush::{Brush, PlanData};
@@ -26,6 +26,10 @@ const DAB: f32 = CUSTOM;
 const SLASH: f32 = CUSTOM + 1.0;
 const CUT: f32 = CUSTOM + 2.0;
 const SEAL: f32 = CUSTOM + 3.0;
+const LEAF: f32 = CUSTOM + 4.0;
+/// Leaves that fall onto an idle window, one about every LEAF_GAP seconds.
+const LEAVES: usize = 9;
+const LEAF_GAP: f32 = 2.4;
 /// A seal comes down onto the paper this fast, and shakes this long.
 const STAMP_TIME: f32 = 0.22;
 const THUD_TIME: f32 = 0.28;
@@ -272,6 +276,56 @@ impl Theme for Tsushima {
 
     fn stamp_time(&self) -> f32 {
         STAMP_TIME
+    }
+
+    fn idle_time(&self) -> f32 {
+        LEAVES as f32 * LEAF_GAP + 12.0
+    }
+
+    /// Left alone, the window gets leaves: maple and willow, painted in seal
+    /// red, old gold and sumi, drifting down one after another, swaying and
+    /// turning, to rest along the bottom of the paper. A key or a click
+    /// blows them off to the right.
+    fn draw_idle(&self, v: &Variant, ctx: &Ctx, span: &IdleSpan, out: &mut Vec<Shape>) {
+        let [ax, ay, aw, ah] = span.area;
+        let s = ctx.scale;
+        let mut rng = Rng::new(span.seed.to_bits() as u64 * 0x2545_f491 + 3);
+        let inks = [v.cursor, v.palette[3], v.ink];
+        for i in 0..LEAVES {
+            let start = i as f32 * LEAF_GAP + rng.range(0.0, 1.6);
+            let size = rng.range(26.0, 42.0) * s;
+            let x0 = ax + rng.range(0.05, 0.95) * aw;
+            let rest_x = (x0 + rng.range(-0.18, 0.18) * aw).clamp(ax + size, ax + aw - size);
+            let rest_y = ay + ah - rng.range(8.0, 30.0) * s;
+            let fall = rng.range(6.5, 9.5);
+            let sway = rng.range(18.0, 46.0) * s;
+            let flutter = rng.range(0.35, 0.7);
+            let phase = rng.range(0.0, std::f32::consts::TAU);
+            let (spin, turn) = (rng.range(0.0, std::f32::consts::TAU), rng.range(-1.2, 1.2));
+            let maple = rng.unit() < 0.6;
+            let ink = inks[(rng.unit() * 2.999) as usize];
+            let (wind, lift) = (rng.range(0.8, 1.5), rng.range(0.04, 0.2));
+            let t = span.elapsed - start;
+            if t < 0.0 {
+                continue;
+            }
+            let u = (t / fall).min(1.0);
+            let falling = 1.0 - u;
+            let mut x = mix(x0, rest_x, u) + sway * (t * flutter * std::f32::consts::TAU + phase).sin() * falling;
+            let mut y = mix(ay - size, rest_y, u * u * (3.0 - 2.0 * u) * 0.35 + u * 0.65);
+            let mut angle = spin + turn * t.min(fall) + 0.5 * (t * flutter * std::f32::consts::TAU + phase).cos() * falling;
+            let mut alpha = 0.92;
+            if span.sweep > 0.0 {
+                let gust = span.sweep * span.sweep;
+                x += gust * aw * wind;
+                y -= gust * ah * lift;
+                angle += gust * 7.0;
+                alpha *= 1.0 - (span.sweep - 0.6).max(0.0) / 0.4;
+            }
+            let mut leaf = Shape::new(x - size / 2.0, y - size / 2.0, size, size, ink, alpha);
+            leaf.params = [LEAF, angle, if maple { 0.0 } else { 1.0 }, span.seed + i as f32 * 1.7];
+            out.push(leaf);
+        }
     }
 
     /// A long command is sealed when it finishes: a hanko in seal ink comes

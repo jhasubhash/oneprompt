@@ -87,6 +87,10 @@ pub struct Config {
     pub drying_time: Option<f32>,
     /// How far ink an hour old has faded, 0..1 (default 0.3; 0: never).
     pub ink_aging: Option<f32>,
+    /// After idle_after seconds (default 60) with no key or click, the theme's
+    /// idle scene plays: Tsushima's falling leaves. Default on.
+    pub idle_scene: Option<bool>,
+    pub idle_after: Option<f32>,
     /// Have the shell mark its prompts (marks.rs), for what follows. Default
     /// on; applies to shells started after it changes.
     pub shell_integration: Option<bool>,
@@ -152,6 +156,12 @@ strike_splatter = true       # extras: Tsushima's blood; false: a clean strike
 ink_drying = true
 drying_time = 4
 ink_aging = 0.3
+
+# Left alone for idle_after seconds, the window gets the theme's idle scene:
+# maple leaves drift down onto the paper in Tsushima, chalk dust settles on
+# the Chalkboard. The next key or click sweeps it away.
+idle_scene = true
+idle_after = 60
 
 # The shell marks its prompts so the terminal knows where each command starts
 # and how it ended (zsh: automatic; fish 4: built in; bash: see the README).
@@ -313,6 +323,11 @@ impl Config {
             && !(0.0..=1.0).contains(&aging)
         {
             return Err(format!("ink_aging {aging} is out of range (0 to 1)"));
+        }
+        if let Some(after) = self.idle_after
+            && !(5.0..=86_400.0).contains(&after)
+        {
+            return Err(format!("idle_after {after} is out of range (5 to 86400)"));
         }
         if let Some(after) = self.stamp_after
             && !(1.0..=86_400.0).contains(&after)
@@ -614,6 +629,7 @@ mod tests {
         assert!(Config::parse("writing_speed = 1").unwrap_err().contains("out of range"));
         assert!(Config::parse("stamp_after = 0").unwrap_err().contains("out of range"));
         assert!(Config::parse("ink_aging = 2").unwrap_err().contains("out of range"));
+        assert!(Config::parse("idle_after = 1").unwrap_err().contains("out of range"));
         assert!(Config::parse("drying_time = 0.1").unwrap_err().contains("out of range"));
         assert!(Config::parse("stamp_after = 30\nstamp_long_commands = false").is_ok());
         assert!(Config::parse("theme = \"nope\"").unwrap_err().contains("tsushima"));

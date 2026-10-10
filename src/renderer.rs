@@ -56,6 +56,8 @@ const PADDING: f32 = 24.0;
 const FULL_SCREEN_MIN: (usize, usize) = (80, 24);
 /// Text shrinks to no less than this share of its size.
 const MIN_FIT: f32 = 0.5;
+/// The idle scene is swept away this fast, at speed 1.
+const SWEEP_TIME: f32 = 0.9;
 /// Commands remembered per pane, for their marks.
 const MAX_COMMANDS: usize = 4000;
 /// A command's mark keeps moving this long after it is drawn in (drips,
@@ -598,6 +600,13 @@ pub struct Renderer {
     stamp_after: Option<f32>,
     /// Seconds fresh ink looks wet (0: never), and how far old ink fades.
     ink_life: (f32, f32),
+    /// The idle scene starts this many seconds after the last key or click
+    /// (None: never); when that was; and, while it is swept away, since when
+    /// and how far it had got.
+    idle_after: Option<f32>,
+    last_activity: f32,
+    sweep: Option<(f32, f32)>,
+    idle_until: f32,
     /// Whether struck names fling blood.
     splatter: bool,
     /// Every pane's grid and writing state, by pane id, and the one being
@@ -811,6 +820,10 @@ impl Renderer {
             mark_failures: true,
             stamp_after: Some(10.0),
             ink_life: (4.0, 0.3),
+            idle_after: Some(60.0),
+            last_activity: 0.0,
+            sweep: None,
+            idle_until: f32::NEG_INFINITY,
             splatter: true,
             panes: HashMap::new(),
             pane: 0,
@@ -1064,6 +1077,78 @@ impl Renderer {
         self.splatter = splatter;
     }
 
+    /// Seconds without a key or a click before the idle scene starts; None:
+    /// never.
+    pub fn set_idle(&mut self, after: Option<f32>) {
+        self.idle_after = after;
+    }
+
+    /// A key or a click: the idle scene, if it is showing, is swept away,
+    /// and the wait starts over. Returns true if there is a sweep to draw.
+    pub fn activity(&mut self) -> bool {
+        let now = self.now();
+        let elapsed = self.idle_elapsed(now);
+        self.last_activity = now;
+        match elapsed {
+            Some(elapsed) if self.sweep.is_none() && self.animation.0 => {
+                self.sweep = Some((now, elapsed));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Seconds the idle scene has been going, if it is.
+    fn idle_elapsed(&self, now: f32) -> Option<f32> {
+        let after = self.idle_after?;
+        let since = now - self.last_activity - after;
+        (since >= 0.0).then_some(since * self.animation.1)
+    }
+
+    /// Seconds until the idle scene is due (the app sleeps until then), if
+    /// it is not already showing.
+    pub fn idle_due_in(&self) -> Option<f32> {
+        let after = self.idle_after?;
+        let left = self.last_activity + after - self.now();
+        (left > 0.0 && self.sweep.is_none()).then_some(left)
+    }
+
+    /// The idle scene's shapes for this frame (chrome ink), as the theme
+    /// draws it: going, or being swept away.
+    fn idle_shapes(&mut self, variant: &Variant, out: &mut Vec<Shape>) {
+        let time = variant.theme.idle_time();
+        if time <= 0.0 || self.thumbnail || !self.animation.0 {
+            self.sweep = None;
+            return;
+        }
+        let now = self.now();
+        let (elapsed, sweep) = match self.sweep {
+            Some((start, at)) => {
+                let progress = (now - start) * self.animation.1 / SWEEP_TIME;
+                if progress >= 1.0 {
+                    self.sweep = None;
+                    return;
+                }
+                self.idle_until = self.idle_until.max(start + SWEEP_TIME / self.animation.1);
+                (at, progress)
+            }
+            None => match self.idle_elapsed(now) {
+                Some(elapsed) => {
+                    self.idle_until = self.idle_until.max(now + (time - elapsed).max(0.0) / self.animation.1);
+                    (elapsed, 0.0)
+                }
+                None => return,
+            },
+        };
+        let span = api::IdleSpan {
+            area: self.window_rect(),
+            elapsed,
+            sweep,
+            seed: (self.last_activity * 13.37).fract() * 97.0 + 1.0,
+        };
+        variant.theme.draw_idle(variant, &self.ctx(), &span, out);
+    }
+
     /// How long fresh ink looks wet (seconds, 0: never) and how far ink an
     /// hour old fades (0..1).
     pub fn set_ink_life(&mut self, dry_time: f32, aging: f32) {
@@ -1163,6 +1248,7 @@ impl Renderer {
             || now < self.strikes_until
             || now < self.dividers_until
             || now < self.marks_until
+            || now < self.idle_until
             || (self.animation.0
                 && self.panes.values().any(|p| now - p.animator.latest_birth() < (write_time * 4.0).max(settle_time)))
     }
@@ -1562,6 +1648,9 @@ impl Renderer {
             variant.theme.draw_divider(variant, &ctx, &span, &mut shapes);
             self.chrome_ink.extend(shapes);
         }
+        let mut idle = Vec::new();
+        self.idle_shapes(variant, &mut idle);
+        self.chrome_ink.extend(idle);
         for (i, pane) in panes.iter_mut().enumerate() {
             let last = i + 1 == n;
             self.set_pane(pane.id, pane.rect, None);

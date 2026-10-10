@@ -104,6 +104,11 @@ light or dark palette.
   its brightest and dustiest. Ink that has been on screen a long while fades a little, as
   old ink does (`ink_aging`, 0.3, reached after an hour: Tsushima's browns, chalk greys
   towards the board). `ink_drying = false` and `ink_aging = 0` turn them off.
+- **Idle scenes**: left alone for `idle_after` seconds (60), the window gets the theme's
+  scene: momiji and willow leaves in seal red, gold and sumi drift down onto Tsushima's
+  paper, swaying and turning, to rest along its bottom; on the Chalkboard chalk dust
+  settles along the bottom edge. The next key or click sweeps it away (a gust blows the
+  leaves off, the dust puffs up). `idle_scene = false` turns it off.
 - **Failed commands are marked**: a command that exits with an error gets the theme's mark
   in the margin beside its prompt, so scrolling back shows where things went wrong.
   Tsushima drags a stroke of seal ink down the margin and a drop of it runs and dries;
@@ -149,7 +154,8 @@ another theme). A theme implements the `Theme` trait:
   variant or another theme), `cursor`, `strike` / `draw_strike` (a deleted name),
   `draw_divider` (the line between split panes, drawn in when the split is made), and
   `mark_time` / `draw_failure` (a command that failed, beside its prompt) and
-  `stamp_time` / `draw_stamp` (a long command that finished).
+  `stamp_time` / `draw_stamp` (a long command that finished), and `idle_time` /
+  `draw_idle` (what happens on a window nobody is using).
 
 Adding a theme is a folder with a `mod.rs` and its shaders, and a line in
 `src/themes/mod.rs`. CONTRIBUTING.md has the details.
@@ -269,6 +275,8 @@ strike_splatter = true        # with the theme's extras (blood, chalk dust)
 ink_drying = true             # fresh ink looks wet, then dries
 drying_time = 4               # seconds
 ink_aging = 0.3               # how far ink an hour old fades, 0..1
+idle_scene = true             # leaves fall / dust settles on an idle window
+idle_after = 60               # seconds without a key or click
 shell_integration = true      # the shell marks its prompts (new shells)
 mark_failures = true          # mark failed commands beside their prompt
 stamp_long_commands = true    # stamp commands that ran a while when they finish

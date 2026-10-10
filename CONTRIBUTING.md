@@ -60,7 +60,8 @@ include a screenshot or short recording in your pull request.
 3. Give it its reactions: `reveal`, `switch`, `cursor`, `strike` / `draw_strike`,
    `draw_divider` for the line between split panes (drawn in when a split is made), and
    `draw_failure` for a command that failed (in the margin beside its prompt) and
-   `draw_stamp` for a long command that finished (just after it).
+   `draw_stamp` for a long command that finished (just after it), and `draw_idle` for a
+   scene on a window nobody is using.
 4. Add it to `all()` in `src/themes/mod.rs`. It then appears in the picker, the
    settings panel (a slider per setting it declares) and the settings template, and
    `cargo test` compiles its shaders.

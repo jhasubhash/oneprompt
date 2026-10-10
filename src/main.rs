@@ -104,6 +104,8 @@ struct App {
     config: Config,
     /// When the notice should disappear.
     notice_until: Option<Instant>,
+    /// Sleeping until the idle scene is due.
+    idle_waiting: bool,
     /// macOS is in dark mode.
     system_dark: bool,
     /// Cmd+Shift+L override for this session: Some(true) = dark.
@@ -1047,6 +1049,7 @@ impl App {
             r.set_command_marks(config.mark_failures.unwrap_or(true), stamp_after);
             let dry_time = if config.ink_drying.unwrap_or(true) { config.drying_time.unwrap_or(4.0) } else { 0.0 };
             r.set_ink_life(dry_time, config.ink_aging.unwrap_or(0.3));
+            r.set_idle(config.idle_scene.unwrap_or(true).then(|| config.idle_after.unwrap_or(60.0)));
         }
         // ONEPROMPT_SEED (used for screenshots) wins over the file.
         if std::env::var_os("ONEPROMPT_SEED").is_none()
@@ -1776,18 +1779,31 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // Sleep until the notice should go away, then clear it.
-        match self.notice_until {
+        let mut wake = match self.notice_until {
             Some(until) if Instant::now() >= until => {
                 self.notice_until = None;
                 if let Some(r) = self.renderer.as_mut() {
                     r.set_notice(None);
                 }
                 self.redraw();
-                event_loop.set_control_flow(ControlFlow::Wait);
+                None
             }
-            Some(until) => event_loop.set_control_flow(ControlFlow::WaitUntil(until)),
-            None => event_loop.set_control_flow(ControlFlow::Wait),
+            until => until,
+        };
+        // And until the idle scene is due, then draw it.
+        match self.renderer.as_ref().and_then(|r| r.idle_due_in()) {
+            Some(left) => {
+                let due = Instant::now() + Duration::from_secs_f32(left + 0.05);
+                wake = Some(wake.map_or(due, |w| w.min(due)));
+                self.idle_waiting = true;
+            }
+            None if self.idle_waiting => {
+                self.idle_waiting = false;
+                self.redraw();
+            }
+            None => {}
         }
+        event_loop.set_control_flow(wake.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
@@ -1856,6 +1872,14 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // Someone is here: the idle scene goes (swept away if it showed).
+        if matches!(
+            event,
+            WindowEvent::KeyboardInput { .. } | WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. } | WindowEvent::Ime(_)
+        ) && self.renderer.as_mut().is_some_and(|r| r.activity())
+        {
+            self.redraw();
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -2071,6 +2095,7 @@ fn main() {
         config_path,
         config,
         notice_until: None,
+        idle_waiting: false,
         system_dark: false,
         flip: None,
         startup_error,

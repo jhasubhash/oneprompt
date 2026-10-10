@@ -333,6 +333,17 @@ pub fn items(config: &Config, variant: &Variant, fonts: &Fonts) -> Vec<Item> {
     ));
     items.push(top("Drying time", "Seconds fresh ink stays wet.", slider(config.drying_time.unwrap_or(4.0), 1.0, 20.0), "drying_time"));
     items.push(top(
+        "Idle scene",
+        "Left alone, the window gets the theme's scene: falling leaves, settling dust.",
+        Control::Toggle(config.idle_scene.unwrap_or(true)),
+        "idle_scene",
+    ));
+    let mut idle = Row::new("Idle after", "Seconds without a key or a click.", slider(config.idle_after.unwrap_or(60.0), 10.0, 600.0), None, "idle_after");
+    if let Control::Slider { step, .. } = &mut idle.control {
+        *step = 5.0;
+    }
+    items.push(Item::Row(idle));
+    items.push(top(
         "Ink aging",
         "How far ink an hour old has faded; 0 never.",
         slider(config.ink_aging.unwrap_or(0.3), 0.0, 1.0),

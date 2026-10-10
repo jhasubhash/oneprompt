@@ -105,6 +105,14 @@ pub trait Theme: Sync + 'static {
     fn draw_failure(&self, variant: &Variant, ctx: &Ctx, span: &CommandSpan, out: &mut Vec<Shape>) {
         plain_failure(variant, ctx, span, out);
     }
+    /// How long the theme's idle scene (see [`Theme::draw_idle`]) keeps
+    /// moving once it starts, seconds at speed 1; 0: the theme has none.
+    fn idle_time(&self) -> f32 {
+        0.0
+    }
+    /// Draws what happens on the window while nobody is using it (see
+    /// [`IdleSpan`]), until a key or a click sweeps it away.
+    fn draw_idle(&self, _variant: &Variant, _ctx: &Ctx, _span: &IdleSpan, _out: &mut Vec<Shape>) {}
     /// How long a stamp takes to land (see [`Theme::draw_stamp`]), seconds
     /// at speed 1.
     fn stamp_time(&self) -> f32 {
@@ -239,6 +247,19 @@ pub fn plain_stamp(variant: &Variant, ctx: &Ctx, span: &CommandSpan, out: &mut V
     let r = h * 0.42 * (1.4 - 0.4 * span.progress);
     let rgb = if span.failed { variant.palette[1] } else { variant.cursor };
     out.push(Shape::round(RING, x + w * 1.5, y + h * 0.5, r, rgb, 0.9 * span.progress).stroke(2.0 * ctx.scale));
+}
+
+/// The idle scene as it stands.
+#[derive(Clone, Copy, Debug)]
+pub struct IdleSpan {
+    /// The whole window (x, y, w, h), physical pixels.
+    pub area: [f32; 4],
+    /// Seconds since it began, at speed 1. Frozen while it is swept away.
+    pub elapsed: f32,
+    /// How far it has been swept away, 0..1 (0: it has not been).
+    pub sweep: f32,
+    /// New for every time the window falls idle.
+    pub seed: f32,
 }
 
 /// One struck-out name on screen.

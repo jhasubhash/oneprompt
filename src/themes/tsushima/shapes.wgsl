@@ -9,6 +9,9 @@
 //   cut    the long cut dividing two panes, end to end along the box
 //          (params.y = how far it has been drawn, params.z = 1 when it runs
 //          up and down, params.w = seed)
+//   leaf   a leaf painted in one go, filling the box: a five-lobed maple
+//          (params.z = 0) or a willow leaf (1), turned by params.y radians,
+//          veins left a little lighter, with its stem (params.w = seed)
 //   seal   a hanko pressed onto the paper, filling the box (params.y = how
 //          far it has come down, 0..1: it prints fully once it lands;
 //          params.z = 1 for a failed command's empty, slashed seal;
@@ -27,6 +30,9 @@ fn theme_shape(s: ShapeIn) -> vec4<f32> {
     }
     if (kind == 19u) {
         return seal(s);
+    }
+    if (kind == 20u) {
+        return leaf(s);
     }
     return vec4<f32>(0.0);
 }
@@ -183,4 +189,45 @@ fn seal(in: ShapeIn) -> vec4<f32> {
     ink *= 1.0 - clamp(tooth, 0.0, 0.85);
     let strength = select(0.55, 1.0, landed);
     return vec4<f32>(in.color.rgb, in.color.a * ink * strength);
+}
+
+// A leaf, painted in a stroke or two: a maple with five pointed lobes or a
+// long willow leaf, turned in the box. The veins are left a little lighter
+// where the brush lifted, the edge is soft, and the stem trails off.
+fn leaf(in: ShapeIn) -> vec4<f32> {
+    let seed = vec2<f32>(in.params.w * 7.31, in.params.w * 3.17);
+    let half = max(in.size.x, 1.0) * 0.5;
+    let p = rotate(in.local - in.size * 0.5, -in.params.y) / half;
+    let r = length(p);
+    let theta = atan2(p.x, -p.y);
+    var ink = 0.0;
+    var vein = 0.0;
+    if (in.params.z < 0.5) {
+        // Maple: five lobes, deep cuts between them, the bottom pair smaller.
+        // Pointed lobes with serrated edges.
+        let lobes = pow(abs(cos(theta * 2.5)), 2.2);
+        let bottom = 1.0 - 0.35 * smoothstep(0.55, 1.0, abs(theta) / 3.14159265);
+        let teeth = abs(sin(theta * 22.0)) * 0.05 * lobes;
+        let edge = 0.94 * (0.3 + 0.7 * lobes) * bottom - teeth + (noise(p * 9.0 + seed) - 0.5) * 0.04;
+        ink = clamp((edge - r) * half * 0.9, 0.0, 1.0);
+        for (var k = 0; k < 5; k++) {
+            let a = (f32(k) - 2.0) * 1.2566371;
+            let dir = vec2<f32>(sin(a), -cos(a));
+            let along = dot(p, dir);
+            let off = abs(p.x * dir.y - p.y * dir.x);
+            vein = max(vein, (1.0 - smoothstep(0.015, 0.05, off)) * step(0.0, along) * step(along, 0.7));
+        }
+    } else {
+        // Willow: long and narrow, pointed at the tip.
+        let y = clamp(p.y, -1.0, 1.0);
+        let width = 0.34 * pow(max(1.0 - y * y, 0.0), 0.75) * (1.0 - 0.25 * smoothstep(0.0, 1.0, -y));
+        ink = clamp((width - abs(p.x)) * half * 0.9, 0.0, 1.0) * step(abs(p.y), 0.95);
+        vein = (1.0 - smoothstep(0.012, 0.04, abs(p.x))) * step(-0.85, p.y) * step(p.y, 0.8);
+    }
+    // The stem, from the leaf's base down and out of it.
+    let stem = (1.0 - smoothstep(0.02, 0.05, abs(p.x + (p.y - 0.6) * 0.15))) * step(0.55, p.y) * step(p.y, 1.0);
+    ink = max(ink * (1.0 - 0.45 * vein), stem * 0.9);
+    // The brush's grain across it.
+    ink *= 0.78 + 0.22 * noise(p * vec2<f32>(3.0, 14.0) + seed);
+    return vec4<f32>(in.color.rgb, in.color.a * ink);
 }
