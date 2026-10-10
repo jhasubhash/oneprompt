@@ -8,7 +8,7 @@ struct Frame {
     time: f32,              // seconds, the clock births are measured on
     speed: f32,             // animation speed, 1 = normal
     progress: f32,          // transition, eased 0..1; >= 1 means none
-    _pad0: f32,
+    closing: f32,           // 1 while the window closes: nothing comes after
     from_color: vec4<f32>,  // rgb; w = 1 reveals over the colour, 0 over the last frame
     grid_origin: vec2<f32>, // top-left of the terminal grid, pixels
     cell: vec2<f32>,        // cell size, pixels

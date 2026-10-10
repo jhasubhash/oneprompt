@@ -36,9 +36,11 @@ const THUD_TIME: f32 = 0.28;
 /// A new divider between panes is cut in this fast, at speed 1.
 const CUT_TIME: f32 = 0.32;
 
-/// Window reveal on opening and switching, at speed 1.
+/// Window reveal on opening and switching, and a sheet burning away when it
+/// is closed, at speed 1.
 const REVEAL_TIME: f32 = 1.6;
 const SWITCH_TIME: f32 = 2.8;
+const BURN_TIME: f32 = 1.5;
 
 /// A failed command's stroke is dragged down the margin this fast.
 const FAILURE_TIME: f32 = 0.3;
@@ -225,6 +227,24 @@ impl Theme for Tsushima {
         let brush = Brush::sword(rng, aspect);
         let pace = rng.range(0.85, 1.2);
         Some(Plan { duration: SWITCH_TIME * pace, ease: brush.ease, data: theme::bytes(&PlanData::new(&brush, v.cursor)) })
+    }
+
+    /// A closed sheet burns away: lit near a corner, the fire spreads with a
+    /// ragged front, scorching the paper ahead of it and leaving ash and
+    /// embers behind, the next tab (or, closing the window, nothing but ash)
+    /// beneath.
+    fn close(&self, _v: &Variant, rng: &mut Rng, aspect: f32) -> Option<Plan> {
+        let corner = [if rng.unit() < 0.5 { 0.0 } else { aspect }, if rng.unit() < 0.6 { 1.0 } else { 0.0 }];
+        let at = [
+            (corner[0] + rng.range(-0.15, 0.15) * aspect).clamp(0.0, aspect),
+            (corner[1] + rng.range(-0.2, 0.2)).clamp(0.0, 1.0),
+        ];
+        let far = [[0.0, 0.0], [aspect, 0.0], [0.0, 1.0], [aspect, 1.0]]
+            .iter()
+            .map(|c: &[f32; 2]| ((c[0] - at[0]).powi(2) + (c[1] - at[1]).powi(2)).sqrt())
+            .fold(0.0, f32::max);
+        let data = PlanData::burn(at, far + 0.45, rng.unit() * 100.0);
+        Some(Plan { duration: BURN_TIME * rng.range(0.9, 1.15), ease: 1.15, data: theme::bytes(&data) })
     }
 
     /// The bleed keeps creeping for `bleed_time`.

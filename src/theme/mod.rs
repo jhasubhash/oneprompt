@@ -70,6 +70,12 @@ pub trait Theme: Sync + 'static {
     fn switch(&self, _variant: &Variant, _rng: &mut Rng, _aspect: f32) -> Option<Plan> {
         None
     }
+    /// How a sheet goes away: a tab that is closed (the next one shows
+    /// through) or the window (`frame.closing` is 1: nothing is left, and
+    /// the window closes when it is done). None: it simply goes.
+    fn close(&self, _variant: &Variant, _rng: &mut Rng, _aspect: f32) -> Option<Plan> {
+        None
+    }
     /// Seconds the ink keeps changing after a character is written (at
     /// speed 1), so the window keeps redrawing that long.
     fn settle_time(&self, _variant: &Variant) -> f32 {

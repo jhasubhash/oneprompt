@@ -314,6 +314,15 @@ pub struct PlanData {
 }
 
 impl PlanData {
+    /// A fire, for closing a sheet: lit at `at` (x across 0..aspect, y down
+    /// 0..1), its front `reach` away when it is done (`front.w` = 1 tells
+    /// the shader it is a burn).
+    pub fn burn(at: [f32; 2], reach: f32, seed: f32) -> Self {
+        let mut data = Self { edge: [0.0; 4], info: [0.0, 0.0, seed, 0.0], cut: [0.0; 4], front: [0.0, 0.0, 0.0, 1.0], marks: [[0.0; 4]; 3 * MAX_MARKS] };
+        data.marks[0] = [at[0], at[1], reach, 0.0];
+        data
+    }
+
     /// The brush, with cut edges drawn in `cut`.
     pub fn new(b: &Brush, cut: [u8; 3]) -> Self {
         let [r, g, bl] = cut.map(|c| c as f32 / 255.0);

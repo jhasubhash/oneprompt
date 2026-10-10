@@ -92,6 +92,11 @@ light or dark palette.
   ahead darkening as the water reaches it. Chalkboard wipes the old look off with an
   eraser, back and forth in a few passes, leaving streaky smears and pushing dust along
   its edge. No two are alike.
+- **Closing burns the sheet**: closing a tab or the window takes its sheet away the theme's
+  way. Tsushima sets it alight near a corner: a ragged front of fire spreads across it,
+  browning and charring the paper ahead and leaving ash and embers, the next tab showing
+  through (closing the window leaves only ash). Chalkboard wipes it off with the eraser.
+  `animation = false` closes at once.
 - **Deleted names are struck out**: when a file or folder named on screen is deleted (`rm`,
   a script, the Finder, ...), every mention of it, in `ls` output, the command that
   deleted it, anywhere, is struck through and fades. Words are looked up relative to the
@@ -151,7 +156,7 @@ another theme). A theme implements the `Theme` trait:
   frame: size, time, seed, grid, colours; and `hash`, `noise`, `rotate`) plus its own data
   from Rust. A stage it leaves out gets a plain default. A test compiles every stage.
 - **Events**: `reveal` (the window opens), `switch` (switching to it, from its other
-  variant or another theme), `cursor`, `strike` / `draw_strike` (a deleted name),
+  variant or another theme), `close` (a tab or the window closing), `cursor`, `strike` / `draw_strike` (a deleted name),
   `draw_divider` (the line between split panes, drawn in when the split is made), and
   `mark_time` / `draw_failure` (a command that failed, beside its prompt) and
   `stamp_time` / `draw_stamp` (a long command that finished), and `idle_time` /

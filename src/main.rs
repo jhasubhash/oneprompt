@@ -115,6 +115,8 @@ struct App {
     mouse: Mouse,
     /// Set by Cmd+W or the close control; the event handler then exits.
     close_requested: bool,
+    /// The window is closing the theme's way; the app quits when it is done.
+    leaving: bool,
     /// A settings error found before the window existed, shown once it does.
     startup_error: Option<String>,
 }
@@ -421,14 +423,39 @@ impl App {
             return true;
         }
         self.renaming = None;
-        self.tabs.remove(index);
-        if self.tabs.is_empty() {
+        // The last tab stays while the window goes, so its sheet is there to
+        // close.
+        if self.tabs.len() == 1 {
             return false;
         }
+        self.tabs.remove(index);
         let active = if self.active > index || self.active >= self.tabs.len() { self.active - 1 } else { self.active };
+        // The tab on show goes the theme's way, the next one beneath it.
+        let shown = index == self.active;
         self.active = usize::MAX;
         self.switch_tab(active.min(self.tabs.len() - 1));
+        if shown {
+            let theme = self.themes[self.current].clone();
+            if let Some(r) = self.renderer.as_mut() {
+                r.start_close(&theme, false);
+            }
+        }
         true
+    }
+
+    /// The window goes: the way the theme closes it, then the app quits
+    /// (at once with animations off).
+    fn leave(&mut self, event_loop: &ActiveEventLoop) {
+        if self.leaving {
+            return;
+        }
+        let theme = self.themes[self.current].clone();
+        if self.renderer.as_mut().is_some_and(|r| r.start_close(&theme, true)) {
+            self.leaving = true;
+            self.redraw();
+        } else {
+            event_loop.exit();
+        }
     }
 
     /// Tells the renderer the tab labels and sets the window title. Labels
@@ -1840,7 +1867,7 @@ impl ApplicationHandler<UserEvent> for App {
                 Some((t, _)) if self.tabs[t].panes.len() > 1 => self.remove_pane(t, id),
                 Some((t, _)) => {
                     if !self.close_tab(t) {
-                        event_loop.exit();
+                        self.leave(event_loop);
                     }
                 }
                 None => {}
@@ -1857,7 +1884,7 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Menu(action) => {
                 self.menu_action(action);
                 if self.close_requested {
-                    event_loop.exit();
+                    self.leave(event_loop);
                 }
             }
             // Tell programs the theme's real colours, so the ones that check
@@ -1881,7 +1908,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.redraw();
         }
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => self.leave(event_loop),
             WindowEvent::Resized(size) => {
                 if let Some(r) = self.renderer.as_mut() {
                     r.resize(size.width, size.height);
@@ -1919,7 +1946,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 if self.shortcut(&event) {
                     if self.close_requested {
-                        event_loop.exit();
+                        self.leave(event_loop);
                     }
                     return;
                 }
@@ -1947,7 +1974,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::MouseInput { state, button, .. } => {
                 self.on_mouse_button(state, button);
                 if self.close_requested {
-                    event_loop.exit();
+                    self.leave(event_loop);
                 }
             }
             WindowEvent::MouseWheel { delta, .. } if self.settings.is_some() => {
@@ -2005,6 +2032,9 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
                 self.draw_frame();
+                if self.leaving && self.renderer.as_ref().is_none_or(|r| r.transition_done()) {
+                    event_loop.exit();
+                }
             }
             _ => {}
         }
@@ -2102,6 +2132,7 @@ fn main() {
         scroll_px: 0.0,
         mouse: Mouse::default(),
         close_requested: false,
+        leaving: false,
     };
     event_loop.run_app(&mut app).expect("run event loop");
 }

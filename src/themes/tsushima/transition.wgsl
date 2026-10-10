@@ -16,6 +16,12 @@
 // along it and settling into the grain behind it, and the paper just ahead
 // darkened by the water reaching it first.
 
+// Closing a sheet burns it away (brush.rs, `PlanData::burn`): a fire lit
+// at marks[0].xy spreads to marks[0].z by the end, its front ragged and
+// fingering out along the paper, the sheet ahead of it browning and
+// charring, the edge glowing, ash and embers behind it fading to what is
+// underneath: the next tab, or (the window closing) ash.
+
 // What brush.rs describes (`PlanData`).
 struct Plan {
     edge: vec4<f32>,       // lobes, chunks, bristles, lobe size
@@ -170,6 +176,9 @@ fn arrival(q: vec2<f32>) -> Hit {
 }
 
 fn theme_transition(px: vec2<f32>, now: vec4<f32>, before_in: vec4<f32>) -> vec4<f32> {
+    if (plan.front.w > 0.5) {
+        return burn(px, now, before_in);
+    }
     let uv = px / frame.resolution;
     let aspect = frame.resolution.x / frame.resolution.y;
     let shape = plan.info.z;
@@ -279,4 +288,47 @@ fn theme_transition(px: vec2<f32>, now: vec4<f32>, before_in: vec4<f32>) -> vec4
         }
     }
     return color;
+}
+// The burn. Distances are in window heights.
+fn burn(px: vec2<f32>, now_in: vec4<f32>, before: vec4<f32>) -> vec4<f32> {
+    let aspect = frame.resolution.x / frame.resolution.y;
+    let p = px / frame.resolution * vec2<f32>(aspect, 1.0);
+    let seed = vec2<f32>(plan.info.z * 1.7, plan.info.z * 0.9);
+    let lp = px / max(frame.scale, 1.0);
+    // The front fingers out where the paper burns faster.
+    let ragged = (fbm(p * 3.2 + seed) - 0.5) * 0.42 + (noise(lp * 0.12 + seed) - 0.5) * 0.05;
+    let dist = length(p - plan.marks[0].xy) + ragged;
+    let front = frame.progress * plan.marks[0].z;
+    let behind = front - dist;
+    let edge = 0.035;
+
+    var under = now_in;
+    let ash_rgb = vec3<f32>(0.07, 0.055, 0.045) * (0.7 + 0.6 * noise(lp * 0.3 + seed));
+    if (frame.closing > 0.5) {
+        under = vec4<f32>(ash_rgb, 1.0);
+    }
+    let flicker = 0.65 + 0.35 * noise(lp * 0.2 + vec2<f32>(frame.time * 6.0, 0.0) + seed);
+    if (behind > edge) {
+        // Burnt through: charred flakes and embers cling for a moment, then
+        // what is underneath shows.
+        let ash = 1.0 - smoothstep(edge, edge + 0.16, behind);
+        var rgb = mix(under.rgb, ash_rgb, ash * 0.85);
+        let speck = step(0.965, hash(floor(lp * 0.5) + seed)) * ash;
+        rgb = mix(rgb, vec3<f32>(1.0, 0.45, 0.1), speck * flicker);
+        return vec4<f32>(rgb, 1.0);
+    }
+    if (behind > 0.0) {
+        // The burning edge: glowing orange at its leading side, deep red
+        // and black behind.
+        let t = behind / edge;
+        let hot = mix(vec3<f32>(1.0, 0.72, 0.28), vec3<f32>(0.62, 0.1, 0.03), t);
+        let rgb = mix(hot * flicker, ash_rgb, smoothstep(0.55, 1.0, t));
+        return vec4<f32>(rgb, 1.0);
+    }
+    // Ahead of it the paper browns and then chars as the heat reaches it.
+    let ahead = -behind;
+    let scorch = 1.0 - smoothstep(0.0, 0.14, ahead);
+    var rgb = mix(before.rgb, before.rgb * vec3<f32>(0.62, 0.42, 0.22), scorch * 0.8);
+    rgb = mix(rgb, vec3<f32>(0.08, 0.05, 0.03), 1.0 - smoothstep(0.0, 0.018, ahead));
+    return vec4<f32>(rgb, 1.0);
 }

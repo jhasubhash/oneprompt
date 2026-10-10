@@ -14,7 +14,12 @@ struct Plan {
 
 @group(0) @binding(2) var<uniform> plan: Plan;
 
-fn theme_transition(px: vec2<f32>, now: vec4<f32>, before: vec4<f32>) -> vec4<f32> {
+fn theme_transition(px: vec2<f32>, now_in: vec4<f32>, before: vec4<f32>) -> vec4<f32> {
+    // The window closing: the board is wiped clean before it goes.
+    var now = now_in;
+    if (frame.closing > 0.5) {
+        now = vec4<f32>(frame.surface.rgb, 1.0);
+    }
     let scale = max(frame.scale, 1.0);
     let lp = px / scale + vec2<f32>(plan.seed * 37.0, plan.seed * 11.0);
     let res = frame.resolution;

@@ -34,6 +34,7 @@ const RULE_TIME: f32 = 0.45;
 /// How long the eraser takes, at speed 1.
 const REVEAL_TIME: f32 = 1.3;
 const SWITCH_TIME: f32 = 1.8;
+const CLOSE_TIME: f32 = 1.1;
 /// Fresh chalk sheds dust this long.
 const SETTLE_TIME: f32 = 1.0;
 /// The chalk line through a deleted name, and the dust it knocks off.
@@ -187,6 +188,12 @@ impl Theme for Chalkboard {
 
     fn switch(&self, _v: &Variant, rng: &mut Rng, _aspect: f32) -> Option<Plan> {
         Some(wipe(rng, 3.0, 5.0, SWITCH_TIME))
+    }
+
+    /// A closed tab is wiped off the board with the eraser, the next one
+    /// under it; closing the window wipes it clean.
+    fn close(&self, _v: &Variant, rng: &mut Rng, _aspect: f32) -> Option<Plan> {
+        Some(wipe(rng, 2.0, 3.0, CLOSE_TIME))
     }
 
     fn settle_time(&self, _v: &Variant) -> f32 {

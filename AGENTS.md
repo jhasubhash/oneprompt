@@ -39,6 +39,9 @@ cargo clippy --release         # keep it warning-free
 ## Testing in the GUI without disturbing the user
 
 - Capture only the test window (`screencapture -l <window id>`), never the whole screen.
+  Video (`screencapture -v -R`) records a region, so it also catches whatever is beneath
+  once the test window moves or closes: use it only where nothing of the user's is
+  behind.
 - The user's own oneprompt is usually running too: pick the test window by its process's
   command line (`ps -o pid,command -p <pid>`), and never send keys to or resize the user's.
 - Never send keystrokes (System Events) while the user's oneprompt is running: macOS can't

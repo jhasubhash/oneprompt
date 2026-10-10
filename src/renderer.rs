@@ -83,7 +83,7 @@ struct Frame {
     time: f32,
     speed: f32,
     progress: f32,
-    _pad0: f32,
+    closing: f32,
     from_color: [f32; 4],
     grid_origin: [f32; 2],
     cell: [f32; 2],
@@ -607,6 +607,8 @@ pub struct Renderer {
     last_activity: f32,
     sweep: Option<(f32, f32)>,
     idle_until: f32,
+    /// The window is going: its last transition shows nothing after.
+    closing: bool,
     /// Whether struck names fling blood.
     splatter: bool,
     /// Every pane's grid and writing state, by pane id, and the one being
@@ -824,6 +826,7 @@ impl Renderer {
             last_activity: 0.0,
             sweep: None,
             idle_until: f32::NEG_INFINITY,
+            closing: false,
             splatter: true,
             panes: HashMap::new(),
             pane: 0,
@@ -1236,6 +1239,33 @@ impl Renderer {
         if let Some(plan) = variant.theme.switch(variant, &mut self.rng, aspect) {
             self.start(plan, animation::From::PreviousFrame);
         }
+    }
+
+    /// Starts the way `variant`'s theme closes a sheet, over the last frame
+    /// shown: a tab (the next one is drawn beneath) or, with `window`, the
+    /// window. Returns false if there is nothing to show (no animation, or
+    /// the theme has none).
+    pub fn start_close(&mut self, variant: &Variant, window: bool) -> bool {
+        if !self.animation.0 {
+            return false;
+        }
+        let aspect = self.aspect();
+        let Some(plan) = variant.theme.close(variant, &mut self.rng, aspect) else { return false };
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_texture(
+            self.targets.scene.as_image_copy(),
+            self.targets.previous.as_image_copy(),
+            wgpu::Extent3d { width: self.config.width, height: self.config.height, depth_or_array_layers: 1 },
+        );
+        self.queue.submit(Some(encoder.finish()));
+        self.closing = window;
+        self.start(plan, animation::From::PreviousFrame);
+        true
+    }
+
+    /// No transition is running (a closing window may go).
+    pub fn transition_done(&self) -> bool {
+        self.transition.as_ref().is_none_or(|t| t.done(self.now()))
     }
 
     /// Whether something is still moving, so the app keeps redrawing.
@@ -3161,7 +3191,7 @@ impl Renderer {
             time: now,
             speed: self.animation.1,
             progress,
-            _pad0: 0.0,
+            closing: if self.closing { 1.0 } else { 0.0 },
             from_color,
             grid_origin: [pad, top],
             cell: [self.cell_width, self.cell_height],
