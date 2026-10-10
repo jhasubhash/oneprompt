@@ -86,6 +86,10 @@ pub struct Config {
     pub shell_integration: Option<bool>,
     /// Mark commands that failed beside their prompt. Default on.
     pub mark_failures: Option<bool>,
+    /// Stamp commands that ran at least `stamp_after` seconds (default 10)
+    /// when they finish. Default on.
+    pub stamp_long_commands: Option<bool>,
+    pub stamp_after: Option<f32>,
     /// Font settings for every theme (per-theme sections win).
     pub font_family: Option<String>,
     pub font_size: Option<f32>,
@@ -143,6 +147,11 @@ shell_integration = true
 # blood-red ink in Tsushima, a chalk cross on the Chalkboard. Ctrl+C is not a
 # failure.
 mark_failures = true
+# A command that ran a while is stamped when it finishes, so it catches the eye:
+# a seal pressed on in Tsushima, a circled tick on the Chalkboard (a cross if it
+# failed).
+stamp_long_commands = true
+stamp_after = 10             # seconds a command must run to be stamped
 
 # Each theme's variants, set to their built-in values; change any of them.
 # Fonts must be monospace. font_weight snaps to the weights the font has
@@ -280,6 +289,11 @@ impl Config {
             && !(10.0..=100_000.0).contains(&speed)
         {
             return Err(format!("writing_speed {speed} is out of range (10 to 100000)"));
+        }
+        if let Some(after) = self.stamp_after
+            && !(1.0..=86_400.0).contains(&after)
+        {
+            return Err(format!("stamp_after {after} is out of range (1 to 86400)"));
         }
         Ok(())
     }
@@ -574,6 +588,8 @@ mod tests {
         assert_eq!(Config::parse("animation = false").unwrap().animation(), (false, 1.0, 500.0));
         assert_eq!(Config::parse("writing_speed = 120").unwrap().animation().2, 120.0);
         assert!(Config::parse("writing_speed = 1").unwrap_err().contains("out of range"));
+        assert!(Config::parse("stamp_after = 0").unwrap_err().contains("out of range"));
+        assert!(Config::parse("stamp_after = 30\nstamp_long_commands = false").is_ok());
         assert!(Config::parse("theme = \"nope\"").unwrap_err().contains("tsushima"));
         assert!(Config::parse("theme = \"tsushima\"").is_ok());
     }

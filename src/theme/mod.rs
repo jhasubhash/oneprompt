@@ -105,6 +105,16 @@ pub trait Theme: Sync + 'static {
     fn draw_failure(&self, variant: &Variant, ctx: &Ctx, span: &CommandSpan, out: &mut Vec<Shape>) {
         plain_failure(variant, ctx, span, out);
     }
+    /// How long a stamp takes to land (see [`Theme::draw_stamp`]), seconds
+    /// at speed 1.
+    fn stamp_time(&self) -> f32 {
+        0.3
+    }
+    /// Stamps a long command that has finished, just after it on its
+    /// prompt's line (`span.after`); `span.failed` if it failed.
+    fn draw_stamp(&self, variant: &Variant, ctx: &Ctx, span: &CommandSpan, out: &mut Vec<Shape>) {
+        plain_stamp(variant, ctx, span, out);
+    }
 }
 
 impl fmt::Debug for dyn Theme {
@@ -197,7 +207,6 @@ pub fn plain_divider(variant: &Variant, ctx: &Ctx, span: &DividerSpan, out: &mut
 }
 
 /// A finished command, as seen at its prompt (shell integration).
-#[allow(dead_code)] // `after`, `status` and `seconds` are for marks to come.
 #[derive(Clone, Copy, Debug)]
 pub struct CommandSpan {
     /// The margin beside the prompt's line (x, y, w, h), physical pixels:
@@ -205,9 +214,8 @@ pub struct CommandSpan {
     pub margin: [f32; 4],
     /// The cell just after the typed command.
     pub after: [f32; 4],
-    /// The command's exit status, and how long it ran (seconds).
-    pub status: i32,
-    pub seconds: f32,
+    /// The command failed (a non-zero status other than Ctrl+C's).
+    pub failed: bool,
     /// How far the mark has been drawn in, 0..1, and seconds since it
     /// began at speed 1 (infinite with animations off).
     pub progress: f32,
@@ -222,6 +230,15 @@ pub fn plain_failure(variant: &Variant, ctx: &Ctx, span: &CommandSpan, out: &mut
     let [x, y, w, h] = span.margin;
     let t = (3.0 * ctx.scale).min(w * 0.5);
     out.push(Shape::new(x + (w - t) / 2.0, y + h * 0.1, t, h * 0.8 * span.progress, variant.palette[1], 0.9));
+}
+
+/// The plain stamp: a ring in the cursor colour after the command (the
+/// palette's red if it failed), landing from a little larger.
+pub fn plain_stamp(variant: &Variant, ctx: &Ctx, span: &CommandSpan, out: &mut Vec<Shape>) {
+    let [x, y, w, h] = span.after;
+    let r = h * 0.42 * (1.4 - 0.4 * span.progress);
+    let rgb = if span.failed { variant.palette[1] } else { variant.cursor };
+    out.push(Shape::round(RING, x + w * 1.5, y + h * 0.5, r, rgb, 0.9 * span.progress).stroke(2.0 * ctx.scale));
 }
 
 /// One struck-out name on screen.

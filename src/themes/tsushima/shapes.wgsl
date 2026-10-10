@@ -9,6 +9,10 @@
 //   cut    the long cut dividing two panes, end to end along the box
 //          (params.y = how far it has been drawn, params.z = 1 when it runs
 //          up and down, params.w = seed)
+//   seal   a hanko pressed onto the paper, filling the box (params.y = how
+//          far it has come down, 0..1: it prints fully once it lands;
+//          params.z = 1 for a failed command's empty, slashed seal;
+//          params.w = seed)
 
 fn theme_shape(s: ShapeIn) -> vec4<f32> {
     let kind = u32(s.params.x + 0.5);
@@ -20,6 +24,9 @@ fn theme_shape(s: ShapeIn) -> vec4<f32> {
     }
     if (kind == 18u) {
         return cut(s);
+    }
+    if (kind == 19u) {
+        return seal(s);
     }
     return vec4<f32>(0.0);
 }
@@ -123,4 +130,57 @@ fn cut(in: ShapeIn) -> vec4<f32> {
     let span = smoothstep(0.08, 0.2, t) * (1.0 - smoothstep(0.7, 0.9, t)) * tip;
     let hair = clamp(0.5 - (abs(across - hairline) - 0.35 * s), 0.0, 1.0) * span * 0.55;
     return vec4<f32>(in.color.rgb, in.color.a * max(alpha, hair));
+}
+
+// A seal pressed onto the paper: a square of seal ink with softly rounded,
+// uneven corners and a border, its characters carved out of it (made up
+// from the seed: a few strokes across and down inside the border), the ink
+// thin where the paper's tooth missed it. Until it lands it is only a
+// shadow of itself. A failed command's seal is empty, a slash through it.
+fn seal(in: ShapeIn) -> vec4<f32> {
+    let seed = vec2<f32>(in.params.w * 7.31, in.params.w * 3.17);
+    let landed = in.params.y >= 1.0;
+    let failed = in.params.z > 0.5;
+    let size = max(in.size, vec2<f32>(1.0));
+    let p = in.local - size * 0.5;
+    let half = size * 0.44;
+    let r = size.x * 0.1;
+    let q = abs(p) - half + r;
+    var d = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
+    d += (noise(in.local * 0.35 + seed) - 0.5) * size.x * 0.05;
+    var ink = clamp(0.5 - d, 0.0, 1.0);
+    let border = size.x * 0.08;
+    let inner = d + border * 1.6;
+    if (failed) {
+        // An empty frame, slashed corner to corner.
+        let frame = clamp(0.5 - (abs(d + border * 0.5) - border * 0.5), 0.0, 1.0);
+        let along = (p.x + p.y) * 0.7071;
+        let slash = clamp(0.5 - (abs((p.x - p.y) * 0.7071) - border * 0.6), 0.0, 1.0)
+            * step(abs(along), size.x * 0.4);
+        ink = max(frame, slash);
+    } else if (inner < 0.0) {
+        // Carved strokes, in paper: three across and two down, of lengths
+        // made up from the seed, on the seal's inner square.
+        let u = (p / (half - border * 1.6) + 1.0) * 0.5;
+        let width = 0.11;
+        var carved = 0.0;
+        for (var k = 0; k < 3; k++) {
+            let row = 0.2 + f32(k) * 0.3;
+            let first = hash(seed + vec2<f32>(f32(k), 1.0)) * 0.3;
+            let last = 1.0 - hash(seed + vec2<f32>(f32(k), 2.0)) * 0.3;
+            carved = max(carved, step(abs(u.y - row), width * 0.5) * step(first, u.x) * step(u.x, last));
+        }
+        for (var k = 0; k < 2; k++) {
+            let col = 0.3 + f32(k) * 0.4 + (hash(seed + vec2<f32>(f32(k), 3.0)) - 0.5) * 0.15;
+            let first = hash(seed + vec2<f32>(f32(k), 4.0)) * 0.4;
+            carved = max(carved, step(abs(u.x - col), width * 0.5) * step(first, u.y));
+        }
+        ink *= 1.0 - carved;
+    }
+    // The paper's tooth: specks and patches where the ink did not take.
+    let tooth = smoothstep(0.62, 0.8, noise(in.local * 0.6 + seed * 1.9)) * 0.7
+        + step(0.93, hash(floor(in.local * 0.8) + seed)) * 0.5;
+    ink *= 1.0 - clamp(tooth, 0.0, 0.85);
+    let strength = select(0.55, 1.0, landed);
+    return vec4<f32>(in.color.rgb, in.color.a * ink * strength);
 }

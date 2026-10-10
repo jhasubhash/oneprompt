@@ -593,6 +593,8 @@ pub struct Renderer {
     commands: HashMap<u64, HashMap<u64, (Finished, f32)>>,
     marks_until: f32,
     mark_failures: bool,
+    /// Commands that ran at least this long get a stamp; None: none do.
+    stamp_after: Option<f32>,
     /// Whether struck names fling blood.
     splatter: bool,
     /// Every pane's grid and writing state, by pane id, and the one being
@@ -804,6 +806,7 @@ impl Renderer {
             commands: HashMap::new(),
             marks_until: f32::NEG_INFINITY,
             mark_failures: true,
+            stamp_after: Some(10.0),
             splatter: true,
             panes: HashMap::new(),
             pane: 0,
@@ -1057,9 +1060,11 @@ impl Renderer {
         self.splatter = splatter;
     }
 
-    /// Which marks commands get beside their prompts.
-    pub fn set_command_marks(&mut self, failures: bool) {
+    /// Which marks commands get at their prompts: failures beside them,
+    /// and a stamp after the ones that ran at least `stamp_after` seconds.
+    pub fn set_command_marks(&mut self, failures: bool, stamp_after: Option<f32>) {
         self.mark_failures = failures;
+        self.stamp_after = stamp_after;
     }
 
     /// Command `n` in pane `pane` ended (shell integration).
@@ -2764,35 +2769,44 @@ impl Renderer {
                 overlay.push(Shape::new(cell_x(col), y, cw * len as f32, (ch * 0.07).max(1.0), variant.cursor, 1.0));
             }
         }
-        // Commands marked beside their prompts, as the theme marks them.
-        if self.mark_failures
-            && let Some(commands) = self.commands.get(&self.pane)
-        {
+        // Commands marked at their prompts, as the theme marks them: a
+        // failure beside it, a stamp after a long one.
+        if let Some(commands) = self.commands.get(&self.pane) {
             let now = self.now();
-            let time = variant.theme.mark_time().max(1e-3) / self.animation.1;
+            let speed = self.animation.1;
             let margin_x = self.pane_rect[0];
-            for (&n, &(line, end)) in &prompts {
-                let Some(&(finished, heard)) = commands.get(&n) else { continue };
-                if !finished.failed() {
-                    continue;
-                }
-                self.marks_until = self.marks_until.max(heard + time + MARK_LINGER / self.animation.1);
-                let (progress, age) = if self.animation.0 {
-                    (((now - heard) / time).clamp(0.0, 1.0), (now - heard) * self.animation.1)
+            let mut marks_until = self.marks_until;
+            let timing = |heard: f32, time: f32, until: &mut f32| {
+                let time = time.max(1e-3) / speed;
+                *until = until.max(heard + time + MARK_LINGER / speed);
+                if self.animation.0 {
+                    (((now - heard) / time).clamp(0.0, 1.0), (now - heard) * speed)
                 } else {
                     (1.0, f32::INFINITY)
-                };
-                let span = CommandSpan {
+                }
+            };
+            for (&n, &(line, end)) in &prompts {
+                let Some(&(finished, heard)) = commands.get(&n) else { continue };
+                let failed = finished.failed();
+                let stamped = self.stamp_after.is_some_and(|after| finished.seconds >= after);
+                let mut span = CommandSpan {
                     margin: [margin_x, cell_y(line), (pad - margin_x).max(1.0), ch],
                     after: [cell_x(end.min(columns.saturating_sub(1))), cell_y(line), cw, ch],
-                    status: finished.status,
-                    seconds: finished.seconds,
-                    progress,
-                    age,
+                    failed,
+                    progress: 1.0,
+                    age: f32::INFINITY,
                     seed: (n as f32 * 7.77) % 101.0,
                 };
-                variant.theme.draw_failure(variant, &ctx, &span, &mut overlay);
+                if failed && self.mark_failures {
+                    (span.progress, span.age) = timing(heard, variant.theme.mark_time(), &mut marks_until);
+                    variant.theme.draw_failure(variant, &ctx, &span, &mut overlay);
+                }
+                if stamped {
+                    (span.progress, span.age) = timing(heard, variant.theme.stamp_time(), &mut marks_until);
+                    variant.theme.draw_stamp(variant, &ctx, &span, &mut overlay);
+                }
             }
+            self.marks_until = marks_until;
         }
         self.ink_rects.extend(overlay);
         if chrome {

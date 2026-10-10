@@ -370,6 +370,23 @@ pub fn items(config: &Config, variant: &Variant, fonts: &Fonts) -> Vec<Item> {
         Control::Toggle(config.mark_failures.unwrap_or(true)),
         "mark_failures",
     ));
+    items.push(top(
+        "Stamp long commands",
+        "A command that ran a while is stamped when it finishes.",
+        Control::Toggle(config.stamp_long_commands.unwrap_or(true)),
+        "stamp_long_commands",
+    ));
+    let mut after = Row::new(
+        "Stamp after",
+        "Seconds a command must run to be stamped.",
+        slider(config.stamp_after.unwrap_or(10.0), 2.0, 120.0),
+        None,
+        "stamp_after",
+    );
+    if let Control::Slider { step, .. } = &mut after.control {
+        *step = 1.0;
+    }
+    items.push(Item::Row(after));
     items
 }
 

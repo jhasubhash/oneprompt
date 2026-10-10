@@ -25,6 +25,10 @@ pub struct Tsushima;
 const DAB: f32 = CUSTOM;
 const SLASH: f32 = CUSTOM + 1.0;
 const CUT: f32 = CUSTOM + 2.0;
+const SEAL: f32 = CUSTOM + 3.0;
+/// A seal comes down onto the paper this fast, and shakes this long.
+const STAMP_TIME: f32 = 0.22;
+const THUD_TIME: f32 = 0.28;
 /// A new divider between panes is cut in this fast, at speed 1.
 const CUT_TIME: f32 = 0.32;
 
@@ -264,6 +268,27 @@ impl Theme for Tsushima {
 
     fn mark_time(&self) -> f32 {
         FAILURE_TIME
+    }
+
+    fn stamp_time(&self) -> f32 {
+        STAMP_TIME
+    }
+
+    /// A long command is sealed when it finishes: a hanko in seal ink comes
+    /// down after it, lands with a thud that jolts it a little, and leaves
+    /// its carved strokes in the paper. A failed one is an empty seal with a
+    /// slash through it.
+    fn draw_stamp(&self, v: &Variant, _ctx: &Ctx, span: &CommandSpan, out: &mut Vec<Shape>) {
+        let [x, y, w, h] = span.after;
+        let falling = span.progress * span.progress;
+        let size = h * 1.2 * (1.0 + 0.45 * (1.0 - falling));
+        let thud = ((span.age - STAMP_TIME) / THUD_TIME).clamp(0.0, 1.0);
+        let shake = if span.progress >= 1.0 && thud < 1.0 { (thud * 40.0).sin() * (1.0 - thud) * h * 0.06 } else { 0.0 };
+        let (cx, cy) = (x + w + h * 0.6 + shake, y + h * 0.5);
+        let alpha = if span.progress < 1.0 { 0.25 + 0.5 * falling } else { 0.92 };
+        let mut seal = Shape::new(cx - size / 2.0, cy - size / 2.0, size, size, v.cursor, alpha);
+        seal.params = [SEAL, span.progress, if span.failed { 1.0 } else { 0.0 }, span.seed];
+        out.push(seal);
     }
 
     /// A failed command gets a stroke of seal ink down the margin beside its

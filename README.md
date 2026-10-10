@@ -104,6 +104,11 @@ light or dark palette.
   Tsushima drags a stroke of seal ink down the margin and a drop of it runs and dries;
   Chalkboard chalks a red cross. Ctrl+C (status 130) is not a failure. It needs shell
   integration (below); `mark_failures = false` turns it off.
+- **Long commands are stamped**: when a command that ran at least `stamp_after` seconds
+  (10) finishes, it is stamped after the command on its line, so a finished build catches
+  the eye. Tsushima brings a hanko down onto the paper with a thud, its characters
+  carved out of the seal ink (an empty, slashed seal if it failed); Chalkboard circles it
+  and ticks it (a cross if it failed). `stamp_long_commands = false` turns it off.
 - `animation = false` turns it off, `animation_speed` scales it. The app only redraws while
   something is moving.
 
@@ -137,7 +142,8 @@ another theme). A theme implements the `Theme` trait:
 - **Events**: `reveal` (the window opens), `switch` (switching to it, from its other
   variant or another theme), `cursor`, `strike` / `draw_strike` (a deleted name),
   `draw_divider` (the line between split panes, drawn in when the split is made), and
-  `mark_time` / `draw_failure` (a command that failed, beside its prompt).
+  `mark_time` / `draw_failure` (a command that failed, beside its prompt) and
+  `stamp_time` / `draw_stamp` (a long command that finished).
 
 Adding a theme is a folder with a `mod.rs` and its shaders, and a line in
 `src/themes/mod.rs`. CONTRIBUTING.md has the details.
@@ -256,6 +262,8 @@ strike_deleted = true         # strike out names of deleted files on screen
 strike_splatter = true        # with the theme's extras (blood, chalk dust)
 shell_integration = true      # the shell marks its prompts (new shells)
 mark_failures = true          # mark failed commands beside their prompt
+stamp_long_commands = true    # stamp commands that ran a while when they finish
+stamp_after = 10              # seconds a command must run to be stamped
 option_as_meta = "left"       # left | both | none
 seed = 11                     # pin the paper; unset = new sheet each session
 

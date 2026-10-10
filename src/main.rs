@@ -1043,7 +1043,8 @@ impl App {
             r.set_animation(enabled && self.snapshot_dir.is_none(), speed, writing_speed);
             r.set_harmonize(config.harmonize_colors.unwrap_or(true));
             r.set_splatter(config.strike_splatter.unwrap_or(true));
-            r.set_command_marks(config.mark_failures.unwrap_or(true));
+            let stamp_after = config.stamp_long_commands.unwrap_or(true).then(|| config.stamp_after.unwrap_or(10.0));
+            r.set_command_marks(config.mark_failures.unwrap_or(true), stamp_after);
         }
         // ONEPROMPT_SEED (used for screenshots) wins over the file.
         if std::env::var_os("ONEPROMPT_SEED").is_none()

@@ -9,7 +9,7 @@
 
 use crate::theme::{
     self, CommandSpan, ControlStyle, Controls, Ctx, Cursor, CursorKind, DividerSpan, Param, Plan, Rng, Shape, Shaders,
-    Strike, StrikeSpan, Theme, Variant, CUSTOM, DISC,
+    Strike, StrikeSpan, Theme, Variant, CUSTOM, DISC, RING,
 };
 
 pub static CHALKBOARD: Chalkboard = Chalkboard;
@@ -23,6 +23,8 @@ const RULE: f32 = CUSTOM + 2.0;
 const STROKE: f32 = CUSTOM + 3.0;
 /// A failed command's cross, both strokes, at speed 1.
 const CROSS_TIME: f32 = 0.4;
+/// A long command's circled tick, at speed 1.
+const TICK_TIME: f32 = 0.55;
 /// A new divider between panes is ruled in this fast, at speed 1.
 const RULE_TIME: f32 = 0.45;
 
@@ -236,6 +238,43 @@ impl Theme for Chalkboard {
                 stroke.params[2] = flip;
                 stroke.params[3] = span.seed + i * 3.1;
                 out.push(stroke);
+            }
+        }
+    }
+
+    fn stamp_time(&self) -> f32 {
+        TICK_TIME
+    }
+
+    /// A long command gets a circle chalked after it when it finishes, then
+    /// a tick in it (a cross if it failed), as a teacher marks work.
+    fn draw_stamp(&self, v: &Variant, ctx: &Ctx, span: &CommandSpan, out: &mut Vec<Shape>) {
+        let [x, y, w, h] = span.after;
+        let size = h * 1.05;
+        let (left, top) = (x + w + h * 0.15, y + (h - size) / 2.0);
+        let rgb = if span.failed { v.palette[1] } else { v.palette[2] };
+        let ring = (span.progress * 2.0).clamp(0.0, 1.0);
+        let r = size * 0.48;
+        out.push(Shape::round(RING, left + size / 2.0, top + size / 2.0, r, rgb, 0.85 * ring).stroke(2.2 * ctx.scale).rough(0.12, span.seed));
+        let mark = (span.progress * 2.0 - 1.0).clamp(0.0, 1.0);
+        let stroke = |bx: f32, by: f32, bw: f32, bh: f32, up: bool, progress: f32, seed: f32| {
+            let mut s = Shape::new(left + bx * size, top + by * size, bw * size, bh * size, rgb, 0.95).kind(STROKE);
+            s.params[1] = progress;
+            s.params[2] = if up { 1.0 } else { 0.0 };
+            s.params[3] = seed;
+            s
+        };
+        if mark > 0.0 {
+            if span.failed {
+                out.push(stroke(0.22, 0.22, 0.56, 0.56, false, (mark * 2.0).min(1.0), span.seed));
+                if mark > 0.5 {
+                    out.push(stroke(0.22, 0.22, 0.56, 0.56, true, mark * 2.0 - 1.0, span.seed + 1.0));
+                }
+            } else {
+                out.push(stroke(0.18, 0.42, 0.3, 0.3, false, (mark * 3.0).min(1.0), span.seed));
+                if mark > 0.33 {
+                    out.push(stroke(0.36, 0.14, 0.5, 0.6, true, (mark * 1.5 - 0.5).min(1.0), span.seed + 1.0));
+                }
             }
         }
     }
