@@ -81,7 +81,7 @@ const SECTIONS: &[(&str, &str, &[&str])] = &[
     ("Effects", "closing, clearing, idle", &["close_effect", "clear_effect", "idle_scene", "idle_after", "show_progress"]),
     ("Commands", "the shell's prompts, marked", &["shell_integration", "mark_failures", "stamp_long_commands", "stamp_after"]),
     ("Sound", "", &["sounds", "sound_volume"]),
-    ("Terminal", "", &["harmonize_colors", "option_as_meta", "strike_deleted", "strike_splatter"]),
+    ("Terminal", "", &["harmonize_colors", "grey_backgrounds", "option_as_meta", "strike_deleted", "strike_splatter"]),
 ];
 
 /// `items` with the sections in `open` open and the others closed: a closed
@@ -498,6 +498,12 @@ pub fn items(config: &Config, variant: &Variant, fonts: &Fonts) -> Vec<Item> {
         "Turn colours programs pick for a black screen into inks that read on this one.",
         Control::Toggle(config.harmonize_colors.unwrap_or(true)),
         "harmonize_colors",
+    ));
+    items.push(top(
+        "Grey backgrounds",
+        "Show the grey bands programs draw behind text (Claude Code's messages).",
+        Control::Toggle(config.grey_backgrounds.unwrap_or(false)),
+        "grey_backgrounds",
     ));
     let meta = match config.option_as_meta {
         OptionAsMeta::Left => "left",

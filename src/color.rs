@@ -17,6 +17,16 @@ const CHROMA: f32 = 0.8;
 const INK_TINT: f32 = 0.12;
 
 /// A program's text colour, as ink on this theme's surface.
+/// A grey, near enough: no hue to speak of (OKLab chroma). Programs draw
+/// panels in these (Claude Code's message bands) for a plain screen.
+pub fn is_neutral(rgb: [u8; 3]) -> bool {
+    let [_, a, b] = to_oklab(rgb);
+    (a * a + b * b).sqrt() < NEUTRAL_CHROMA
+}
+
+/// Below this OKLab chroma a colour reads as grey.
+const NEUTRAL_CHROMA: f32 = 0.025;
+
 pub fn ink(rgb: [u8; 3], theme: &Variant) -> [u8; 3] {
     let (lo, hi) = if theme.dark { DARK_SHEET } else { LIGHT_SHEET };
     let [l, a, b] = to_oklab(rgb);
@@ -73,6 +83,12 @@ mod tests {
 
     fn lightness(rgb: [u8; 3]) -> f32 {
         to_oklab(rgb)[0]
+    }
+
+    #[test]
+    fn greys_are_neutral_colours_are_not() {
+        assert!(is_neutral([55, 55, 55]) && is_neutral([240, 240, 238]) && is_neutral([120, 118, 122]));
+        assert!(!is_neutral([170, 40, 40]) && !is_neutral([40, 120, 60]) && !is_neutral([200, 180, 120]));
     }
 
     #[test]

@@ -87,8 +87,11 @@ The 16 ANSI colours come from the theme. Programs that pick exact colours instea
 (24-bit truecolor or the 256-colour cube: Claude Code, bat, delta, ...) choose them for a
 plain black screen, so on parchment their light greys vanish. oneprompt keeps their hue
 but moves their lightness into the range ink can have on the sheet (in OKLab, `color.rs`):
-dark inks on light parchment, light inks on the ink field; their backgrounds (prompt rows,
-highlighted lines) become thin translucent washes, so the paper shows through. `harmonize_colors = false` shows them exactly as sent. Colour queries (OSC 4, 10,
+dark inks on light parchment, light inks on the ink field; their
+coloured backgrounds (diff lines, highlights) become thin translucent washes, so the paper
+shows through, and grey ones (Claude Code's message bands) are left out altogether
+(`grey_backgrounds = true` keeps them as washes). `harmonize_colors = false` shows them
+exactly as sent. Colour queries (OSC 4, 10,
 11, 12) are answered with the theme's real colours, so programs that check can pick their
 light or dark palette.
 
@@ -345,6 +348,7 @@ animation = true              # hand-written text, window reveals
 animation_speed = 1.0
 writing_speed = 500           # characters per second for output
 harmonize_colors = true       # program-chosen colours as inks on the sheet
+grey_backgrounds = false      # grey bands programs draw (Claude Code's messages): hidden
 strike_deleted = true         # strike out names of deleted files on screen
 strike_splatter = true        # with the theme's extras (blood, chalk dust)
 ink_drying = true             # fresh ink looks wet, then dries

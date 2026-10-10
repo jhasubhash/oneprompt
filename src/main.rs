@@ -1142,6 +1142,7 @@ impl App {
         if let Some(r) = self.renderer.as_mut() {
             r.set_animation(enabled && self.snapshot_dir.is_none(), speed, writing_speed);
             r.set_harmonize(config.harmonize_colors.unwrap_or(true));
+            r.set_grey_panels(config.grey_backgrounds.unwrap_or(false));
             r.set_splatter(config.strike_splatter.unwrap_or(true));
             let stamp_after = config.stamp_long_commands.unwrap_or(true).then(|| config.stamp_after.unwrap_or(10.0));
             r.set_command_marks(config.mark_failures.unwrap_or(true), stamp_after);

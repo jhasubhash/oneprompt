@@ -75,6 +75,9 @@ pub struct Config {
     /// Map colours programs pick themselves (truecolor, 256-colour) onto the
     /// sheet as inks. Default on.
     pub harmonize_colors: Option<bool>,
+    /// Grey backgrounds programs draw behind text (Claude Code's message
+    /// bands) are shown; by default the paper shows through. Default off.
+    pub grey_backgrounds: Option<bool>,
     /// Strike out names of files and folders deleted while on screen.
     /// Default on.
     pub strike_deleted: Option<bool>,
@@ -163,6 +166,9 @@ writing_speed = 500
 # for a plain black screen. This keeps their hues but turns them into inks
 # that read on the sheet. false shows them exactly as sent.
 harmonize_colors = true
+# Grey bands programs draw behind text (Claude Code's messages) are left out
+# with harmonize_colors, so the paper shows through; true shows them as washes.
+grey_backgrounds = false
 
 # When a file or folder named on screen is deleted (rm, a script, the
 # Finder, ...), every mention of it is struck through, as the theme does it.

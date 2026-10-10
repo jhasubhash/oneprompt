@@ -613,6 +613,9 @@ pub struct Renderer {
     commands: HashMap<u64, HashMap<u64, (Finished, f32)>>,
     marks_until: f32,
     mark_failures: bool,
+    /// Grey backgrounds programs choose are drawn (as washes) instead of
+    /// left out.
+    grey_panels: bool,
     /// Commands that ran at least this long get a stamp; None: none do.
     stamp_after: Option<f32>,
     /// Seconds fresh ink looks wet (0: never), and how far old ink fades.
@@ -870,6 +873,7 @@ impl Renderer {
             commands: HashMap::new(),
             marks_until: f32::NEG_INFINITY,
             mark_failures: true,
+            grey_panels: false,
             stamp_after: Some(10.0),
             ink_life: (4.0, 0.3),
             idle_after: Some(60.0),
@@ -1244,6 +1248,11 @@ impl Renderer {
         if commands.len() > MAX_COMMANDS {
             commands.retain(|&k, _| k + MAX_COMMANDS as u64 / 2 > n);
         }
+    }
+
+    /// Whether grey backgrounds programs choose are drawn.
+    pub fn set_grey_panels(&mut self, on: bool) {
+        self.grey_panels = on;
     }
 
     pub fn set_harmonize(&mut self, harmonize: bool) {
@@ -3117,6 +3126,11 @@ impl Renderer {
             if self.harmonize {
                 if program_chosen(indexed.cell.fg) {
                     fg = color::ink(fg, variant);
+                }
+                // A grey band a program lays behind text (Claude Code's
+                // messages) is for a plain screen; here the paper is it.
+                if program_chosen(indexed.cell.bg) && !flags.contains(Flags::INVERSE) && !self.grey_panels && bg.is_some_and(color::is_neutral) {
+                    bg = None;
                 }
                 if program_chosen(indexed.cell.bg) && !flags.contains(Flags::INVERSE) {
                     // A translucent tint of the program's hue, inked for the
