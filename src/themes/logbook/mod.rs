@@ -10,7 +10,8 @@
 //! blot; a failed command gets a cross in the margin, a long one a wax seal.
 
 use crate::theme::{
-    self, CommandSpan, ControlStyle, Controls, Ctx, DividerSpan, Param, Plan, Rng, Shape, Shaders, Sound, SoundEvent,
+    self, CommandSpan, ControlStyle, Controls, Ctx, DividerSpan, Entrance, PanelSpan, Param, Plan, Rng, Shape, Shaders,
+    Sound, SoundEvent,
     Strike, StrikeSpan, Theme, Variant, CUSTOM, DISC,
 };
 
@@ -218,8 +219,10 @@ impl Theme for Logbook {
         Some(Plan { duration: CLEAR_TIME, ease: 1.1, data: theme::bytes(&data) })
     }
 
-    /// A closed pane's page is torn out: a ragged tear runs across it and
-    /// the two pieces are pulled apart and away.
+    /// A closed pane's page is torn out of the log, as a page is torn from a
+    /// notebook: the tear runs down along the binding at its left, top first,
+    /// the page swinging away as it goes, then it comes free and falls off;
+    /// a ragged stub stays at the binding for a moment.
     fn close_pane(&self, _v: &Variant, rng: &mut Rng, _aspect: f32, area: [f32; 4]) -> Option<Plan> {
         let data = PlanData {
             way: if rng.unit() < 0.5 { 1.0 } else { -1.0 },
@@ -309,6 +312,28 @@ impl Theme for Logbook {
         let mut seal = Shape::new(cx - size / 2.0, cy - size / 2.0, size, size, wax, 0.35 + 0.6 * pressed);
         seal.params = [SEAL, span.progress, if span.failed { 1.0 } else { 0.0 }, span.seed];
         out.push(seal);
+    }
+
+    /// The settings panel is a page turned over onto the log, from the right.
+    fn panel_entrance(&self) -> (Entrance, f32) {
+        (Entrance::Turn, 0.6)
+    }
+
+    /// The turning page's fold: the curl of its back just beyond the fold,
+    /// paler paper narrowing as the page comes flat, and its shadow falling
+    /// on the page beneath.
+    fn draw_panel_edge(&self, v: &Variant, ctx: &Ctx, span: &PanelSpan, out: &mut Vec<Shape>) {
+        let [_, y, _, h] = span.panel;
+        let s = ctx.scale;
+        let x = span.edge;
+        let curl = 34.0 * s * (1.0 - span.progress) + 4.0 * s;
+        let back = if v.dark { [96, 74, 54] } else { [246, 238, 220] };
+        for k in 0..6 {
+            let t = k as f32 / 6.0;
+            out.push(Shape::new(x - curl * 0.6 * (t + 0.15), y, curl * 0.6 / 6.0 + 1.0, h, [0, 0, 0], 0.16 * (1.0 - t)));
+        }
+        out.push(Shape::new(x, y, curl, h, back, 1.0));
+        out.push(Shape::new(x + curl * 0.55, y, curl * 0.45, h, [0, 0, 0], 0.08));
     }
 
     /// The quill scratching as you type and as it marks, the seal pressed

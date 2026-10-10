@@ -150,6 +150,14 @@ pub trait Theme: Sync + 'static {
     fn draw_progress(&self, variant: &Variant, ctx: &Ctx, span: &ProgressSpan, out: &mut Vec<Shape>) {
         plain_progress(variant, ctx, span, out);
     }
+    /// How the settings panel comes in, and in how long (seconds at speed
+    /// 1). The default slides it in from the right.
+    fn panel_entrance(&self) -> (Entrance, f32) {
+        (Entrance::Slide, 0.25)
+    }
+    /// Draws what is at the panel's moving edge as it comes in (see
+    /// [`PanelSpan`]): a roller, a page's curl, a frame. Nothing by default.
+    fn draw_panel_edge(&self, _variant: &Variant, _ctx: &Ctx, _span: &PanelSpan, _out: &mut Vec<Shape>) {}
     /// The sound that goes with `event` (when sounds are on); None: none.
     fn sound(&self, _event: SoundEvent) -> Option<Sound> {
         None
@@ -291,6 +299,30 @@ pub fn plain_stamp(variant: &Variant, ctx: &Ctx, span: &CommandSpan, out: &mut V
     let r = h * 0.42 * (1.4 - 0.4 * span.progress);
     let rgb = if span.failed { variant.palette[1] } else { variant.cursor };
     out.push(Shape::round(RING, x + w * 1.5, y + h * 0.5, r, rgb, 0.9 * span.progress).stroke(2.0 * ctx.scale));
+}
+
+/// How the settings panel comes in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Entrance {
+    /// Unrolled from the top down, like a hanging scroll.
+    Unroll,
+    /// Slid in from the right.
+    Slide,
+    /// Turned in from the right edge like a page, its fold moving left.
+    Turn,
+}
+
+/// The settings panel as it comes in.
+#[derive(Clone, Copy, Debug)]
+pub struct PanelSpan {
+    /// Where the panel is (x, y, w, h), physical pixels: where it will be
+    /// (Unroll, Turn), or where it has got to (Slide).
+    pub panel: [f32; 4],
+    /// The moving edge: the bottom of what has unrolled (y), the fold (x),
+    /// or the panel's left side (x).
+    pub edge: f32,
+    /// How far in it is, 0..1, eased.
+    pub progress: f32,
 }
 
 /// How a program's progress stands.

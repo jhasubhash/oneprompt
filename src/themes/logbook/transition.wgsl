@@ -117,45 +117,61 @@ fn burnt(px: vec2<f32>, now: vec4<f32>, before: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(rgb, 1.0);
 }
 
-// Closing a pane: its page is torn out. A ragged tear runs across it (at
-// `tilt`), its edges pale and fibrous where the paper parted; the two
-// pieces are pulled apart, one up and away, one down and away, and fall,
-// the panes taking its place beneath. The old pane is in `previous`.
+// Closing a pane: its page is torn out of the log the way a page is torn
+// from a notebook. The tear runs down a ragged line just inside the pane's
+// left edge (the binding), top first; as it goes the page swings away from
+// its bottom corner, and once free it falls off to the right, turning. The
+// torn edges are pale and fibrous; a ragged stub stays at the binding, and
+// fades as the pane goes. The panes taking its place show beneath.
 fn torn(px: vec2<f32>, now: vec4<f32>) -> vec4<f32> {
     let res = frame.resolution;
     let aspect = res.x / res.y;
     let area = plan.area;
     let t = frame.progress;
     let p = px / res.y;
-    let centre = (area.xy + area.zw * 0.5) * vec2<f32>(aspect, 1.0);
-    let dir = vec2<f32>(cos(plan.tilt), sin(plan.tilt));
-    let n = vec2<f32>(-dir.y, dir.x);
     let lo = area.xy * vec2<f32>(aspect, 1.0);
     let hi = (area.xy + area.zw) * vec2<f32>(aspect, 1.0);
     let seed = vec2<f32>(plan.seed, plan.seed * 0.37);
-    // How far the tear has run along its line, then the pull apart.
-    let run = clamp(t / 0.3, 0.0, 1.0);
-    let pull = clamp((t - 0.25) / 0.75, 0.0, 1.0);
+    let span = hi - lo;
+    let binding = lo.x + span.x * 0.045;
+    // The tear's line at height y: wandering, with fine fibres.
+    let tear_x = binding;
+    let tear = clamp(t / 0.5, 0.0, 1.0);
+    let front = mix(lo.y, hi.y, tear * tear * (3.0 - 2.0 * tear));
+    let fly = clamp((t - 0.45) / 0.55, 0.0, 1.0);
+    // The page swings about its bottom corner at the binding while it
+    // tears, then falls away to the right, turning faster.
+    let pivot = vec2<f32>(binding, hi.y);
+    let angle = 0.16 * tear + 0.9 * fly * fly;
+    let shift = vec2<f32>(span.x * 0.9 * fly * fly, span.y * 0.5 * fly * fly * fly);
+    let src = rotate(p - pivot - shift, -angle) + pivot;
     var color = now;
-    for (var k = 0; k < 2; k++) {
-        let side = select(-1.0, 1.0, k == 1);
-        let shift = n * side * pull * 0.06 + dir * side * plan.way * pull * 0.05 + vec2<f32>(0.0, pull * pull * pull * 1.4 * select(0.6, 1.0, k == 1));
-        let src = p - shift;
-        let r = src - centre;
-        let along = dot(r, dir);
-        // The tear's ragged line: big wanders and fine fibres.
-        let line = (fbm(vec2<f32>(along * 9.0, 0.0) + seed) - 0.5) * 0.05 + (noise(vec2<f32>(along * 90.0, 3.0) + seed) - 0.5) * 0.006;
-        let across = dot(r, n) - line;
-        let on_side = across * side >= 0.0;
-        let in_pane = all(src >= lo) && all(src <= hi);
-        if (on_side && in_pane) {
-            var c = textureLoad(previous, vec2<i32>(clamp(src * res.y, vec2<f32>(0.0), res - 1.0)), 0).rgb;
-            // The torn edge: pale fibres where the paper parted.
-            let fibre = 1.0 - smoothstep(0.0, 0.005 + 0.004 * noise(vec2<f32>(along * 140.0, 0.0) + seed), abs(across));
-            let opened = max(pull, step(along * plan.way, (run - 0.5) * 3.0));
-            c = mix(c, vec3<f32>(0.97, 0.94, 0.86), fibre * 0.85 * opened);
-            color = vec4<f32>(c * (1.0 - 0.15 * pull), 1.0);
+    // The stub at the binding, left of the tear, where it has torn.
+    let line_here = tear_x + (fbm(vec2<f32>(p.y * 22.0, 0.0) + seed) - 0.5) * span.x * 0.03
+        + (noise(vec2<f32>(p.y * 260.0, 1.0) + seed) - 0.5) * 0.0025;
+    let in_pane = all(p >= lo) && all(p <= hi);
+    let stub_alpha = 1.0 - smoothstep(0.7, 1.0, t);
+    if (in_pane && p.x < line_here) {
+        var c = textureLoad(previous, vec2<i32>(clamp(px, vec2<f32>(0.0), res - 1.0)), 0).rgb;
+        let edge = 1.0 - smoothstep(0.0, 0.0035, line_here - p.x);
+        c = mix(c, vec3<f32>(0.97, 0.94, 0.86), edge * 0.9 * step(p.y, front));
+        color = vec4<f32>(mix(now.rgb, c, stub_alpha), 1.0);
+    }
+    // The page: right of the tear in its own (moving) place.
+    let line_src = tear_x + (fbm(vec2<f32>(src.y * 22.0, 0.0) + seed) - 0.5) * span.x * 0.03
+        + (noise(vec2<f32>(src.y * 260.0, 1.0) + seed) - 0.5) * 0.0025;
+    let page = src.x >= line_src && all(src >= lo) && all(src <= hi);
+    // Where it hasn't torn yet the page is still whole: no gap there.
+    if (page || (in_pane && p.y > front && fly <= 0.0 && p.x >= line_here)) {
+        let at = select(p, src, page);
+        var c = textureLoad(previous, vec2<i32>(clamp(at * res.y, vec2<f32>(0.0), res - 1.0)), 0).rgb;
+        if (page) {
+            let edge = 1.0 - smoothstep(0.0, 0.0035, at.x - line_src);
+            c = mix(c, vec3<f32>(0.97, 0.94, 0.86), edge * 0.9 * step(at.y, front + 0.001));
+            // Lifting off the sheet, the page catches less light.
+            c *= 1.0 - 0.12 * angle;
         }
+        color = vec4<f32>(c, 1.0);
     }
     return color;
 }

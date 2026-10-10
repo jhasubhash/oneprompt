@@ -148,7 +148,8 @@ light or dark palette.
   browning and charring the paper ahead and leaving ash and embers, the next tab showing
   through (closing the window leaves only ash). Chalkboard wipes it off with the eraser.
   Closing a pane: Tsushima slashes it through twice and its four pieces fall away;
-  Logbook tears the page out along a ragged line, its two pieces pulled apart; the
+  Logbook tears the page out of the log as from a notebook, down along the binding, the
+  page swinging away and falling, a ragged stub left behind for a moment; the
   Chalkboard's board slides up or down out of the frame. The panes taking its place show
   beneath. `close_effect = false` closes at once.
 - **Clearing burns the screen away**: Cmd+K, or `clear` (or Ctrl+L) in the shell, sets the
@@ -317,6 +318,13 @@ points the Homebrew cask ([jhasubhash/homebrew-tap](https://github.com/jhasubhas
 at it.
 
 ## Settings
+
+The settings panel comes in the theme's way: Tsushima unrolls it like a hanging scroll on
+a dark wooden roller, Logbook turns it in like a page, the Chalkboard slides it in on its
+rails with the board's wooden frame along its edge. The settings are in sections: the
+theme and appearance always open, the rest (the look on screen, Animation, Ink and paper,
+Effects, Commands, Sound, Terminal) folded until opened with a click on the heading, or
+Return / → on it (← closes). Sections stay as left while the app runs.
 
 Cmd+, (or Settings… in the right-click menu) opens the **settings panel**, a sheet of the
 current theme's own surface down the right of the window, so the terminal stays in view

@@ -87,6 +87,9 @@ struct App {
     picker: Option<usize>,
     /// The settings panel, while it is open.
     settings: Option<SettingsState>,
+    /// The panel's sections that are open (the rest are folded), for as
+    /// long as the app runs.
+    settings_open: std::collections::HashSet<String>,
     /// The settings file as the panel last wrote it, already applied: the
     /// watcher noticing that write has nothing to do.
     written: Option<String>,
@@ -786,9 +789,10 @@ impl App {
         let families = r.monospace_families();
         let weights = r.font_weights(&variant.font_family);
         let items = settings::items(&self.config, &variant, &settings::Fonts { families: &families, weights: &weights });
-        let label = state.items.get(state.focus).and_then(settings::Item::row).map(|row| row.label.clone());
-        state.focus = label
-            .and_then(|label| items.iter().position(|i| i.row().is_some_and(|row| row.label == label)))
+        let items = settings::fold(items, &self.settings_open);
+        let name = state.items.get(state.focus).map(|i| i.name().to_string());
+        state.focus = name
+            .and_then(|name| items.iter().position(|i| i.name() == name))
             .unwrap_or_else(|| settings::first_row(&items));
         state.items = items;
         let path = self.config_path.display().to_string();
@@ -863,6 +867,26 @@ impl App {
         }
         let (focus, shift) = (state.focus, self.mods.shift_key());
         let moved = |by| settings::next_row(&state.items, focus, by);
+        // On a section's heading, Return, Space and the side arrows open and
+        // close it.
+        if let Some(settings::Item::Heading { title, fold: Some(open), .. }) = state.items.get(focus) {
+            let (title, open) = (title.clone(), *open);
+            let to = match &event.logical_key {
+                Key::Named(NamedKey::Enter | NamedKey::Space) => Some(!open),
+                Key::Named(NamedKey::ArrowRight) => Some(true),
+                Key::Named(NamedKey::ArrowLeft) => Some(false),
+                _ => None,
+            };
+            if let Some(to) = to {
+                if to {
+                    self.settings_open.insert(title);
+                } else {
+                    self.settings_open.remove(&title);
+                }
+                self.update_settings();
+                return true;
+            }
+        }
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => self.close_settings(),
             Key::Named(NamedKey::ArrowUp) => state.focus = moved(-1),
@@ -891,6 +915,18 @@ impl App {
         let (hit, inside) = (r.settings_hit(x, y), r.settings_contains(x, y));
         match hit {
             Some(Hit::OpenFile) => self.menu_action(Action::SettingsFile),
+            Some(Hit::Heading(index)) => {
+                if let Some(state) = self.settings.as_mut()
+                    && let Some(settings::Item::Heading { title, .. }) = state.items.get(index)
+                {
+                    let title = title.clone();
+                    state.focus = index;
+                    if !self.settings_open.remove(&title) {
+                        self.settings_open.insert(title);
+                    }
+                }
+                self.update_settings();
+            }
             Some(Hit::Row(index, part)) => match part {
                 Part::Label => {
                     if let Some(state) = self.settings.as_mut() {
@@ -2223,6 +2259,7 @@ fn main() {
         current,
         picker: None,
         settings: None,
+        settings_open: std::collections::HashSet::new(),
         written: None,
         config_error: None,
         ime_area: [0.0; 4],

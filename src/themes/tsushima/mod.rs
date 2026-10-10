@@ -12,7 +12,7 @@ mod brush;
 
 use crate::theme::{
     self, CommandSpan, ControlStyle, Controls, Ctx, Cursor, CursorKind, DividerSpan, IdleSpan, Param, Plan, Rng, Shape,
-    ProgressSpan, ProgressState, Shaders, Sound, SoundEvent, SplashSpan, Strike, StrikeSpan, Theme, Variant, Weather, WeatherSpan, CUSTOM, DISC,
+    Entrance, PanelSpan, ProgressSpan, ProgressState, Shaders, Sound, SoundEvent, SplashSpan, Strike, StrikeSpan, Theme, Variant, Weather, WeatherSpan, CUSTOM, DISC,
 };
 
 use brush::{Brush, PlanData};
@@ -379,6 +379,28 @@ impl Theme for Tsushima {
         // The brush's end, pressed a little wider.
         if span.state != ProgressState::Busy && span.share < 0.999 {
             out.push(Shape::round(DISC, x + from + len, top + thick / 2.0, thick * 0.8, rgb, 0.85 * span.fade).rough(0.5, 3.0));
+        }
+    }
+
+    /// The settings panel unrolls like a hanging scroll, from the top down.
+    fn panel_entrance(&self) -> (Entrance, f32) {
+        (Entrance::Unroll, 0.6)
+    }
+
+    /// The scroll's roller at the bottom of what has unrolled: a rod of dark
+    /// wood across the panel with knobs past its ends, lit along its top,
+    /// and its shadow on the paper above.
+    fn draw_panel_edge(&self, _v: &Variant, ctx: &Ctx, span: &PanelSpan, out: &mut Vec<Shape>) {
+        let [x, _, w, _] = span.panel;
+        let s = ctx.scale;
+        let (rod, light, knob) = ([58, 34, 20], [120, 82, 50], [36, 22, 14]);
+        let thick = 11.0 * s;
+        let y = span.edge;
+        out.push(Shape::new(x, y - thick * 1.4, w, thick * 0.9, [0, 0, 0], 0.18));
+        out.push(Shape::rounded([x + 4.0 * s, y - thick / 2.0, w - 8.0 * s, thick], thick / 2.0, 0.0, rod, 1.0));
+        out.push(Shape::rounded([x + 10.0 * s, y - thick * 0.35, w - 20.0 * s, thick * 0.22], thick * 0.1, 0.0, light, 0.8));
+        for cx in [x + 5.0 * s, x + w - 5.0 * s] {
+            out.push(Shape::round(DISC, cx, y, thick * 0.85, knob, 1.0));
         }
     }
 

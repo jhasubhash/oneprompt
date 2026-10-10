@@ -9,7 +9,7 @@
 
 use crate::theme::{
     self, CommandSpan, ControlStyle, Controls, Ctx, Cursor, CursorKind, DividerSpan, IdleSpan, Param, Plan, Rng, Shape,
-    ProgressSpan, ProgressState, Shaders, Sound, SoundEvent, SplashSpan, Strike, StrikeSpan, Theme, Variant, Weather, WeatherSpan, CUSTOM, DISC,
+    Entrance, PanelSpan, ProgressSpan, ProgressState, Shaders, Sound, SoundEvent, SplashSpan, Strike, StrikeSpan, Theme, Variant, Weather, WeatherSpan, CUSTOM, DISC,
     RING,
 };
 
@@ -311,6 +311,25 @@ impl Theme for Chalkboard {
         line.params[1] = 1.0;
         line.params[3] = 11.0;
         out.push(line);
+    }
+
+    /// The settings panel slides in from the right on its rails, like a
+    /// sliding board, heavily, settling as it stops.
+    fn panel_entrance(&self) -> (Entrance, f32) {
+        (Entrance::Slide, 0.5)
+    }
+
+    /// The board's wooden frame along its leading edge, with a chalk tray
+    /// at the bottom, and the frame's shadow on what is behind.
+    fn draw_panel_edge(&self, v: &Variant, ctx: &Ctx, span: &PanelSpan, out: &mut Vec<Shape>) {
+        let [_, y, _, h] = span.panel;
+        let s = ctx.scale;
+        let wood = if v.dark { [92, 66, 44] } else { [150, 112, 74] };
+        let (frame, x) = (9.0 * s, span.edge);
+        out.push(Shape::new(x - frame - 10.0 * s, y, 10.0 * s, h, [0, 0, 0], 0.15));
+        out.push(Shape::new(x - frame, y, frame, h, wood, 1.0));
+        out.push(Shape::new(x - frame + 2.0 * s, y, 1.5 * s, h, [255, 240, 220], 0.18));
+        out.push(Shape::new(x - frame - 4.0 * s, y + h - 16.0 * s, 26.0 * s, 8.0 * s, wood, 1.0));
     }
 
     /// Chalk tapping as you type and as it marks, the eraser for clearing

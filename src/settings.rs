@@ -42,7 +42,10 @@ pub struct Row {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Item {
-    Heading { title: String, note: String },
+    /// A section's heading. `fold`: None for a section that is always open
+    /// (the theme), else whether it is open; a closed one's rows are left
+    /// out (see `fold`).
+    Heading { title: String, note: String, fold: Option<bool> },
     Row(Row),
 }
 
@@ -53,6 +56,89 @@ impl Item {
             Item::Heading { .. } => None,
         }
     }
+
+    /// The row's label or the heading's title: what keeps the keyboard's
+    /// place when the items are rebuilt.
+    pub fn name(&self) -> &str {
+        match self {
+            Item::Row(row) => &row.label,
+            Item::Heading { title, .. } => title,
+        }
+    }
+
+    /// A heading that opens and closes.
+    pub fn folds(&self) -> bool {
+        matches!(self, Item::Heading { fold: Some(_), .. })
+    }
+}
+
+/// The sections after the first two (the theme, and the look on screen),
+/// in order, with the settings in each: what the panel files every other
+/// row under.
+const SECTIONS: &[(&str, &str, &[&str])] = &[
+    ("Animation", "", &["animation", "animation_speed", "writing_speed", "cursor_trail", "cursor_pulse", "paste_splash"]),
+    ("Ink and paper", "", &["ink_drying", "drying_time", "ink_aging", "paper_aging", "paper_aging_hours"]),
+    ("Effects", "closing, clearing, idle, weather", &["close_effect", "clear_effect", "idle_scene", "idle_after", "weather", "weather_amount", "show_progress"]),
+    ("Commands", "the shell's prompts, marked", &["shell_integration", "mark_failures", "stamp_long_commands", "stamp_after"]),
+    ("Sound", "", &["sounds", "sound_volume"]),
+    ("Terminal", "", &["harmonize_colors", "option_as_meta", "strike_deleted", "strike_splatter"]),
+];
+
+/// `items` with the sections in `open` open and the others closed: a closed
+/// section shows its heading only. The theme's section is always open.
+pub fn fold(items: Vec<Item>, open: &std::collections::HashSet<String>) -> Vec<Item> {
+    let mut out = Vec::with_capacity(items.len());
+    let mut showing = true;
+    for item in items {
+        match item {
+            Item::Heading { title, note, fold: Some(_) } => {
+                showing = open.contains(&title);
+                out.push(Item::Heading { title, note, fold: Some(showing) });
+            }
+            heading @ Item::Heading { .. } => {
+                showing = true;
+                out.push(heading);
+            }
+            row if showing => out.push(row),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The rows after the first two sections, filed under `SECTIONS`.
+fn sectioned(items: Vec<Item>) -> Vec<Item> {
+    let mut rows: Vec<Row> = Vec::new();
+    let mut out = Vec::new();
+    let mut headings = 0;
+    for item in items {
+        match item {
+            Item::Heading { title, note, fold } => {
+                headings += 1;
+                if headings <= 2 {
+                    // The look on screen folds; the theme's section doesn't.
+                    let fold = if headings == 2 { Some(false) } else { fold };
+                    out.push(Item::Heading { title, note, fold });
+                }
+            }
+            Item::Row(row) if headings <= 2 => out.push(Item::Row(row)),
+            Item::Row(row) => rows.push(row),
+        }
+    }
+    for (title, note, keys) in SECTIONS {
+        out.push(Item::Heading { title: title.to_string(), note: note.to_string(), fold: Some(false) });
+        for key in *keys {
+            if let Some(i) = rows.iter().position(|r| r.key == *key) {
+                out.push(Item::Row(rows.remove(i)));
+            }
+        }
+    }
+    // Anything not filed yet goes last, so no setting is ever lost.
+    if !rows.is_empty() {
+        out.push(Item::Heading { title: "More".into(), note: String::new(), fold: Some(false) });
+        out.extend(rows.into_iter().map(Item::Row));
+    }
+    out
 }
 
 /// How a row is changed.
@@ -73,6 +159,8 @@ pub enum Change {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Hit {
     Row(usize, Part),
+    /// A section's heading: open or close it.
+    Heading(usize),
     /// The button that opens the settings file.
     OpenFile,
 }
@@ -221,7 +309,7 @@ pub struct Fonts<'a> {
 
 /// The panel's rows for `config`, showing `variant` (the one on screen).
 pub fn items(config: &Config, variant: &Variant, fonts: &Fonts) -> Vec<Item> {
-    let heading = |title: &str, note: &str| Item::Heading { title: title.into(), note: note.into() };
+    let heading = |title: &str, note: &str| Item::Heading { title: title.into(), note: note.into(), fold: None };
     let top = |label: &str, about: &str, control, key| Item::Row(Row::new(label, about, control, None, key));
     let mut items = vec![heading("Theme", "")];
 
@@ -477,7 +565,7 @@ pub fn items(config: &Config, variant: &Variant, fonts: &Fonts) -> Vec<Item> {
         *step = 1.0;
     }
     items.push(Item::Row(after));
-    items
+    sectioned(items)
 }
 
 /// "400" -> "Regular" and so on, as font menus name them.
@@ -506,6 +594,7 @@ pub fn next_row(items: &[Item], from: usize, by: i32) -> usize {
         match items.get(i.max(0) as usize) {
             _ if i < 0 => return from,
             Some(Item::Row(_)) => return i as usize,
+            Some(item) if item.folds() => return i as usize,
             Some(Item::Heading { .. }) => continue,
             None => return from,
         }
@@ -595,7 +684,7 @@ mod tests {
     }
 
     #[test]
-    fn keys_move_between_rows_not_headings() {
+    fn keys_move_between_rows_and_section_headings() {
         let items = rows(&Config::default(), &theme::builtin()[0]);
         let first = first_row(&items);
         assert_eq!(next_row(&items, first, -1), first);
@@ -606,9 +695,27 @@ mod tests {
             if next == i {
                 break;
             }
-            assert!(items[next].row().is_some());
+            // The keyboard stops on rows and on headings that fold, never
+            // on the theme's own heading.
+            assert!(items[next].row().is_some() || items[next].folds());
             (i, seen) = (next, seen + 1);
         }
-        assert_eq!(seen, items.iter().filter(|i| i.row().is_some()).count());
+        assert_eq!(seen, items.iter().filter(|i| i.row().is_some() || i.folds()).count());
+    }
+
+    #[test]
+    fn sections_fold_and_every_setting_is_filed() {
+        let items = rows(&Config::default(), &theme::builtin()[0]);
+        // Every setting has a section of its own, not the catch-all.
+        assert!(!items.iter().any(|i| i.name() == "More"), "a setting is not in SECTIONS");
+        let closed = fold(items.clone(), &std::collections::HashSet::new());
+        // Closed, only the theme's rows and the section headings are left.
+        let shown: Vec<&str> = closed.iter().map(Item::name).collect();
+        assert!(shown.contains(&"Theme") && shown.contains(&"Appearance") && shown.contains(&"Sound"), "{shown:?}");
+        assert!(!shown.contains(&"Volume"));
+        let open: std::collections::HashSet<String> = ["Sound".to_string()].into();
+        let opened = fold(items, &open);
+        assert!(opened.iter().any(|i| i.name() == "Volume"));
+        assert!(opened.iter().any(|i| matches!(i, Item::Heading { title, fold: Some(true), .. } if title == "Sound")));
     }
 }

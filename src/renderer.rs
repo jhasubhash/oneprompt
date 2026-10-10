@@ -56,6 +56,8 @@ const PADDING: f32 = 24.0;
 const FULL_SCREEN_MIN: (usize, usize) = (80, 24);
 /// Text shrinks to no less than this share of its size.
 const MIN_FIT: f32 = 0.5;
+/// No theme's settings panel takes longer than this to come in, seconds.
+const SETTINGS_ENTRANCE_MAX: f32 = 1.0;
 /// Progress shown eases towards what is reported over about this long, and
 /// fades out over PROGRESS_FADE once the program is done (seconds).
 const PROGRESS_EASE: f32 = 0.25;
@@ -482,6 +484,8 @@ struct SettingsView {
     shown_focus: Option<(usize, u32)>,
     texts: Vec<Buffer>,
     targets: Vec<([f32; 4], Hit)>,
+    /// When it opened, for the theme's entrance.
+    opened: f32,
     /// The panel's box, and the height of its scrolling part and of what
     /// is in it.
     bounds: [f32; 4],
@@ -1509,6 +1513,7 @@ impl Renderer {
             || now < self.trail_until
             || now < self.splash_until
             || now < self.progress_until
+            || self.settings.as_ref().is_some_and(|v| now < v.opened + SETTINGS_ENTRANCE_MAX / self.animation.1)
             || (self.animation.0
                 && self.panes.values().any(|p| now - p.animator.latest_birth() < (write_time * 4.0).max(settle_time)))
     }
@@ -2356,6 +2361,7 @@ impl Renderer {
             self.settings = None;
             return;
         };
+        let now = self.now();
         match self.settings.as_mut() {
             Some(view) => view.panel = panel,
             None => {
@@ -2365,6 +2371,7 @@ impl Renderer {
                     shown_focus: None,
                     texts: Vec::new(),
                     targets: Vec::new(),
+                    opened: now,
                     bounds: [0.0; 4],
                     visible: 0.0,
                     content: 0.0,
@@ -2406,6 +2413,26 @@ impl Renderer {
         let (w, h) = (self.config.width as f32, self.config.height as f32);
         let panel_w = (w * 0.46).clamp(400.0 * s, 560.0 * s).min(w);
         let left = w - panel_w;
+        // The theme's entrance: how far in the panel is, eased.
+        let (entrance, duration) = variant.theme.panel_entrance();
+        let raw = if self.animation.0 && !self.thumbnail {
+            ((self.now() - panel.opened) * self.animation.1 / duration.clamp(0.05, SETTINGS_ENTRANCE_MAX)).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let eased = 1.0 - (1.0 - raw).powi(3);
+        // A sliding panel moves; the others stay put and are uncovered.
+        let dx = if entrance == api::Entrance::Slide { panel_w * (1.0 - eased) } else { 0.0 };
+        let clip = match entrance {
+            api::Entrance::Unroll => [left, 0.0, panel_w, (h * eased).max(1.0)],
+            api::Entrance::Turn => [w - panel_w * eased, 0.0, (panel_w * eased).max(1.0), h],
+            api::Entrance::Slide => [left + dx, 0.0, (panel_w - dx).max(1.0), h],
+        };
+        let edge = match entrance {
+            api::Entrance::Unroll => h * eased,
+            api::Entrance::Turn => w - panel_w * eased,
+            api::Entrance::Slide => left + dx,
+        };
         let pad = 28.0 * s;
         let (x0, width) = (left + pad, panel_w - 2.0 * pad);
         let (ink, accent, surface, quiet) = (variant.ink, variant.cursor, variant.surface_rgb(), variant.palette[8]);
@@ -2509,13 +2536,31 @@ impl Renderer {
         let focus = panel.panel.focus;
         for (index, item) in panel.panel.items.iter().enumerate() {
             match item {
-                Item::Heading { title, note } => {
+                Item::Heading { title, note, fold } => {
                     if index > 0 {
-                        y += 18.0 * s;
+                        y += if fold.is_some() { 8.0 } else { 18.0 } * s;
                     }
-                    let (t, t_w, t_h) = put(&[(title, attrs(ink, bold))], 12.5, None);
+                    let heading_top = y;
+                    let focused = index == focus;
+                    // A section that folds has an arrow: pointing right while
+                    // closed, down while open.
+                    let arrow = match fold {
+                        Some(true) => "\u{25be} ",
+                        Some(false) => "\u{25b8} ",
+                        None => "",
+                    };
+                    let shown = format!("{arrow}{title}");
+                    let (t, t_w, t_h) = put(&[(&shown, attrs(if focused { accent } else { ink }, bold))], 12.5, None);
                     placed.push((t, x0, y, true));
                     y += t_h;
+                    if fold.is_some() {
+                        let box_ = [x0 - 10.0 * s, heading_top - 5.0 * s, width + 20.0 * s, t_h + 10.0 * s];
+                        if focused {
+                            scrolled.push(Shape::rounded(box_, 8.0 * s, 0.0, accent, 0.08));
+                            focus_box = Some((box_[1], box_[1] + box_[3]));
+                        }
+                        row_targets.push((box_, Hit::Heading(index)));
+                    }
                     // The note beside the heading, or under it if it does not fit.
                     if !note.is_empty() {
                         let (n, n_w, n_h) = put(&[(note, attrs(quiet, regular))], 11.0, Some(width));
@@ -2550,8 +2595,16 @@ impl Renderer {
                     let line = (11.5 * 1.35 * s).round();
                     let text_y = cy + (control_h - line) / 2.0;
                     let control = [cx, cy, control_w, control_h];
+                    // A few options show side by side, if their names fit.
+                    let segmented = match &row.control {
+                        Setting::Choice { labels, .. } if labels.len() <= settings::SEGMENTS => {
+                            let segment = control_w / labels.len() as f32;
+                            labels.iter().all(|l| put(&[(l, attrs(ink, regular))], 11.5, None).1 <= segment - 10.0 * s)
+                        }
+                        _ => false,
+                    };
                     match &row.control {
-                        Setting::Choice { labels, index: chosen, .. } if labels.len() <= settings::SEGMENTS => {
+                        Setting::Choice { labels, index: chosen, .. } if segmented => {
                             scrolled.push(Shape::rounded(control, 6.0 * s, 1.0 * s, quiet, 0.7));
                             let segment = control_w / labels.len() as f32;
                             for (i, text) in labels.iter().enumerate() {
@@ -2655,16 +2708,38 @@ impl Renderer {
         panel.bounds = [left, 0.0, panel_w, h];
         (panel.visible, panel.content) = (visible, content);
 
+        // Sliding in: everything moves with the panel. The theme draws its
+        // edge (roller, curl, frame) over the rest.
+        if dx > 0.0 {
+            for shape in fixed.iter_mut().chain(scrolled.iter_mut()) {
+                shape.rect[0] += dx;
+            }
+            for p in &mut placed {
+                p.1 += dx;
+            }
+            for (rect, _) in &mut panel.targets {
+                rect[0] += dx;
+            }
+        }
+        let mut edges = Vec::new();
+        if raw < 1.0 {
+            let span = api::PanelSpan { panel: [left + dx, 0.0, panel_w, h], edge, progress: eased };
+            variant.theme.draw_panel_edge(variant, &self.ctx(), &span, &mut edges);
+        }
+
         let n_fixed = fixed.len() as u32;
-        let shapes: Vec<Shape> = fixed.into_iter().chain(scrolled).collect();
+        let n_body = n_fixed + scrolled.len() as u32;
+        let shapes: Vec<Shape> = fixed.into_iter().chain(scrolled).chain(edges).collect();
         let needed = (shapes.len() * std::mem::size_of::<Shape>()) as u64;
         if needed > self.settings_buffer.size() {
             self.settings_buffer = Self::create_rect_buffer(&self.device, shapes.len().next_power_of_two());
         }
         self.queue.write_buffer(&self.settings_buffer, 0, bytemuck::cast_slice(&shapes));
 
-        let all = TextBounds { left: left as i32, top: 0, right: w as i32, bottom: h as i32 };
-        let rows = TextBounds { left: left as i32, top: top as i32, right: w as i32, bottom: bottom as i32 };
+        // Text only where the panel has come in so far.
+        let [cx0, cy0, cw0, ch0] = clip;
+        let all = TextBounds { left: cx0 as i32, top: cy0 as i32, right: (cx0 + cw0) as i32, bottom: (cy0 + ch0) as i32 };
+        let rows = TextBounds { left: cx0 as i32, top: (top.max(cy0)) as i32, right: (cx0 + cw0) as i32, bottom: (bottom.min(cy0 + ch0)) as i32 };
         let areas = placed.iter().map(|&(i, x, y, scrolls)| TextArea {
             buffer: &panel.texts[i],
             left: x,
@@ -2694,23 +2769,42 @@ impl Renderer {
                 multiview_mask: None,
             });
             let stages = &self.stages[variant.theme.id()];
-            let panel_x = left.max(0.0) as u32;
+            let (fw, fh) = (self.config.width, self.config.height);
+            // Scissor to `r` within the window (and within the panel as it has
+            // come in so far); false if nothing of it is left.
+            let scissor = |pass: &mut wgpu::RenderPass, r: [f32; 4]| -> bool {
+                let x = r[0].max(clip[0]).max(0.0);
+                let y = r[1].max(clip[1]).max(0.0);
+                let x1 = (r[0] + r[2]).min(clip[0] + clip[2]).min(fw as f32);
+                let y1 = (r[1] + r[3]).min(clip[1] + clip[3]).min(fh as f32);
+                if x1 - x < 1.0 || y1 - y < 1.0 {
+                    return false;
+                }
+                pass.set_scissor_rect(x as u32, y as u32, (x1 - x) as u32, (y1 - y) as u32);
+                true
+            };
             pass.set_bind_group(0, &self.frame_group, &[]);
-            pass.set_scissor_rect(panel_x, 0, self.config.width - panel_x.min(self.config.width), self.config.height);
-            pass.set_pipeline(&stages.surface);
-            pass.draw(0..3, 0..1);
-            pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
+            if scissor(&mut pass, [left + dx, 0.0, panel_w, h]) {
+                pass.set_pipeline(&stages.surface);
+                pass.draw(0..3, 0..1);
+            }
             pass.set_vertex_buffer(0, self.settings_buffer.slice(..needed));
             pass.set_pipeline(&stages.shapes);
-            pass.draw(0..4, 0..n_fixed);
-            let (sx, sy) = (panel_x, top.max(0.0) as u32);
-            let (sw, sh) = (panel_w as u32, (bottom - top).max(0.0) as u32);
-            if sw > 0 && sh > 0 && sx + sw <= self.config.width && sy + sh <= self.config.height {
-                pass.set_scissor_rect(sx, sy, sw, sh);
-                pass.draw(0..4, n_fixed..shapes.len() as u32);
-                pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
+            if scissor(&mut pass, [0.0, 0.0, w, h]) {
+                pass.draw(0..4, 0..n_fixed);
             }
+            if scissor(&mut pass, [left + dx, top, panel_w, bottom - top]) {
+                pass.draw(0..4, n_fixed..n_body);
+            }
+            pass.set_scissor_rect(0, 0, fw, fh);
             self.picker_text.render(&self.atlas, &self.viewport, &mut pass).expect("render settings text");
+            // The edge goes over the text; drawing text changed the pipeline.
+            if n_body < shapes.len() as u32 {
+                pass.set_bind_group(0, &self.frame_group, &[]);
+                pass.set_vertex_buffer(0, self.settings_buffer.slice(..needed));
+                pass.set_pipeline(&stages.shapes);
+                pass.draw(0..4, n_body..shapes.len() as u32);
+            }
         }
         self.queue.submit(Some(encoder.finish()));
         self.settings = Some(panel);
