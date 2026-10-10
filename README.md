@@ -127,6 +127,10 @@ scripts/make-app.sh            # ~/Applications/oneprompt.app; pass another fold
 The bundle's executable is a symlink to `target/release/oneprompt`, so it always runs the
 latest `cargo build --release`: no need to remake it after changes.
 
+To make a release, `scripts/release.sh` builds a self-contained universal app and a
+signed, notarized `target/dist/oneprompt-<version>.dmg` (setup steps are at the top of
+the script).
+
 Not yet: IME (composed input for Chinese, Japanese, ...), clickable links, search,
 splits.
 
