@@ -632,6 +632,10 @@ pub struct Renderer {
     splash_until: f32,
     /// Rain or snow, and how heavy (None: clear skies).
     weather: Option<(api::Weather, f32)>,
+    /// How worn the sheet on show is, 0..1, and the hours it takes to wear
+    /// out (None: it never does).
+    wear: f32,
+    wear_hours: Option<f32>,
     /// Whether struck names fling blood.
     splatter: bool,
     /// Every pane's grid and writing state, by pane id, and the one being
@@ -861,6 +865,8 @@ impl Renderer {
             splash: true,
             splash_until: f32::NEG_INFINITY,
             weather: None,
+            wear: 0.0,
+            wear_hours: Some(8.0),
             splatter: true,
             panes: HashMap::new(),
             pane: 0,
@@ -1231,6 +1237,7 @@ impl Renderer {
             scale: self.window.scale_factor() as f32,
             cell: [self.cell_width, self.cell_height],
             speed: self.animation.1,
+            wear: self.wear,
         }
     }
 
@@ -1314,6 +1321,16 @@ impl Renderer {
     /// is still.
     pub fn set_cursor_life(&mut self, trail: bool, pulse: bool) {
         self.cursor_life = (trail, pulse);
+    }
+
+    /// Hours of use for a sheet to wear out; None: sheets never age.
+    pub fn set_wear_hours(&mut self, hours: Option<f32>) {
+        self.wear_hours = hours;
+    }
+
+    /// The tab on show has been open `seconds`: how worn its sheet is.
+    pub fn set_sheet_age(&mut self, seconds: f32) {
+        self.wear = self.wear_hours.map_or(0.0, |h| (seconds / (h * 3600.0)).clamp(0.0, 1.0));
     }
 
     /// The weather over the window, and how heavy it is.

@@ -13,6 +13,8 @@ struct Tsushima {
     bleed_variation: f32,   // per-character bleed: (1 -/+ this) x bleed
     bleed_time: f32,        // seconds the bleed keeps creeping; 0 = at once
     absorb: f32,            // how much the ink takes on the paper's grain
+    wear: f32,              // how worn the sheet is from use, 0..1
+    _pad: vec3<f32>,
 };
 
 @group(0) @binding(1) var<uniform> look: Tsushima;

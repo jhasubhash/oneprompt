@@ -350,6 +350,17 @@ pub fn items(config: &Config, variant: &Variant, fonts: &Fonts) -> Vec<Item> {
         Control::Toggle(config.paste_splash.unwrap_or(true)),
         "paste_splash",
     ));
+    items.push(top(
+        "Paper ages",
+        "A tab's sheet yellows and creases as it is used; a new tab is fresh.",
+        Control::Toggle(config.paper_aging.unwrap_or(true)),
+        "paper_aging",
+    ));
+    let mut hours = Row::new("Aging hours", "Hours of use for a sheet to wear out.", slider(config.paper_aging_hours.unwrap_or(8.0), 1.0, 48.0), None, "paper_aging_hours");
+    if let Control::Slider { step, .. } = &mut hours.control {
+        *step = 1.0;
+    }
+    items.push(Item::Row(hours));
     let weather = match config.weather {
         WeatherSetting::None => "none",
         WeatherSetting::Rain => "rain",

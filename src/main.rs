@@ -11,6 +11,7 @@
 //!   oneprompt --default-config   print the settings file Cmd+, would create
 //!   ONEPROMPT_SNAPSHOT=dir    render every theme to dir/<theme>.png and exit
 //!   ONEPROMPT_SNAPSHOT_SWITCH=n   with it, also n frames of each switch
+//!   ONEPROMPT_PAPER_RATE=n    sheets age n times faster (to see a worn one)
 //!   ONEPROMPT_ACTIONS="2:clear,4.5:new-tab"   menu actions at those seconds
 //!                             after start (testing without keystrokes)
 
@@ -113,6 +114,9 @@ struct App {
     idle_waiting: bool,
     /// When the beating cursor was last drawn.
     pulse_at: Instant,
+    /// Sheets age this many times faster than the clock
+    /// (`ONEPROMPT_PAPER_RATE`, to look at an old sheet now).
+    wear_rate: f32,
     /// macOS is in dark mode.
     system_dark: bool,
     /// Cmd+Shift+L override for this session: Some(true) = dark.
@@ -151,6 +155,8 @@ struct Tab {
     focus: PaneId,
     /// Given by the user (Rename Tab); wins over the title.
     name: Option<String>,
+    /// When it was opened: its sheet ages from then.
+    opened: Instant,
 }
 
 /// A shell in a tab.
@@ -172,7 +178,7 @@ impl Pane {
 
 impl Tab {
     fn new(pane: Pane) -> Self {
-        Self { layout: panes::Layout::Pane(pane.id), focus: pane.id, panes: vec![pane], name: None }
+        Self { layout: panes::Layout::Pane(pane.id), focus: pane.id, panes: vec![pane], name: None, opened: Instant::now() }
     }
 
     /// The pane with the keyboard.
@@ -1096,6 +1102,7 @@ impl App {
             r.set_effects(config.close_effect.unwrap_or(true), config.clear_effect.unwrap_or(true));
             r.set_cursor_life(config.cursor_trail.unwrap_or(true), config.cursor_pulse.unwrap_or(true));
             r.set_splash(config.paste_splash.unwrap_or(true));
+            r.set_wear_hours(config.paper_aging.unwrap_or(true).then(|| config.paper_aging_hours.unwrap_or(8.0)));
             let amount = config.weather_amount.unwrap_or(0.5);
             r.set_weather(match config.weather {
                 config::WeatherSetting::None => None,
@@ -1356,6 +1363,7 @@ impl App {
         let theme = self.themes[self.current].clone();
         let strike = self.config.strike_deleted.unwrap_or(true);
         if let (Some(r), Some(tab)) = (self.renderer.as_mut(), self.tabs.get_mut(self.active)) {
+            r.set_sheet_age(tab.opened.elapsed().as_secs_f32() * self.wear_rate);
             let window = r.window_rect();
             let rects = tab.layout.rects(window);
             let scale = r.window().scale_factor() as f32;
@@ -2191,6 +2199,7 @@ fn main() {
         notice_until: None,
         idle_waiting: false,
         pulse_at: Instant::now(),
+        wear_rate: std::env::var("ONEPROMPT_PAPER_RATE").ok().and_then(|r| r.parse().ok()).unwrap_or(1.0),
         system_dark: false,
         flip: None,
         startup_error,

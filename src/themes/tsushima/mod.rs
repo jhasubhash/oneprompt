@@ -101,6 +101,8 @@ struct Data {
     bleed_variation: f32,
     bleed_time: f32,
     absorb: f32,
+    wear: f32,
+    _pad: [f32; 3],
 }
 
 impl Theme for Tsushima {
@@ -216,6 +218,8 @@ impl Theme for Tsushima {
             bleed_variation: v.param("bleed_variation"),
             bleed_time: v.param("bleed_time") / ctx.speed,
             absorb: v.param("absorb"),
+            wear: ctx.wear,
+            _pad: [0.0; 3],
         })
     }
 

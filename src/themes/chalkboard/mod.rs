@@ -177,8 +177,9 @@ impl Theme for Chalkboard {
         theme::bytes(&Data {
             grit: v.param("grit"),
             dust: v.param("dust"),
-            smudges: v.param("smudges"),
-            ghosts: v.param("ghosts"),
+            // A board in use collects eraser marks and ghosts of old lessons.
+            smudges: v.param("smudges") * (1.0 + 1.5 * ctx.wear),
+            ghosts: v.param("ghosts") * (1.0 + 2.0 * ctx.wear),
             settle: SETTLE_TIME / ctx.speed,
             stone: if v.dark { 0.0 } else { 1.0 },
             _pad: [0.0; 2],

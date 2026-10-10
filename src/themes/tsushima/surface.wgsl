@@ -88,7 +88,54 @@ fn washi(px_in: vec2<f32>, uv: vec2<f32>) -> vec3<f32> {
         let dot_mask = 1.0 - smoothstep(radius - 0.6, radius + 0.6, distance(px, center));
         color = mix(color, look.splatter.rgb, dot_mask * 0.8);
     }
-    return clamp(color, vec3<f32>(0.0), vec3<f32>(1.0));
+    return clamp(worn(color, px, uv), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// Use wears the sheet (`look.wear`, 0..1): the washi yellows, more at its
+// edges, and creases from being folded show up: a fold or two across the
+// sheet, a dark valley beside a light ridge, crumpled small creases around
+// them, each line appearing as the wear passes its own point.
+fn worn(color_in: vec3<f32>, px: vec2<f32>, uv: vec2<f32>) -> vec3<f32> {
+    let wear = look.wear;
+    if (wear <= 0.0) {
+        return color_in;
+    }
+    let dark_sheet = dot(frame.surface.rgb, vec3<f32>(0.3, 0.59, 0.11)) < 0.5;
+    var color = color_in;
+    // Yellowing: towards old gold on the light sheet, a browner black on
+    // the dark one; faster at the edges, where hands hold it.
+    let edges = 0.6 + 0.4 * vignette(uv);
+    let aged = select(vec3<f32>(0.78, 0.6, 0.32), vec3<f32>(0.09, 0.06, 0.035), dark_sheet);
+    color = mix(color, color * aged / max(max(frame.surface.r, frame.surface.g), 0.2), wear * 0.35 * edges);
+    // Folds: a long one across and one down, at places of the sheet's own;
+    // then smaller creases, each from its own point in the wear.
+    let s = vec2<f32>(fract(frame.seed * 0.371), fract(frame.seed * 0.613));
+    var crease = 0.0;
+    for (var k = 0; k < 6; k++) {
+        let fk = f32(k);
+        let due = select(0.15 + fk * 0.13, fk * 0.25, k < 2);
+        let strength = smoothstep(due, due + 0.2, wear);
+        if (strength <= 0.0) {
+            continue;
+        }
+        let origin = vec2<f32>(fract(s.x + fk * 0.618), fract(s.y + fk * 0.382));
+        let angle = select(hash(vec2<f32>(fk, 3.0)) * 3.1416, select(1.5708, 0.0, k == 0) + (s.x - 0.5) * 0.3, k < 2);
+        let dir = vec2<f32>(cos(angle), sin(angle));
+        let q = uv * vec2<f32>(frame.resolution.x / frame.resolution.y, 1.0) - origin * vec2<f32>(frame.resolution.x / frame.resolution.y, 1.0);
+        let along = dot(q, dir);
+        let reach = select(0.35 + 0.3 * hash(vec2<f32>(fk, 9.0)), 2.0, k < 2);
+        let wobble = (noise(vec2<f32>(along * 6.0, fk * 7.0)) - 0.5) * 0.02;
+        let across = dot(q, vec2<f32>(-dir.y, dir.x)) + wobble;
+        let fade = 1.0 - smoothstep(reach * 0.6, reach, abs(along));
+        // A valley in shadow on one side, a ridge catching the light on the other.
+        let w = 0.0035;
+        let valley = exp(-pow((across + w) / w, 2.0));
+        let ridge = exp(-pow((across - w) / w, 2.0));
+        crease += (ridge * 0.7 - valley) * strength * fade * select(1.0, 0.55, k >= 2);
+    }
+    let light = select(vec3<f32>(1.0, 0.97, 0.9), frame.ink.rgb, dark_sheet);
+    color = mix(color, select(color * 0.72, light, crease > 0.0), clamp(abs(crease), 0.0, 1.0) * 0.45);
+    return color;
 }
 
 fn surface(px: vec2<f32>, uv: vec2<f32>) -> vec3<f32> {

@@ -101,6 +101,10 @@ pub struct Config {
     /// while it is still. Default on.
     pub cursor_trail: Option<bool>,
     pub cursor_pulse: Option<bool>,
+    /// Sheets age with use: a tab open `paper_aging_hours` (default 8) has a
+    /// worn sheet; a new tab starts fresh. Default on.
+    pub paper_aging: Option<bool>,
+    pub paper_aging_hours: Option<f32>,
     /// Pasted text lands at once, as a splash of ink. Default on.
     pub paste_splash: Option<bool>,
     /// Rain or snow falling over the window, `weather_amount` heavy (0..1,
@@ -190,6 +194,13 @@ cursor_pulse = true
 # Pasted text lands all at once, as a splash of ink that settles into the
 # letters (a puff of chalk on the Chalkboard), instead of being written in.
 paste_splash = true
+
+# The sheet ages as you use it: over paper_aging_hours of a tab being open,
+# Tsushima's washi yellows and picks up creases from being folded; the
+# Chalkboard collects smudges and ghosts of old lessons. A new tab starts on
+# a fresh sheet.
+paper_aging = true
+paper_aging_hours = 8
 
 # Weather over the paper: "none", "rain" (sumi-e strokes of rain, drops
 # blotting where they land; chalk lines on the Chalkboard) or "snow". It keeps
@@ -360,6 +371,11 @@ impl Config {
             && !(10.0..=100_000.0).contains(&speed)
         {
             return Err(format!("writing_speed {speed} is out of range (10 to 100000)"));
+        }
+        if let Some(hours) = self.paper_aging_hours
+            && !(0.1..=1000.0).contains(&hours)
+        {
+            return Err(format!("paper_aging_hours {hours} is out of range (0.1 to 1000)"));
         }
         if let Some(amount) = self.weather_amount
             && !(0.0..=1.0).contains(&amount)

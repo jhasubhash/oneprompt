@@ -187,6 +187,9 @@ pub struct Ctx {
     pub cell: [f32; 2],
     /// Animation speed: 1 normal, 2 twice as fast.
     pub speed: f32,
+    /// How worn the sheet on show is from use, 0 (new) .. 1: its tab has
+    /// been open `paper_aging_hours` or longer.
+    pub wear: f32,
 }
 
 /// A reveal or a switch: how long it takes (at speed 1), how hard progress

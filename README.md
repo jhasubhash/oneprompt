@@ -100,6 +100,13 @@ light or dark palette.
 - **Paste splashes**: pasted text lands all at once, as a splash of sumi thrown out along
   the line it fills that soaks into the paper as the letters appear (a puff of chalk dust
   on the Chalkboard), instead of being written in. `paste_splash = false` turns it off.
+- **The paper ages with use**: over `paper_aging_hours` (8) of a tab being open, its
+  sheet wears: Tsushima's washi yellows (more at the edges, where hands hold it) and picks
+  up creases from being folded, a long fold across and one down and smaller ones around
+  them, a shaded valley beside a ridge catching the light; the Chalkboard collects eraser
+  smudges and ghosts of old lessons. A new tab starts on a fresh sheet. `paper_aging =
+  false` keeps every sheet new; `ONEPROMPT_PAPER_RATE=<n>` ages them n times faster, to
+  see a worn one now.
 - **Weather**: `weather = "rain"` paints rain over the sheet as sumi-e does, long fine
   strokes slanting down, drops blotting where they land and fading; `"snow"` drifts flakes of
   paper white (parchment on the dark sheet); the Chalkboard does both in chalk.
@@ -171,7 +178,7 @@ another theme). A theme implements the `Theme` trait:
   `theme_shape` (its own shapes: Tsushima's brush dab and sword slash, Chalkboard's chalk
   stick and line) and `theme_transition` (its reveals). Each gets a shared prelude (the
   frame: size, time, seed, grid, colours; and `hash`, `noise`, `rotate`) plus its own data
-  from Rust. A stage it leaves out gets a plain default. A test compiles every stage.
+  from Rust (`Theme::data`, given the `Ctx`: scale, cell size, speed and the sheet's `wear`). A stage it leaves out gets a plain default. A test compiles every stage.
 - **Events**: `reveal` (the window opens), `switch` (switching to it, from its other
   variant or another theme), `close` (a tab or the window closing), `clear` (Cmd+K),
   `cursor`, `strike` / `draw_strike` (a deleted name),
@@ -302,6 +309,8 @@ ink_aging = 0.3               # how far ink an hour old fades, 0..1
 cursor_trail = true           # the cursor flicks a trail when it jumps
 cursor_pulse = true           # a still cursor beats gently
 paste_splash = true           # pasted text lands as a splash of ink
+paper_aging = true            # a tab's sheet yellows and creases with use
+paper_aging_hours = 8         # hours for a sheet to wear out
 weather = "none"              # none | rain | snow
 weather_amount = 0.5          # how heavy, 0..1
 close_effect = true           # closing burns / wipes the sheet away
