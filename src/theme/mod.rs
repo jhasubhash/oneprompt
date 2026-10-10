@@ -137,6 +137,10 @@ pub trait Theme: Sync + 'static {
     fn draw_weather(&self, variant: &Variant, ctx: &Ctx, span: &WeatherSpan, out: &mut Vec<Shape>) {
         plain_weather(variant, ctx, span, out);
     }
+    /// The sound that goes with `event` (when sounds are on); None: none.
+    fn sound(&self, _event: SoundEvent) -> Option<Sound> {
+        None
+    }
     /// How long a stamp takes to land (see [`Theme::draw_stamp`]), seconds
     /// at speed 1.
     fn stamp_time(&self) -> f32 {
@@ -274,6 +278,41 @@ pub fn plain_stamp(variant: &Variant, ctx: &Ctx, span: &CommandSpan, out: &mut V
     let r = h * 0.42 * (1.4 - 0.4 * span.progress);
     let rgb = if span.failed { variant.palette[1] } else { variant.cursor };
     out.push(Shape::round(RING, x + w * 1.5, y + h * 0.5, r, rgb, 0.9 * span.progress).stroke(2.0 * ctx.scale));
+}
+
+/// What a sound can go with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SoundEvent {
+    /// A key typed into the shell.
+    Key,
+    /// A deleted name struck out.
+    Strike,
+    /// A command that failed, marked.
+    Failure,
+    /// A long command stamped.
+    Stamp,
+    /// The screen cleared (Cmd+K).
+    Clear,
+    /// A tab or the window closed.
+    Close,
+}
+
+/// The sounds the framework can make (sound.rs makes them from noise and
+/// tones, so there are no recordings to ship).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Sound {
+    /// Bristles dragged over paper.
+    Brush,
+    /// A tap of chalk.
+    Chalk,
+    /// A blade's whoosh and the steel ringing out.
+    Sword,
+    /// A seal pressed down.
+    Thud,
+    /// An eraser rubbed back and forth.
+    Eraser,
+    /// Paper catching fire.
+    Fire,
 }
 
 /// Rain or snow.

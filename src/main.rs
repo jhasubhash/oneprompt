@@ -29,6 +29,7 @@ mod picker;
 mod renderer;
 mod search;
 mod settings;
+mod sound;
 mod strike;
 mod terminal;
 mod theme;
@@ -114,6 +115,8 @@ struct App {
     idle_waiting: bool,
     /// When the beating cursor was last drawn.
     pulse_at: Instant,
+    /// Plays the theme's sounds, when they are on.
+    sounds: sound::Player,
     /// Sheets age this many times faster than the clock
     /// (`ONEPROMPT_PAPER_RATE`, to look at an old sheet now).
     wear_rate: f32,
@@ -1090,6 +1093,7 @@ impl App {
                 OptionAsMeta::None => OptionAsAlt::None,
             });
         }
+        self.sounds.set_volume(if config.sounds.unwrap_or(false) { config.sound_volume.unwrap_or(0.4) } else { 0.0 });
         if let Some(r) = self.renderer.as_mut() {
             r.set_animation(enabled && self.snapshot_dir.is_none(), speed, writing_speed);
             r.set_harmonize(config.harmonize_colors.unwrap_or(true));
@@ -1404,6 +1408,11 @@ impl App {
             // marks are drawn with it.
             views.sort_by_key(|v| rects.iter().position(|(id, _)| *id == v.id));
             r.render(&theme, &mut views, &dividers);
+            for event in r.take_events() {
+                if let Some(sound) = theme.theme.sound(event) {
+                    self.sounds.play(sound);
+                }
+            }
             drop(views);
             drop(held);
             // The input method's candidates open by the cursor.
@@ -2002,6 +2011,10 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(bytes) = bytes {
                     t.clear_selection();
                     t.input(bytes);
+                    let theme = self.themes[self.current].theme;
+                    if let Some(sound) = theme.sound(theme::SoundEvent::Key) {
+                        self.sounds.play(sound);
+                    }
                 }
             }
             WindowEvent::Ime(ime) => self.on_ime(ime),
@@ -2199,6 +2212,7 @@ fn main() {
         notice_until: None,
         idle_waiting: false,
         pulse_at: Instant::now(),
+        sounds: sound::Player::new(),
         wear_rate: std::env::var("ONEPROMPT_PAPER_RATE").ok().and_then(|r| r.parse().ok()).unwrap_or(1.0),
         system_dark: false,
         flip: None,

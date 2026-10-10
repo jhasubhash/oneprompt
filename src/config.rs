@@ -105,6 +105,9 @@ pub struct Config {
     /// worn sheet; a new tab starts fresh. Default on.
     pub paper_aging: Option<bool>,
     pub paper_aging_hours: Option<f32>,
+    /// The theme's sounds, at `sound_volume` (0..1, default 0.4). Default off.
+    pub sounds: Option<bool>,
+    pub sound_volume: Option<f32>,
     /// Pasted text lands at once, as a splash of ink. Default on.
     pub paste_splash: Option<bool>,
     /// Rain or snow falling over the window, `weather_amount` heavy (0..1,
@@ -201,6 +204,12 @@ paste_splash = true
 # a fresh sheet.
 paper_aging = true
 paper_aging_hours = 8
+
+# Sounds, quiet and off unless turned on: a brush scratching over paper as you
+# type, the sword's shing as a deleted name is cut and the screen cleared, a
+# seal's thud, paper catching fire; the Chalkboard taps and rubs in chalk.
+sounds = false
+sound_volume = 0.4
 
 # Weather over the paper: "none", "rain" (sumi-e strokes of rain, drops
 # blotting where they land; chalk lines on the Chalkboard) or "snow". It keeps
@@ -371,6 +380,11 @@ impl Config {
             && !(10.0..=100_000.0).contains(&speed)
         {
             return Err(format!("writing_speed {speed} is out of range (10 to 100000)"));
+        }
+        if let Some(volume) = self.sound_volume
+            && !(0.0..=1.0).contains(&volume)
+        {
+            return Err(format!("sound_volume {volume} is out of range (0 to 1)"));
         }
         if let Some(hours) = self.paper_aging_hours
             && !(0.1..=1000.0).contains(&hours)

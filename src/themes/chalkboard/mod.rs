@@ -9,7 +9,8 @@
 
 use crate::theme::{
     self, CommandSpan, ControlStyle, Controls, Ctx, Cursor, CursorKind, DividerSpan, IdleSpan, Param, Plan, Rng, Shape,
-    Shaders, SplashSpan, Strike, StrikeSpan, Theme, Variant, Weather, WeatherSpan, CUSTOM, DISC, RING,
+    Shaders, Sound, SoundEvent, SplashSpan, Strike, StrikeSpan, Theme, Variant, Weather, WeatherSpan, CUSTOM, DISC,
+    RING,
 };
 
 pub static CHALKBOARD: Chalkboard = Chalkboard;
@@ -273,6 +274,15 @@ impl Theme for Chalkboard {
 
     fn stamp_time(&self) -> f32 {
         TICK_TIME
+    }
+
+    /// Chalk tapping as you type and as it marks, the eraser for clearing
+    /// and closing.
+    fn sound(&self, event: SoundEvent) -> Option<Sound> {
+        Some(match event {
+            SoundEvent::Key | SoundEvent::Strike | SoundEvent::Failure | SoundEvent::Stamp => Sound::Chalk,
+            SoundEvent::Clear | SoundEvent::Close => Sound::Eraser,
+        })
     }
 
     fn splash_time(&self) -> f32 {

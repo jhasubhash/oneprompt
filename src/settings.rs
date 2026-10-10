@@ -351,6 +351,13 @@ pub fn items(config: &Config, variant: &Variant, fonts: &Fonts) -> Vec<Item> {
         "paste_splash",
     ));
     items.push(top(
+        "Sounds",
+        "A brush as you type, the sword's shing, a seal's thud; chalk on the board.",
+        Control::Toggle(config.sounds.unwrap_or(false)),
+        "sounds",
+    ));
+    items.push(top("Volume", "How loud the sounds are.", slider(config.sound_volume.unwrap_or(0.4), 0.0, 1.0), "sound_volume"));
+    items.push(top(
         "Paper ages",
         "A tab's sheet yellows and creases as it is used; a new tab is fresh.",
         Control::Toggle(config.paper_aging.unwrap_or(true)),

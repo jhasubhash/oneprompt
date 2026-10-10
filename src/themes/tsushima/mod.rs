@@ -12,7 +12,7 @@ mod brush;
 
 use crate::theme::{
     self, CommandSpan, ControlStyle, Controls, Ctx, Cursor, CursorKind, DividerSpan, IdleSpan, Param, Plan, Rng, Shape,
-    Shaders, SplashSpan, Strike, StrikeSpan, Theme, Variant, Weather, WeatherSpan, CUSTOM, DISC,
+    Shaders, Sound, SoundEvent, SplashSpan, Strike, StrikeSpan, Theme, Variant, Weather, WeatherSpan, CUSTOM, DISC,
 };
 
 use brush::{Brush, PlanData};
@@ -337,6 +337,17 @@ impl Theme for Tsushima {
 
     fn stamp_time(&self) -> f32 {
         STAMP_TIME
+    }
+
+    /// A brush over washi as you type, the sword for strikes and the clear,
+    /// a seal's thud, the sheet catching fire.
+    fn sound(&self, event: SoundEvent) -> Option<Sound> {
+        Some(match event {
+            SoundEvent::Key | SoundEvent::Failure => Sound::Brush,
+            SoundEvent::Strike | SoundEvent::Clear => Sound::Sword,
+            SoundEvent::Stamp => Sound::Thud,
+            SoundEvent::Close => Sound::Fire,
+        })
     }
 
     fn splash_time(&self) -> f32 {

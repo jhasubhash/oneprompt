@@ -632,6 +632,11 @@ pub struct Renderer {
     splash_until: f32,
     /// Rain or snow, and how heavy (None: clear skies).
     weather: Option<(api::Weather, f32)>,
+    /// What happened in the frames drawn since the app last asked (strikes,
+    /// marks), for its sounds; and the newest strike and mark heard of.
+    events: Vec<api::SoundEvent>,
+    newest_strike: f32,
+    newest_mark: f32,
     /// How worn the sheet on show is, 0..1, and the hours it takes to wear
     /// out (None: it never does).
     wear: f32,
@@ -865,6 +870,9 @@ impl Renderer {
             splash: true,
             splash_until: f32::NEG_INFINITY,
             weather: None,
+            events: Vec::new(),
+            newest_strike: f32::NEG_INFINITY,
+            newest_mark: f32::NEG_INFINITY,
             wear: 0.0,
             wear_hours: Some(8.0),
             splatter: true,
@@ -1296,6 +1304,7 @@ impl Renderer {
         let Some(plan) = variant.theme.close(variant, &mut self.rng, aspect) else { return false };
         self.closing = window;
         self.start_over_last(plan);
+        self.events.push(api::SoundEvent::Close);
         true
     }
 
@@ -1308,6 +1317,7 @@ impl Renderer {
         let aspect = self.aspect();
         if let Some(plan) = variant.theme.clear(variant, &mut self.rng, aspect) {
             self.start_over_last(plan);
+            self.events.push(api::SoundEvent::Clear);
         }
     }
 
@@ -1321,6 +1331,11 @@ impl Renderer {
     /// is still.
     pub fn set_cursor_life(&mut self, trail: bool, pulse: bool) {
         self.cursor_life = (trail, pulse);
+    }
+
+    /// What has happened since the last call, for sounds.
+    pub fn take_events(&mut self) -> Vec<api::SoundEvent> {
+        std::mem::take(&mut self.events)
     }
 
     /// Hours of use for a sheet to wear out; None: sheets never age.
@@ -2742,6 +2757,10 @@ impl Renderer {
                 } else {
                     (1.0, f32::INFINITY)
                 };
+                if s.born > self.newest_strike && start <= now {
+                    self.newest_strike = s.born;
+                    self.events.push(api::SoundEvent::Strike);
+                }
                 (s, progress, age)
             })
             .filter(|&(_, progress, _)| progress > 0.0)
@@ -3078,6 +3097,9 @@ impl Renderer {
                     age: f32::INFINITY,
                     seed: (n as f32 * 7.77) % 101.0,
                 };
+                if heard > self.newest_mark && (failed && self.mark_failures || stamped) {
+                    self.events.push(if stamped { api::SoundEvent::Stamp } else { api::SoundEvent::Failure });
+                }
                 if failed && self.mark_failures {
                     (span.progress, span.age) = timing(heard, variant.theme.mark_time(), &mut marks_until);
                     variant.theme.draw_failure(variant, &ctx, &span, &mut overlay);
@@ -3088,6 +3110,9 @@ impl Renderer {
                 }
             }
             self.marks_until = marks_until;
+            if let Some(newest) = commands.values().map(|&(_, heard)| heard).reduce(f32::max) {
+                self.newest_mark = self.newest_mark.max(newest);
+            }
         }
         self.ink_rects.extend(overlay);
         if chrome {
