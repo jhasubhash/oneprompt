@@ -32,6 +32,9 @@ cargo clippy --release         # keep it warning-free
    The bundle's executable links to `target/release/oneprompt` (`scripts/make-app.sh`), so
    it never needs remaking after a build.
 
+4. **Keep README.md current**: update it whenever the code changes make it stale (features,
+   settings, source layout, build steps), in the same change.
+
 ## Testing in the GUI without disturbing the user
 
 - Capture only the test window (`screencapture -l <window id>`), never the whole screen.
