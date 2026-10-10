@@ -2,10 +2,10 @@
 //! screen, highlighted, with one of them current. Return (or Cmd+G, or ↑)
 //! goes to the one before it, older; Shift+Return (Cmd+Shift+G, ↓) to the
 //! next, newer. The view scrolls to show it. Lowercase text matches either
-//! case; any capital makes the search exact.
+//! case; any capital makes the search exact. Cmd+R switches between the
+//! text taken literally and taken as a regular expression.
 //!
-//! Matches are found by alacritty_terminal's search, the text taken
-//! literally. Grid lines move as output scrolls the screen, so the current
+//! Matches are found by alacritty_terminal's search. Grid lines move as output scrolls the screen, so the current
 //! match is remembered by its place counted from the oldest line, which
 //! new output does not change.
 
@@ -22,6 +22,10 @@ pub struct Search {
     pub query: String,
     pub matches: Vec<Match>,
     pub current: Option<usize>,
+    /// The query is a regular expression, not text to match as it is.
+    pub regex: bool,
+    /// The query is a regular expression that does not parse.
+    pub invalid: bool,
     /// The scrollback's length when the matches were found: a match's line
     /// plus this is its place from the oldest line.
     history: usize,
@@ -35,7 +39,16 @@ impl Search {
         let old = self.current.and_then(|i| self.matches.get(i)).map(|m| (m.start().line.0 + self.history as i32, m.start().column));
         let grid = term.grid();
         self.history = grid.history_size();
-        self.matches = find(term, &self.query);
+        match find(term, &self.query, self.regex) {
+            Some(matches) => {
+                self.matches = matches;
+                self.invalid = false;
+            }
+            None => {
+                self.matches.clear();
+                self.invalid = true;
+            }
+        }
         let here = |m: &Match| (m.start().line.0 + self.history as i32, m.start().column);
         self.current = match old {
             Some(old) => self.matches.iter().position(|m| here(m) >= old).or(self.matches.len().checked_sub(1)),
@@ -49,6 +62,14 @@ impl Search {
     /// The text changed: starts over from the bottom of the view.
     pub fn set_query<T>(&mut self, term: &Term<T>, query: String) {
         self.query = query;
+        self.current = None;
+        self.refresh(term);
+    }
+
+    /// Switches between literal text and a regular expression, keeping
+    /// the query.
+    pub fn toggle_regex<T>(&mut self, term: &Term<T>) {
+        self.regex = !self.regex;
         self.current = None;
         self.refresh(term);
     }
@@ -116,23 +137,29 @@ impl Search {
     }
 }
 
-/// Every match of `query`, taken literally, oldest first.
-fn find<T>(term: &Term<T>, query: &str) -> Vec<Match> {
+/// Every match of `query`, oldest first: taken literally, or as a regular
+/// expression with `regex`. None if the expression does not parse.
+fn find<T>(term: &Term<T>, query: &str, regex: bool) -> Option<Vec<Match>> {
     if query.is_empty() {
-        return Vec::new();
+        return Some(Vec::new());
     }
-    let mut pattern = String::new();
-    for c in query.chars() {
-        if "\\.+*?()|[]{}^$#&-~".contains(c) {
-            pattern.push('\\');
+    let pattern = if regex {
+        query.to_string()
+    } else {
+        let mut pattern = String::new();
+        for c in query.chars() {
+            if "\\.+*?()|[]{}^$#&-~".contains(c) {
+                pattern.push('\\');
+            }
+            pattern.push(c);
         }
-        pattern.push(c);
-    }
-    let Ok(mut regex) = RegexSearch::new(&pattern) else { return Vec::new() };
+        pattern
+    };
+    let mut regex = RegexSearch::new(&pattern).ok()?;
     let grid = term.grid();
     let start = Point::new(grid.topmost_line(), Column(0));
     let end = Point::new(grid.bottommost_line(), Column(grid.columns() - 1));
-    RegexIter::new(start, end, Direction::Right, term, &mut regex).take(MAX_MATCHES).collect()
+    Some(RegexIter::new(start, end, Direction::Right, term, &mut regex).take(MAX_MATCHES).collect())
 }
 
 #[cfg(test)]
@@ -178,5 +205,25 @@ mod tests {
         t.scroll_display(Scroll::Delta(delta));
         assert_eq!(search.reveal(&t), 0);
         assert_eq!(search.marks(&t).len(), 1);
+    }
+
+    #[test]
+    fn regular_expressions_match_patterns_and_bad_ones_say_so() {
+        let t = term("a.b one\nA.B two\naxb three");
+        let mut search = Search::default();
+        search.set_query(&t, "a.b".into());
+        assert_eq!(search.count(), Some((2, 2)));
+        // As a regular expression "." is any character, so axb matches too.
+        search.toggle_regex(&t);
+        assert_eq!(search.count(), Some((3, 3)));
+        search.set_query(&t, "t(wo|hree)".into());
+        assert_eq!(search.count(), Some((2, 2)));
+        assert!(!search.invalid);
+        search.set_query(&t, "(one".into());
+        assert!(search.invalid);
+        assert_eq!(search.count(), Some((0, 0)));
+        // Back to text: the same query is just text again.
+        search.toggle_regex(&t);
+        assert!(!search.invalid);
     }
 }

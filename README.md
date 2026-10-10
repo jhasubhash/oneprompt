@@ -150,9 +150,10 @@ Milestone 1, a working terminal:
 - Bold, italic, underline, strikeout, inverse, dim; block, beam and underline cursors (outlined when unfocused)
 - Mouse selection drawn as a per-theme highlighter; double-click selects a word, triple-click a line
 - Mouse reporting for full-screen apps (vim, htop, tmux): clicks, drags, wheel, SGR and legacy encodings
-- Full-screen apps always get at least 80x24 cells: if the window is too small at the chosen
-  font size (btop would refuse to draw), the text shrinks while the app runs (down to half
-  size) and returns to normal when it exits (in a window without splits)
+- Full-screen apps always get at least 80x24 cells: if their pane (or the window) is too
+  small at the chosen font size (btop would refuse to draw), that pane's text shrinks while
+  the app runs (down to half size) and returns to normal when it exits; the other panes keep
+  theirs
 - Splits: panes side by side (Cmd+D) or one above the other (Cmd+Shift+D), each its own
   shell started in the same folder, on one continuous sheet; the panes without the keyboard
   are veiled a little, and the dividers between them can be dragged. Each theme draws its
@@ -160,7 +161,9 @@ Milestone 1, a working terminal:
   Chalkboard rules them in chalk
 - Find (Cmd+F): every match in the scrollback and on screen highlighted, the current one in
   the cursor's colour; Return / Shift+Return (or Cmd+G / Cmd+Shift+G, ↑ / ↓) go to older and
-  newer ones, and Esc leaves the current one selected. Lowercase matches either case
+  newer ones, and Esc leaves the current one selected. Lowercase matches either case. Cmd+R
+  in the find bar switches to a regular expression (`.*` shows in the bar; one that does not
+  parse says so) and back to plain text
 - Links: hold Cmd to underline the one under the pointer, Cmd+click to open it. Web
   addresses (also wrapped over two rows), hyperlinks programs mark (OSC 8, as
   `ls --hyperlink` sends) and names of files and folders that exist (`src/main.rs:12` opens
@@ -181,7 +184,7 @@ Milestone 1, a working terminal:
 | Cmd+N | new window |
 | Cmd+D / Cmd+Shift+D | split the pane side by side / one above the other (drag a divider to resize) |
 | Cmd+Option+arrows, Cmd+] / Cmd+[ | the pane that way, the next / previous pane; a click in a pane also gives it the keyboard |
-| Cmd+F | find; Return / Shift+Return older / newer match, Esc closes |
+| Cmd+F | find; Return / Shift+Return older / newer match, Cmd+R regular expression / text, Esc closes |
 | Cmd+click | open the link under the pointer (hold Cmd to see it underlined) |
 | Cmd+Shift+L | flip between light and dark |
 | Cmd+Option+T | theme picker |
@@ -217,9 +220,6 @@ signed, notarized `target/dist/oneprompt-<version>.dmg` (setup steps are at the 
 the script). Once the dmg is published as a GitHub release, `scripts/update-cask.sh`
 points the Homebrew cask ([jhasubhash/homebrew-tap](https://github.com/jhasubhash/homebrew-tap))
 at it.
-
-Not yet: running a pane's full-screen app shrunk to fit, and a search that takes regular
-expressions.
 
 ## Settings
 

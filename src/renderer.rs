@@ -17,7 +17,7 @@
 //! them, so the sheet runs on under the dividers, and the last adds the
 //! window's own marks before pass 3 runs once for the window.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -48,8 +48,9 @@ use crate::theme::{
 /// Margin around the grid, in logical pixels.
 const PADDING: f32 = 24.0;
 /// The grid full-screen apps (btop, vim, ...) get at least: the classic
-/// terminal size most of them are designed for. While one runs in a window
-/// too small for it at the chosen font size, the text shrinks to fit.
+/// terminal size most of them are designed for. While one runs in a pane
+/// (or a window) too small for it at the chosen font size, that pane's text
+/// shrinks to fit.
 const FULL_SCREEN_MIN: (usize, usize) = (80, 24);
 /// Text shrinks to no less than this share of its size.
 const MIN_FIT: f32 = 0.5;
@@ -444,6 +445,9 @@ pub struct SearchBar {
     pub preedit: String,
     /// The current match and how many there are; None with nothing typed.
     pub count: Option<(usize, usize)>,
+    /// The query is a regular expression (Cmd+R), and whether it parses.
+    pub regex: bool,
+    pub invalid: bool,
 }
 
 /// The settings panel as drawn: what it shows, how far it is scrolled, its
@@ -664,8 +668,11 @@ pub struct Renderer {
 
     /// Text size multiplier (Cmd + / Cmd -).
     zoom: f32,
-    /// Whether a full-screen app is running, and the shrink applied for it.
-    fit_full_screen: bool,
+    /// The panes running a full-screen app, and each pane's shrink for it
+    /// with the cell size that gives (fit, cell width, cell height). `fit`
+    /// and the cell size are the pane being measured or drawn's.
+    full_screen: HashSet<u64>,
+    pane_metrics: HashMap<u64, (f32, f32, f32)>,
     fit: f32,
     cell_width: f32,
     cell_height: f32,
@@ -833,7 +840,8 @@ impl Renderer {
             tab_text: Vec::new(),
             tab_slots: Vec::new(),
             zoom: 1.0,
-            fit_full_screen: false,
+            full_screen: HashSet::new(),
+            pane_metrics: HashMap::new(),
             fit: 1.0,
             cell_width: 8.0,
             cell_height: 16.0,
@@ -933,6 +941,8 @@ impl Renderer {
     /// Lets go of a closed pane's state.
     pub fn forget_pane(&mut self, id: u64) {
         self.panes.remove(&id);
+        self.full_screen.remove(&id);
+        self.pane_metrics.remove(&id);
         self.divider_births.remove(&id);
     }
 
@@ -1268,9 +1278,10 @@ impl Renderer {
     /// Maps a window position (physical pixels) to a viewport cell, clamped
     /// to the grid. Also says whether the point is in the cell's right half.
     pub fn cell_at(&self, rect: [f32; 4], x: f64, y: f64, size: GridSize) -> (usize, usize, bool) {
+        // The pane's own cells: a shrunk one's are smaller.
         let (pad, top) = self.origin(rect);
-        let fx = ((x as f32 - pad) / self.cell_width).max(0.0);
-        let fy = ((y as f32 - top) / self.cell_height).max(0.0);
+        let fx = ((x as f32 - pad) / size.cell_width).max(0.0);
+        let fy = ((y as f32 - top) / size.cell_height).max(0.0);
         let col = (fx as usize).min(size.columns - 1);
         let line = (fy as usize).min(size.lines - 1);
         (col, line, fx.fract() >= 0.5)
@@ -1284,12 +1295,17 @@ impl Renderer {
         self.zoom = (self.zoom * factor).clamp(0.5, 3.0);
     }
 
-    /// A full-screen app started or ended; returns true if the grid has to
-    /// be recomputed.
-    pub fn set_full_screen(&mut self, on: bool) -> bool {
-        let changed = self.fit_full_screen != on;
-        self.fit_full_screen = on;
-        changed
+    /// A full-screen app started or ended in pane `id`; returns true if
+    /// the grid has to be recomputed.
+    pub fn set_full_screen(&mut self, id: u64, on: bool) -> bool {
+        if on { self.full_screen.insert(id) } else { self.full_screen.remove(&id) }
+    }
+
+    /// Makes pane `id`'s text size and cells the ones drawn with.
+    fn use_pane_metrics(&mut self, id: u64) {
+        if let Some(&(fit, width, height)) = self.pane_metrics.get(&id) {
+            (self.fit, self.cell_width, self.cell_height) = (fit, width, height);
+        }
     }
 
     /// Where the grid of the pane being drawn starts, physical pixels.
@@ -1325,24 +1341,26 @@ impl Renderer {
     }
 
     /// How many cells fit pane `id` at `rect` (physical pixels). While a
-    /// full-screen app runs in a window with one pane, the text shrinks
-    /// (down to `MIN_FIT`) until the grid is at least `FULL_SCREEN_MIN`.
+    /// full-screen app runs in it, the pane's text shrinks (down to
+    /// `MIN_FIT`) until its grid is at least `FULL_SCREEN_MIN`; the rest of
+    /// the window keeps its size.
     pub fn grid_size(&mut self, variant: &Variant, id: u64, rect: [f32; 4]) -> GridSize {
         self.set_pane(id, rect, None);
         self.fit = 1.0;
-        let whole = rect == self.window_rect();
+        let fits = self.full_screen.contains(&id);
         let mut size = self.measure(variant);
         let (columns, lines) = FULL_SCREEN_MIN;
         // Cell size scales with the font, apart from rounding: aim for the
         // ratio, then step down a little until it fits.
         for _ in 0..12 {
-            if !self.fit_full_screen || !whole || (size.columns >= columns && size.lines >= lines) || self.fit <= MIN_FIT {
+            if !fits || (size.columns >= columns && size.lines >= lines) || self.fit <= MIN_FIT {
                 break;
             }
             let ratio = (size.columns as f32 / columns as f32).min(size.lines as f32 / lines as f32);
             self.fit = (self.fit * ratio.min(0.97)).max(MIN_FIT);
             size = self.measure(variant);
         }
+        self.pane_metrics.insert(id, (self.fit, self.cell_width, self.cell_height));
         size
     }
 
@@ -1499,6 +1517,7 @@ impl Renderer {
         for (i, pane) in panes.iter_mut().enumerate() {
             let last = i + 1 == n;
             self.set_pane(pane.id, pane.rect, None);
+            self.use_pane_metrics(pane.id);
             self.pane_focused = pane.focused;
             self.after_ink = if last { std::mem::take(&mut after) } else { Vec::new() };
             let struck = if strikes { pane.strikes.as_deref_mut() } else { None };
@@ -1506,6 +1525,12 @@ impl Renderer {
             self.draw(variant, view, i == 0, last);
         }
         self.after_ink.clear();
+        // What is drawn after the panes (the input method's text) sits in
+        // the focused one.
+        if let Some(pane) = panes.iter().find(|p| p.focused).or(panes.first()) {
+            self.set_pane(pane.id, pane.rect, None);
+            self.use_pane_metrics(pane.id);
+        }
     }
 
     /// Draws each picker card's picture: the screen as its variant draws it,
@@ -1731,15 +1756,19 @@ impl Renderer {
         };
         let fs = &mut self.font_system;
         let (count, count_rgb) = match bar.count {
-            None => ("\u{21a9} older   \u{21e7}\u{21a9} newer".to_string(), quiet),
+            None if bar.regex => ("\u{21a9} older   \u{2318}R text".to_string(), quiet),
+            None => ("\u{21a9} older   \u{2318}R regex".to_string(), quiet),
+            Some(_) if bar.invalid => ("bad pattern".to_string(), variant.palette[1]),
             Some((_, 0)) => ("no matches".to_string(), variant.palette[1]),
             Some((i, n)) if n >= crate::search::MAX_MATCHES => (format!("{i} of {n}+"), quiet),
             Some((i, n)) => (format!("{i} of {n}"), quiet),
         };
+        // A regular expression is marked like an editor's regex toggle.
+        let count = if bar.regex && bar.count.is_some() { format!(".*  {count}") } else { count };
         let count_w = set(&mut self.search_text[1], fs, &[(&count, attrs(count_rgb))]);
         let mut spans: Vec<(&str, Attrs)> = Vec::new();
         if bar.query.is_empty() && bar.preedit.is_empty() {
-            spans.push(("Find", attrs(quiet)));
+            spans.push((if bar.regex { "Find .*" } else { "Find" }, attrs(quiet)));
         } else {
             spans.push((&bar.query, attrs(variant.ink)));
             if !bar.preedit.is_empty() {
@@ -2465,7 +2494,11 @@ impl Renderer {
         let (columns, lines) = (self.grid().0 as usize, self.grid().1 as usize);
         let mut chars = vec![' '; columns * lines];
         let mut slots = vec![0.0f32; columns * lines];
-        if !self.thumbnail {
+        // A shrunk pane (a full-screen app squeezed into it) writes with the
+        // plain sweep: the pen-path atlas is for the window's own cell size,
+        // and such apps redraw too often for the pen to show.
+        let shrunk = self.fit < 1.0;
+        if !self.thumbnail && !shrunk {
             self.reset_tracer_if_needed(variant);
         }
         let regular = self.weight_for(&variant.font_family, variant.font_weight);
@@ -2509,7 +2542,7 @@ impl Renderer {
             if line < lines && col < columns && !flags.contains(Flags::HIDDEN) {
                 let c = cell_char(indexed.cell.c);
                 chars[line * columns + col] = c;
-                if self.animation.0 && !self.thumbnail && c != ' ' && boxdraw::pieces(c, 1.0, 1.0).is_none() {
+                if self.animation.0 && !self.thumbnail && !shrunk && c != ' ' && boxdraw::pieces(c, 1.0, 1.0).is_none() {
                     let key = GlyphKey {
                         c,
                         weight: if flags.contains(Flags::BOLD) { bold } else { regular },

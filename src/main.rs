@@ -402,10 +402,11 @@ impl App {
         {
             search.refresh(&tab.pane().terminal.term.lock());
         }
-        // A full-screen app in the new tab may need its text shrunk.
-        let full_screen = self.terminal().is_some_and(|t| t.mode().contains(TermMode::ALT_SCREEN));
-        if let Some(r) = self.renderer.as_mut() {
-            r.set_full_screen(full_screen);
+        // A full-screen app in the new tab's panes may need its text shrunk.
+        if let (Some(r), Some(tab)) = (self.renderer.as_mut(), self.tabs.get(index)) {
+            for pane in &tab.panes {
+                r.set_full_screen(pane.id, pane.terminal.mode().contains(TermMode::ALT_SCREEN));
+            }
         }
         self.relayout();
     }
@@ -1171,7 +1172,13 @@ impl App {
         }
         let marks = search.marks(&term);
         drop(term);
-        let bar = renderer::SearchBar { query: search.query.clone(), preedit: self.search_preedit.clone(), count: search.count() };
+        let bar = renderer::SearchBar {
+            query: search.query.clone(),
+            preedit: self.search_preedit.clone(),
+            count: search.count(),
+            regex: search.regex,
+            invalid: search.invalid,
+        };
         if let Some(r) = self.renderer.as_mut() {
             r.set_search(Some(bar));
             r.set_search_marks(marks);
@@ -1230,6 +1237,12 @@ impl App {
                     }
                 }
                 Key::Character(c) if c == "f" => {}
+                Key::Character(c) if c.eq_ignore_ascii_case("r") => {
+                    if let Some(tab) = self.tabs.get(self.active) {
+                        search.toggle_regex(&tab.pane().terminal.term.lock());
+                    }
+                    self.update_search(true);
+                }
                 Key::Named(NamedKey::Backspace) => self.set_search_query(String::new()),
                 _ => return false,
             }
@@ -1775,9 +1788,12 @@ impl ApplicationHandler<UserEvent> for App {
             // Background tabs keep running; only the visible one is drawn.
             UserEvent::Wakeup(id) if self.find_pane(id).is_some_and(|(t, _)| t == self.active) => {
                 self.search_stale = true;
-                // Full-screen apps get room for at least 80x24 cells.
-                let full_screen = self.terminal().is_some_and(|t| t.mode().contains(TermMode::ALT_SCREEN));
-                if self.renderer.as_mut().is_some_and(|r| r.set_full_screen(full_screen)) {
+                // Full-screen apps get room for at least 80x24 cells, in
+                // whichever pane they run.
+                let full_screen = self
+                    .find_pane(id)
+                    .is_some_and(|(t, p)| self.tabs[t].panes[p].terminal.mode().contains(TermMode::ALT_SCREEN));
+                if self.renderer.as_mut().is_some_and(|r| r.set_full_screen(id, full_screen)) {
                     self.relayout();
                 }
                 self.redraw();

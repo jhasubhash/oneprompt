@@ -39,6 +39,8 @@ cargo clippy --release         # keep it warning-free
 ## Testing in the GUI without disturbing the user
 
 - Capture only the test window (`screencapture -l <window id>`), never the whole screen.
+- The user's own oneprompt is usually running too: pick the test window by its process's
+  command line (`ps -o pid,command -p <pid>`), and never send keys to or resize the user's.
 - Before sending keystrokes (System Events), make the test window frontmost and check it
   is, or the keys go to whatever the user is using.
 - No synthetic mouse clicks: window coordinates do not map reliably across the user's
@@ -58,6 +60,26 @@ cargo clippy --release         # keep it warning-free
   validation and settings panel rows are generated from them.
 - New settings: validate their range, apply them live, add them to the template and a row
   in the settings panel (`settings::items`), document them in README.md.
+
+## Releases
+
+Only when the user asks for one. Releases are alphas for now, published as GitHub
+pre-releases.
+
+1. Bump `version` in Cargo.toml (`0.1.0-alpha.N`) and build, so Cargo.lock follows.
+2. `scripts/release.sh`: builds the universal app, signs it, makes
+   `target/dist/oneprompt-<version>.dmg` and notarizes it (several minutes). The signing
+   certificate and the `oneprompt-notary` credentials are in the user's keychain; if they
+   are missing, the user sets them up (the script's header says how): never type their
+   Apple ID or passwords.
+3. Commit the bump ("Release <version>") and push.
+4. `gh release create v<version> <dmg> --prerelease --title "oneprompt <version>"` with
+   notes: how to install, what is new since the last release, the dmg's SHA-256.
+5. `scripts/update-cask.sh`: points the Homebrew cask (github.com/jhasubhash/homebrew-tap,
+   `Casks/oneprompt.rb`) at the published dmg. Check it with
+   `brew style` and `brew fetch --cask jhasubhash/tap/oneprompt` (the audit's "GitHub
+   pre-release" complaint is expected). Don't install the cask on the user's machine: its
+   `/Applications/oneprompt.app` would sit beside their dev bundle.
 
 ## Git
 
