@@ -11,6 +11,11 @@
 //! 3. Present pass, onto the window: copies the scene, or while a reveal or
 //!    switch runs, the incoming theme's transition stage shows it over what
 //!    was there before.
+//!
+//! With splits, passes 1 and 2 run once per pane, each with its own grid
+//! (origin, size, cell births): the first pane lays the surface for all of
+//! them, so the sheet runs on under the dividers, and the last adds the
+//! window's own marks before pass 3 runs once for the window.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -320,35 +325,41 @@ pub struct Notice {
     pub is_error: bool,
 }
 
-/// Everything sized by the window or the grid, rebuilt together.
+/// Everything sized by the window, rebuilt together.
 struct Targets {
-    /// Ink is drawn here before it is composited onto the surface.
-    ink: wgpu::Texture,
+    /// Ink is drawn here, a pane at a time, before it is composited onto
+    /// the surface.
     ink_view: wgpu::TextureView,
-    ink_bind_group: wgpu::BindGroup,
     /// The finished frame, before the present pass copies it to the window.
     scene: wgpu::Texture,
     scene_view: wgpu::TextureView,
     /// The frame a light/dark transition reveals the new look over.
     previous: wgpu::Texture,
     present_bind_group: wgpu::BindGroup,
-    /// Per cell: birth time and pen-order atlas slot (Rg32Float).
-    births: wgpu::Texture,
+}
+
+/// Each pane's own: its grid, when each cell was written and with which
+/// pen path (Rg32Float, for the ink stage), and what its screen showed, for
+/// the writing animation.
+struct PaneState {
     grid: (u32, u32),
+    births: wgpu::Texture,
+    ink_bind_group: wgpu::BindGroup,
+    animator: TextAnimator,
+}
+
+/// A pane to draw: its terminal, where it is in the window (physical
+/// pixels), and whether it has the keyboard.
+pub struct PaneView<'a, L: EventListener> {
+    pub id: u64,
+    pub term: &'a Term<L>,
+    pub strikes: Option<&'a mut Strikes>,
+    pub rect: [f32; 4],
+    pub focused: bool,
 }
 
 impl Targets {
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        device: &wgpu::Device,
-        layouts: &Layouts,
-        buffers: &Buffers,
-        ink_sampler: &wgpu::Sampler,
-        trace_atlas: &wgpu::TextureView,
-        config: &wgpu::SurfaceConfiguration,
-        grid: (u32, u32),
-        keep: Option<&Targets>,
-    ) -> Self {
+    fn new(device: &wgpu::Device, layouts: &Layouts, buffers: &Buffers, config: &wgpu::SurfaceConfiguration) -> Self {
         let size = wgpu::Extent3d { width: config.width, height: config.height, depth_or_array_layers: 1 };
         let texture = |label, usage| {
             device.create_texture(&wgpu::TextureDescriptor {
@@ -363,44 +374,14 @@ impl Targets {
             })
         };
         use wgpu::TextureUsages as U;
-        // Only the grid changed (another theme's font): keep the window-sized
-        // textures, so a transition still has the previous frame.
-        let (ink, scene, previous) = match keep.filter(|t| t.scene.width() == config.width && t.scene.height() == config.height) {
-            Some(t) => (t.ink.clone(), t.scene.clone(), t.previous.clone()),
-            None => (
-                texture("ink layer", U::RENDER_ATTACHMENT | U::TEXTURE_BINDING),
-                texture("scene", U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_SRC),
-                texture("previous frame", U::TEXTURE_BINDING | U::COPY_DST),
-            ),
-        };
-        let births = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("cell births"),
-            size: wgpu::Extent3d { width: grid.0.max(1), height: grid.1.max(1), depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rg32Float,
-            usage: U::TEXTURE_BINDING | U::COPY_DST,
-            view_formats: &[],
-        });
+        let ink = texture("ink layer", U::RENDER_ATTACHMENT | U::TEXTURE_BINDING);
+        let scene = texture("scene", U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_SRC);
+        let previous = texture("previous frame", U::TEXTURE_BINDING | U::COPY_DST);
         let ink_view = ink.create_view(&Default::default());
         let scene_view = scene.create_view(&Default::default());
         let previous_view = previous.create_view(&Default::default());
-        let births_view = births.create_view(&Default::default());
         let view = wgpu::BindingResource::TextureView;
         let entry = |binding, resource| wgpu::BindGroupEntry { binding, resource };
-        let ink_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("ink stage"),
-            layout: &layouts.ink,
-            entries: &[
-                entry(0, buffers.frame.as_entire_binding()),
-                entry(1, buffers.data.as_entire_binding()),
-                entry(2, view(&ink_view)),
-                entry(3, wgpu::BindingResource::Sampler(ink_sampler)),
-                entry(4, view(&births_view)),
-                entry(5, view(trace_atlas)),
-            ],
-        });
         let present_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("transition stage"),
             layout: &layouts.transition,
@@ -412,7 +393,7 @@ impl Targets {
                 entry(4, view(&previous_view)),
             ],
         });
-        Self { ink, ink_view, ink_bind_group, scene, scene_view, previous, present_bind_group, births, grid }
+        Self { ink_view, scene, scene_view, previous, present_bind_group }
     }
 }
 
@@ -442,6 +423,16 @@ pub struct SettingsPanel {
     pub path: String,
     /// Why the settings file could not be read, if it could not.
     pub error: Option<String>,
+}
+
+/// What the find bar shows.
+#[derive(Clone)]
+pub struct SearchBar {
+    pub query: String,
+    /// Text being composed in an input method, after the query.
+    pub preedit: String,
+    /// The current match and how many there are; None with nothing typed.
+    pub count: Option<(usize, usize)>,
 }
 
 /// The settings panel as drawn: what it shows, how far it is scrolled, its
@@ -577,7 +568,16 @@ pub struct Renderer {
     strikes_until: f32,
     /// Whether struck names fling blood.
     splatter: bool,
-    animator: TextAnimator,
+    /// Every pane's grid and writing state, by pane id, and the one being
+    /// measured or drawn: its id, its box in the window, whether it has the
+    /// keyboard.
+    panes: HashMap<u64, PaneState>,
+    pane: u64,
+    pane_rect: [f32; 4],
+    pane_focused: bool,
+    /// Drawn over every pane's ink with the last one: dividers, and a veil
+    /// over the panes without the keyboard.
+    after_ink: Vec<Shape>,
     transition: Option<Transition>,
     /// For themes' made-up-at-random reveals.
     rng: animation::Rng,
@@ -603,6 +603,18 @@ pub struct Renderer {
     settings_buffer: wgpu::Buffer,
     /// Installed monospace font families, sorted, once asked for.
     monospace: Option<Vec<String>>,
+    /// Text being composed in an input method, and its selected range.
+    preedit: Option<(String, Option<(usize, usize)>)>,
+    preedit_text: Buffer,
+    /// The cursor's cell in the last frame, physical pixels.
+    cursor_cell: [f32; 4],
+    /// The link under the pointer while Cmd is held: per row, its screen
+    /// line, first column and length.
+    link: Vec<(usize, usize, usize)>,
+    /// The find bar while it is open, its text, and the matches in view.
+    search: Option<SearchBar>,
+    search_text: [Buffer; 2],
+    search_marks: Vec<(usize, usize, usize, bool)>,
 
     font_system: FontSystem,
     swash_cache: SwashCache,
@@ -710,7 +722,8 @@ impl Renderer {
             view_formats: &[],
         });
         let trace_atlas_view = trace_atlas.create_view(&Default::default());
-        let targets = Targets::new(&device, &layouts, &buffers, &ink_sampler, &trace_atlas_view, &config, (1, 1), None);
+        let targets = Targets::new(&device, &layouts, &buffers, &config);
+        let config_size = (config.width as f32, config.height as f32);
 
         let mut font_system = FontSystem::new();
         let swash_cache = SwashCache::new();
@@ -725,6 +738,8 @@ impl Renderer {
         let settings_buffer = Self::create_rect_buffer(&device, 256);
         let mut text = Buffer::new(&mut font_system, Metrics::new(16.0, 22.0));
         text.borrow_with(&mut font_system).set_wrap(Wrap::None);
+        let preedit_text = Buffer::new(&mut font_system, Metrics::new(16.0, 22.0));
+        let search_text = [Buffer::new(&mut font_system, Metrics::new(12.0, 16.0)), Buffer::new(&mut font_system, Metrics::new(12.0, 16.0))];
         let mut notice_text = Buffer::new(&mut font_system, Metrics::new(12.0, 16.0));
         notice_text.borrow_with(&mut font_system).set_wrap(Wrap::None);
 
@@ -751,7 +766,11 @@ impl Renderer {
             harmonize: true,
             strikes_until: f32::NEG_INFINITY,
             splatter: true,
-            animator: TextAnimator::default(),
+            panes: HashMap::new(),
+            pane: 0,
+            pane_rect: [0.0, 0.0, config_size.0, config_size.1],
+            pane_focused: true,
+            after_ink: Vec::new(),
             transition: None,
             rng: animation::Rng::new(random_seed()),
             tracer: Tracer::new((1, 1), TRACE_ATLAS),
@@ -768,6 +787,13 @@ impl Renderer {
             settings: None,
             settings_buffer,
             monospace: None,
+            preedit: None,
+            preedit_text,
+            cursor_cell: [0.0; 4],
+            link: Vec::new(),
+            search: None,
+            search_text,
+            search_marks: Vec::new(),
             font_system,
             swash_cache,
             viewport,
@@ -817,18 +843,76 @@ impl Renderer {
         }
     }
 
-    /// Rebuilds the window- and grid-sized targets.
-    fn rebuild_targets(&mut self, grid: (u32, u32)) {
-        self.targets = Targets::new(
-            &self.device,
-            &self.layouts,
-            &self.buffers,
-            &self.ink_sampler,
-            &self.trace_atlas_view,
-            &self.config,
-            grid,
-            Some(&self.targets),
-        );
+    /// Rebuilds the window-sized targets, and with them every pane's view
+    /// of the ink layer.
+    fn rebuild_targets(&mut self) {
+        self.targets = Targets::new(&self.device, &self.layouts, &self.buffers, &self.config);
+        let ids: Vec<u64> = self.panes.keys().copied().collect();
+        for id in ids {
+            let births = self.panes[&id].births.clone();
+            let group = self.ink_bind_group(&births);
+            if let Some(pane) = self.panes.get_mut(&id) {
+                pane.ink_bind_group = group;
+            }
+        }
+    }
+
+    /// What the ink stage reads for a pane: the ink layer, and `births`.
+    fn ink_bind_group(&self, births: &wgpu::Texture) -> wgpu::BindGroup {
+        let births_view = births.create_view(&Default::default());
+        let view = wgpu::BindingResource::TextureView;
+        let entry = |binding, resource| wgpu::BindGroupEntry { binding, resource };
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ink stage"),
+            layout: &self.layouts.ink,
+            entries: &[
+                entry(0, self.buffers.frame.as_entire_binding()),
+                entry(1, self.buffers.data.as_entire_binding()),
+                entry(2, view(&self.targets.ink_view)),
+                entry(3, wgpu::BindingResource::Sampler(&self.ink_sampler)),
+                entry(4, view(&births_view)),
+                entry(5, view(&self.trace_atlas_view)),
+            ],
+        })
+    }
+
+    /// Makes `id` the pane being measured, laid out and drawn, at `rect`,
+    /// with a grid of `grid` cells (None: as it was). A new grid starts its
+    /// writing over.
+    fn set_pane(&mut self, id: u64, rect: [f32; 4], grid: Option<(u32, u32)>) {
+        self.pane = id;
+        self.pane_rect = rect;
+        let current = self.panes.get(&id).map(|p| p.grid);
+        let grid = match (grid, current) {
+            (Some(grid), _) => grid,
+            (None, Some(grid)) => grid,
+            (None, None) => (1, 1),
+        };
+        if current == Some(grid) {
+            return;
+        }
+        let births = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cell births"),
+            size: wgpu::Extent3d { width: grid.0.max(1), height: grid.1.max(1), depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rg32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let ink_bind_group = self.ink_bind_group(&births);
+        self.panes.insert(id, PaneState { grid, births, ink_bind_group, animator: TextAnimator::default() });
+    }
+
+    /// The pane being drawn's grid, columns and lines.
+    fn grid(&self) -> (u32, u32) {
+        self.panes.get(&self.pane).map_or((1, 1), |p| p.grid)
+    }
+
+    /// Lets go of a closed pane's state.
+    pub fn forget_pane(&mut self, id: u64) {
+        self.panes.remove(&id);
     }
 
     /// Starts the pen-path atlas over when the glyphs would come out
@@ -999,7 +1083,8 @@ impl Renderer {
         let settle_time = self.settle_time / self.animation.1;
         self.transition.as_ref().is_some_and(|t| !t.done(now))
             || now < self.strikes_until
-            || (self.animation.0 && now - self.animator.latest_birth() < (write_time * 4.0).max(settle_time))
+            || (self.animation.0
+                && self.panes.values().any(|p| now - p.animator.latest_birth() < (write_time * 4.0).max(settle_time)))
     }
 
     pub fn window(&self) -> &Window {
@@ -1010,8 +1095,7 @@ impl Renderer {
         self.config.width = width.max(1);
         self.config.height = height.max(1);
         configure_surface(&self.surface, &self.device, &self.config);
-        let grid = self.targets.grid;
-        self.rebuild_targets(grid);
+        self.rebuild_targets();
         // A resized window cannot reveal over a frame of the old size.
         if self.transition.as_ref().is_some_and(|t| t.from == animation::From::PreviousFrame) {
             self.transition = None;
@@ -1128,7 +1212,9 @@ impl Renderer {
     /// Forgets what the screen showed, so the next frame appears as it is
     /// instead of being written in (switching tabs).
     pub fn reset_writing(&mut self) {
-        self.animator = TextAnimator::default();
+        for pane in self.panes.values_mut() {
+            pane.animator = TextAnimator::default();
+        }
     }
 
     pub fn set_notice(&mut self, notice: Option<Notice>) {
@@ -1159,8 +1245,8 @@ impl Renderer {
 
     /// Maps a window position (physical pixels) to a viewport cell, clamped
     /// to the grid. Also says whether the point is in the cell's right half.
-    pub fn cell_at(&self, x: f64, y: f64, size: GridSize) -> (usize, usize, bool) {
-        let (pad, top) = self.padding();
+    pub fn cell_at(&self, rect: [f32; 4], x: f64, y: f64, size: GridSize) -> (usize, usize, bool) {
+        let (pad, top) = self.origin(rect);
         let fx = ((x as f32 - pad) / self.cell_width).max(0.0);
         let fy = ((y as f32 - top) / self.cell_height).max(0.0);
         let col = (fx as usize).min(size.columns - 1);
@@ -1184,10 +1270,31 @@ impl Renderer {
         changed
     }
 
-    /// Left/right and top margins of the grid, in physical pixels.
+    /// Where the grid of the pane being drawn starts, physical pixels.
     fn padding(&self) -> (f32, f32) {
+        self.origin(self.pane_rect)
+    }
+
+    /// Where the grid of a pane at `rect` starts.
+    fn origin(&self, rect: [f32; 4]) -> (f32, f32) {
+        let [left, top, _, _] = self.insets(rect);
+        (rect[0] + left, rect[1] + top)
+    }
+
+    /// A pane's margins around its grid (left, top, right, bottom): the
+    /// window's own at the window's edges (the title strip at the top), half
+    /// as much beside another pane.
+    fn insets(&self, rect: [f32; 4]) -> [f32; 4] {
         let scale = self.window.scale_factor() as f32;
-        (PADDING * scale, (TITLE_STRIP + PADDING * 0.5) * scale)
+        let (w, h) = (self.config.width as f32, self.config.height as f32);
+        let (outer, inner) = (PADDING * scale, PADDING * 0.5 * scale);
+        let at = |a: f32, b: f32| (a - b).abs() < 1.0;
+        [
+            if at(rect[0], 0.0) { outer } else { inner },
+            if at(rect[1], 0.0) { (TITLE_STRIP + PADDING * 0.5) * scale } else { inner },
+            if at(rect[0] + rect[2], w) { outer } else { inner },
+            if at(rect[1] + rect[3], h) { outer } else { inner },
+        ]
     }
 
     fn metrics(&self, variant: &Variant) -> Metrics {
@@ -1195,17 +1302,19 @@ impl Renderer {
         Metrics::new(variant.font_size * scale, (variant.line_height * scale).round())
     }
 
-    /// How many cells fit the window. While a full-screen app runs, the
-    /// text shrinks (down to `MIN_FIT`) until the grid is at least
-    /// `FULL_SCREEN_MIN`.
-    pub fn grid_size(&mut self, variant: &Variant) -> GridSize {
+    /// How many cells fit pane `id` at `rect` (physical pixels). While a
+    /// full-screen app runs in a window with one pane, the text shrinks
+    /// (down to `MIN_FIT`) until the grid is at least `FULL_SCREEN_MIN`.
+    pub fn grid_size(&mut self, variant: &Variant, id: u64, rect: [f32; 4]) -> GridSize {
+        self.set_pane(id, rect, None);
         self.fit = 1.0;
+        let whole = rect == self.window_rect();
         let mut size = self.measure(variant);
         let (columns, lines) = FULL_SCREEN_MIN;
         // Cell size scales with the font, apart from rounding: aim for the
         // ratio, then step down a little until it fits.
         for _ in 0..12 {
-            if !self.fit_full_screen || (size.columns >= columns && size.lines >= lines) || self.fit <= MIN_FIT {
+            if !self.fit_full_screen || !whole || (size.columns >= columns && size.lines >= lines) || self.fit <= MIN_FIT {
                 break;
             }
             let ratio = (size.columns as f32 / columns as f32).min(size.lines as f32 / lines as f32);
@@ -1235,9 +1344,9 @@ impl Renderer {
         self.cell_width = width;
         self.cell_height = metrics.line_height;
 
-        let (pad, top) = self.padding();
-        let usable_w = self.config.width as f32 - 2.0 * pad;
-        let usable_h = self.config.height as f32 - top - pad;
+        let [left, top, right, bottom] = self.insets(self.pane_rect);
+        let usable_w = self.pane_rect[2] - left - right;
+        let usable_h = self.pane_rect[3] - top - bottom;
         let size = GridSize {
             columns: ((usable_w / self.cell_width) as usize).max(2),
             lines: ((usable_h / self.cell_height) as usize).max(1),
@@ -1245,15 +1354,19 @@ impl Renderer {
             cell_height: self.cell_height,
         };
         let grid = (size.columns as u32, size.lines as u32);
-        if grid != self.targets.grid {
-            self.rebuild_targets(grid);
-        }
+        self.set_pane(self.pane, self.pane_rect, Some(grid));
         size
     }
 
-    /// Draws a frame; `strikes`, when given, finds names of deleted files on
-    /// screen to strike out.
-    pub fn render<L: EventListener>(&mut self, variant: &Variant, term: &Term<L>, strikes: Option<&mut Strikes>) {
+    /// The whole window, physical pixels: the box of a lone pane.
+    pub fn window_rect(&self) -> [f32; 4] {
+        [0.0, 0.0, self.config.width as f32, self.config.height as f32]
+    }
+
+    /// Draws a frame: every pane, with `dividers` between them. A pane's
+    /// `strikes`, when given, finds names of deleted files on its screen to
+    /// strike out.
+    pub fn render<L: EventListener>(&mut self, variant: &Variant, panes: &mut [PaneView<L>], dividers: &[[f32; 4]]) {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
@@ -1268,11 +1381,12 @@ impl Renderer {
             _ => return,
         };
         let view = frame.texture.create_view(&Default::default());
-        self.draw_previews(term);
-        self.layout(variant, term, strikes);
-        self.draw(variant, &view);
+        self.draw_previews(panes, dividers);
+        self.draw_panes(variant, panes, dividers, &view, true);
         self.draw_picker(variant, &view);
         self.draw_settings(variant, &view);
+        self.draw_search(variant, &view);
+        self.draw_preedit(variant, &view);
         self.queue.present(frame);
         self.atlas.trim();
     }
@@ -1312,9 +1426,46 @@ impl Renderer {
         picker::cards(n, self.config.width as f32, self.config.height as f32, self.window.scale_factor() as f32)
     }
 
+    /// Draws the panes into `view`, one after another onto the same surface,
+    /// the window's own marks (controls, tabs, notice) and the dividers with
+    /// the last; `strikes`: with names of deleted files struck out.
+    fn draw_panes<L: EventListener>(
+        &mut self,
+        variant: &Variant,
+        panes: &mut [PaneView<L>],
+        dividers: &[[f32; 4]],
+        view: &wgpu::TextureView,
+        strikes: bool,
+    ) {
+        let n = panes.len();
+        let scale = self.window.scale_factor() as f32;
+        let mut after = Vec::new();
+        if n > 1 {
+            for pane in panes.iter().filter(|p| !p.focused) {
+                let [x, y, w, h] = pane.rect;
+                after.push(Shape::new(x, y, w, h, variant.surface_rgb(), 0.3));
+            }
+        }
+        for &[x, y, w, h] in dividers {
+            let t = (1.0 * scale).max(1.0);
+            let line = if w < h { [x + (w - t) / 2.0, y, t, h] } else { [x, y + (h - t) / 2.0, w, t] };
+            after.push(Shape::new(line[0], line[1], line[2], line[3], variant.palette[8], 0.4));
+        }
+        for (i, pane) in panes.iter_mut().enumerate() {
+            let last = i + 1 == n;
+            self.set_pane(pane.id, pane.rect, None);
+            self.pane_focused = pane.focused;
+            self.after_ink = if last { std::mem::take(&mut after) } else { Vec::new() };
+            let struck = if strikes { pane.strikes.as_deref_mut() } else { None };
+            self.layout(variant, pane.term, struck, last);
+            self.draw(variant, view, i == 0, last);
+        }
+        self.after_ink.clear();
+    }
+
     /// Draws each picker card's picture: the screen as its variant draws it,
     /// with no writing in and no transition.
-    fn draw_previews<L: EventListener>(&mut self, term: &Term<L>) {
+    fn draw_previews<L: EventListener>(&mut self, panes: &mut [PaneView<L>], dividers: &[[f32; 4]]) {
         let Some(mut picker) = self.picker.take() else { return };
         let transition = self.transition.take();
         let settle_time = self.settle_time;
@@ -1347,8 +1498,7 @@ impl Renderer {
             }
             let Some((texture, _)) = &card.picture else { continue };
             let view = texture.create_view(&Default::default());
-            self.layout(&card.variant, term, None);
-            self.draw(&card.variant, &view);
+            self.draw_panes(&card.variant, panes, dividers, &view, false);
         }
         self.thumbnail = false;
         self.transition = transition;
@@ -1483,6 +1633,244 @@ impl Renderer {
         }
         self.queue.submit(Some(encoder.finish()));
         self.picker = Some(picker);
+    }
+
+    /// Text being composed in an input method (Chinese, Japanese, accents
+    /// typed as two keys, ...), with its selected range in bytes; None when
+    /// there is none.
+    pub fn set_preedit(&mut self, preedit: Option<(String, Option<(usize, usize)>)>) {
+        self.preedit = preedit;
+    }
+
+    /// Shows the find bar (None closes it).
+    pub fn set_search(&mut self, bar: Option<SearchBar>) {
+        self.search = bar;
+    }
+
+    /// Highlights matches: per row, screen line, column, length, and
+    /// whether it is the current one.
+    pub fn set_search_marks(&mut self, marks: Vec<(usize, usize, usize, bool)>) {
+        self.search_marks = marks;
+    }
+
+    /// The find bar, at the top right under the title strip: a patch of
+    /// fresh surface with what is being looked for, a caret, and how many
+    /// matches there are.
+    fn draw_search(&mut self, variant: &Variant, view: &wgpu::TextureView) {
+        let Some(bar) = self.search.clone() else { return };
+        if self.picker.is_some() || self.settings.is_some() {
+            return;
+        }
+        let s = self.window.scale_factor() as f32;
+        let (w, h) = (self.config.width as f32, self.config.height as f32);
+        let bar_w = (340.0 * s).min(w - 32.0 * s).max(1.0);
+        let bar_h = 32.0 * s;
+        let (x, y) = (w - bar_w - 16.0 * s, TITLE_STRIP * s + 2.0 * s);
+        let quiet = variant.palette[8];
+        let family = variant.font_family.clone();
+        let weight = self.weight_for(&family, variant.font_weight.min(500));
+        let attrs = |rgb: [u8; 3]| {
+            let [r, g, b] = rgb;
+            Attrs::new().family(Family::Name(&family)).weight(Weight(weight)).color(Color::rgb(r, g, b))
+        };
+        let size = 12.5 * s;
+        let line = (size * 1.35).round();
+        let set = |buffer: &mut Buffer, fs: &mut FontSystem, spans: &[(&str, Attrs)]| {
+            let mut b = buffer.borrow_with(fs);
+            b.set_metrics(Metrics::new(size, line));
+            b.set_wrap(Wrap::None);
+            b.set_size(Some(w), Some(line * 2.0));
+            b.set_rich_text(spans.iter().map(|(t, a)| (*t, a.clone())), &spans[0].1, Shaping::Advanced, None);
+            b.shape_until_scroll(false);
+            b.layout_runs().map(|r| r.line_w).fold(0.0, f32::max)
+        };
+        let fs = &mut self.font_system;
+        let (count, count_rgb) = match bar.count {
+            None => ("\u{21a9} older   \u{21e7}\u{21a9} newer".to_string(), quiet),
+            Some((_, 0)) => ("no matches".to_string(), variant.palette[1]),
+            Some((i, n)) if n >= crate::search::MAX_MATCHES => (format!("{i} of {n}+"), quiet),
+            Some((i, n)) => (format!("{i} of {n}"), quiet),
+        };
+        let count_w = set(&mut self.search_text[1], fs, &[(&count, attrs(count_rgb))]);
+        let mut spans: Vec<(&str, Attrs)> = Vec::new();
+        if bar.query.is_empty() && bar.preedit.is_empty() {
+            spans.push(("Find", attrs(quiet)));
+        } else {
+            spans.push((&bar.query, attrs(variant.ink)));
+            if !bar.preedit.is_empty() {
+                spans.push((&bar.preedit, attrs(quiet)));
+            }
+        }
+        let typed = !(bar.query.is_empty() && bar.preedit.is_empty());
+        let query_w = set(&mut self.search_text[0], fs, &spans);
+        // A long query scrolls left so its end and the caret stay in view.
+        let room = bar_w - count_w - 36.0 * s;
+        let text_x = x + 12.0 * s - (query_w - room).max(0.0) * typed as u8 as f32;
+        let text_y = y + (bar_h - line) / 2.0;
+        let caret_x = if typed { text_x + query_w } else { text_x };
+
+        let shapes = [
+            Shape::new(x, y, bar_w, bar_h, variant.surface_rgb(), 0.3),
+            Shape::rounded([x, y, bar_w, bar_h], 7.0 * s, 1.0 * s, quiet, 0.8),
+            Shape::new(caret_x + 1.0 * s, text_y + 2.0 * s, (1.5 * s).max(1.0), line - 4.0 * s, variant.cursor, 1.0),
+        ];
+        let needed = (shapes.len() * std::mem::size_of::<Shape>()) as u64;
+        self.queue.write_buffer(&self.settings_buffer, 0, bytemuck::cast_slice(&shapes));
+        let clip = TextBounds {
+            left: (x + 10.0 * s) as i32,
+            top: y as i32,
+            right: (x + 12.0 * s + room) as i32,
+            bottom: (y + bar_h) as i32,
+        };
+        let areas = [
+            TextArea { buffer: &self.search_text[0], left: text_x, top: text_y, scale: 1.0, bounds: clip, default_color: Color::rgb(0, 0, 0), custom_glyphs: &[] },
+            TextArea {
+                buffer: &self.search_text[1],
+                left: x + bar_w - count_w - 12.0 * s,
+                top: text_y,
+                scale: 1.0,
+                bounds: TextBounds { left: 0, top: 0, right: w as i32, bottom: h as i32 },
+                default_color: Color::rgb(0, 0, 0),
+                custom_glyphs: &[],
+            },
+        ];
+        self.picker_text
+            .prepare(&self.device, &self.queue, &mut self.font_system, &mut self.atlas, &self.viewport, areas, &mut self.swash_cache)
+            .expect("prepare search text");
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("search") });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("search"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            let stages = &self.stages[variant.theme.id()];
+            let (px, py) = (x.max(0.0) as u32, y.max(0.0) as u32);
+            let pw = (bar_w as u32).min(self.config.width.saturating_sub(px));
+            let ph = (bar_h as u32).min(self.config.height.saturating_sub(py));
+            pass.set_bind_group(0, &self.frame_group, &[]);
+            if pw > 0 && ph > 0 {
+                pass.set_scissor_rect(px, py, pw, ph);
+                pass.set_pipeline(&stages.surface);
+                pass.draw(0..3, 0..1);
+                pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
+            }
+            pass.set_vertex_buffer(0, self.settings_buffer.slice(..needed));
+            pass.set_pipeline(&stages.shapes);
+            pass.draw(0..4, 0..shapes.len() as u32);
+            self.picker_text.render(&self.atlas, &self.viewport, &mut pass).expect("render search text");
+        }
+        self.queue.submit(Some(encoder.finish()));
+    }
+
+    /// Underlines a link (runs of screen line, column, length), or none.
+    pub fn set_link(&mut self, link: Vec<(usize, usize, usize)>) {
+        self.link = link;
+    }
+
+    /// Where the input method's candidate window should go: the cursor's
+    /// cell, physical pixels.
+    pub fn ime_area(&self) -> [f32; 4] {
+        self.cursor_cell
+    }
+
+    /// The text being composed, drawn at the cursor on a patch of fresh
+    /// surface so it covers what is under it: underlined as macOS marks
+    /// composing text, the part being converted more heavily, and a caret.
+    fn draw_preedit(&mut self, variant: &Variant, view: &wgpu::TextureView) {
+        let Some((text, selected)) = self.preedit.clone() else { return };
+        if self.picker.is_some() || self.settings.is_some() {
+            return;
+        }
+        let s = self.window.scale_factor() as f32;
+        let (w, h) = (self.config.width as f32, self.config.height as f32);
+        let [cx, y, cw, ch] = self.cursor_cell;
+        let metrics = self.metrics(variant);
+        let weight = self.weight_for(&variant.font_family, variant.font_weight);
+        let [r, g, b] = variant.ink;
+        let attrs = Attrs::new().family(Family::Name(&variant.font_family)).weight(Weight(weight)).color(Color::rgb(r, g, b));
+        let mut buffer = self.preedit_text.borrow_with(&mut self.font_system);
+        buffer.set_metrics(metrics);
+        buffer.set_wrap(Wrap::None);
+        buffer.set_size(Some(w), Some(ch * 2.0));
+        buffer.set_text(&text, &attrs, Shaping::Advanced, None);
+        buffer.shape_until_scroll(false);
+        // Where a byte offset into the text falls, in pixels from its start.
+        let mut text_w = 0.0f32;
+        let mut edges: Vec<(usize, f32)> = Vec::new();
+        for run in buffer.layout_runs() {
+            text_w = text_w.max(run.line_w);
+            edges.extend(run.glyphs.iter().map(|g| (g.start, g.x)));
+        }
+        let at = |byte: usize| edges.iter().find(|(start, _)| *start >= byte).map_or(text_w, |e| e.1);
+        // Kept inside the window: long compositions move left.
+        let pad = PADDING * s;
+        let box_w = text_w.max(cw);
+        let x = cx.min(w - pad - box_w).max(pad.min(cx));
+        let line = (ch * 0.05).max(1.0 * s);
+        let mut shapes = vec![Shape::new(x, y + ch * 0.9, text_w, line, variant.ink, 0.6)];
+        match selected {
+            Some((a, b)) if b > a => {
+                let (a, b) = (at(a), at(b));
+                shapes.push(Shape::new(x + a, y + ch * 0.9 - line, b - a, line * 2.5, variant.ink, 0.95));
+            }
+            Some((a, _)) => shapes.push(Shape::new(x + at(a), y + ch * 0.08, (1.5 * s).max(1.0), ch * 0.84, variant.cursor, 1.0)),
+            None => {}
+        }
+        let needed = (shapes.len() * std::mem::size_of::<Shape>()) as u64;
+        self.queue.write_buffer(&self.settings_buffer, 0, bytemuck::cast_slice(&shapes));
+        let area = TextArea {
+            buffer: &self.preedit_text,
+            left: x,
+            top: y,
+            scale: 1.0,
+            bounds: TextBounds { left: 0, top: 0, right: w as i32, bottom: h as i32 },
+            default_color: Color::rgb(r, g, b),
+            custom_glyphs: &[],
+        };
+        self.picker_text
+            .prepare(&self.device, &self.queue, &mut self.font_system, &mut self.atlas, &self.viewport, [area], &mut self.swash_cache)
+            .expect("prepare preedit text");
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("preedit") });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("preedit"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            let stages = &self.stages[variant.theme.id()];
+            let (px, py) = ((x - 2.0 * s).max(0.0) as u32, y.max(0.0) as u32);
+            let pw = ((box_w + 4.0 * s) as u32).min(self.config.width.saturating_sub(px));
+            let ph = (ch as u32).min(self.config.height.saturating_sub(py));
+            pass.set_bind_group(0, &self.frame_group, &[]);
+            if pw > 0 && ph > 0 {
+                pass.set_scissor_rect(px, py, pw, ph);
+                pass.set_pipeline(&stages.surface);
+                pass.draw(0..3, 0..1);
+                pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
+            }
+            pass.set_vertex_buffer(0, self.settings_buffer.slice(..needed));
+            pass.set_pipeline(&stages.shapes);
+            pass.draw(0..4, 0..shapes.len() as u32);
+            self.picker_text.render(&self.atlas, &self.viewport, &mut pass).expect("render preedit text");
+        }
+        self.queue.submit(Some(encoder.finish()));
     }
 
     /// Opens the settings panel showing `panel`, updates it, or closes it
@@ -1893,8 +2281,8 @@ impl Renderer {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        self.layout(variant, term, None);
-        self.draw(variant, &texture.create_view(&Default::default()));
+        let mut panes = [PaneView { id: self.pane, term, strikes: None, rect: self.pane_rect, focused: true }];
+        self.draw_panes(variant, &mut panes, &[], &texture.create_view(&Default::default()), false);
 
         // Rows in a texture-to-buffer copy must be 256-byte aligned.
         let row = w * 4;
@@ -1968,7 +2356,7 @@ impl Renderer {
     ) -> (Vec<(Struck, f32, f32)>, f32) {
         let Some(style) = variant.theme.strike() else { return (Vec::new(), 0.0) };
         let Some(strikes) = strikes.filter(|_| !full_screen) else { return (Vec::new(), 0.0) };
-        let (columns, lines) = (self.targets.grid.0 as usize, self.targets.grid.1 as usize);
+        let (columns, lines) = (self.grid().0 as usize, self.grid().1 as usize);
         let mut chars = vec![' '; columns * lines];
         for indexed in cells {
             let line = indexed.point.line.0 + display_offset as i32;
@@ -2004,7 +2392,9 @@ impl Renderer {
 
     /// Turns the visible part of the grid into styled text runs plus
     /// rectangles for backgrounds, decorations and the cursor.
-    fn layout<L: EventListener>(&mut self, variant: &Variant, term: &Term<L>, strikes: Option<&mut Strikes>) {
+    /// Lays out the pane being drawn; `chrome`: also the window's own
+    /// marks (controls, notice, tabs).
+    fn layout<L: EventListener>(&mut self, variant: &Variant, term: &Term<L>, strikes: Option<&mut Strikes>, chrome: bool) {
         let content = term.renderable_content();
         let (pad, top) = self.padding();
         let (cw, ch) = (self.cell_width, self.cell_height);
@@ -2026,7 +2416,7 @@ impl Renderer {
 
         // What each cell shows, for the writing animation, and the pen path
         // (atlas slot) to write it with.
-        let (columns, lines) = (self.targets.grid.0 as usize, self.targets.grid.1 as usize);
+        let (columns, lines) = (self.grid().0 as usize, self.grid().1 as usize);
         let mut chars = vec![' '; columns * lines];
         let mut slots = vec![0.0f32; columns * lines];
         if !self.thumbnail {
@@ -2197,9 +2587,22 @@ impl Renderer {
             }
         }
 
+        // Find's matches, on the surface under the text: the current one in
+        // the cursor's colour. Find, links and input look at the pane with
+        // the keyboard.
+        if !self.thumbnail && self.pane_focused {
+            for &(line, col, len, current) in &self.search_marks {
+                let (rgb, alpha) = if current { (variant.cursor, 0.45) } else { (variant.selection.0, 0.18) };
+                self.rects.push(Shape::new(cell_x(col), cell_y(line), cw * len as f32, ch, rgb, alpha));
+            }
+        }
+
         // The cursor and struck-out names are the theme's to draw, in the
         // ink layer; the cursor goes under the text.
         let ctx = self.ctx();
+        if cursor_line >= 0 && !self.thumbnail && self.pane_focused {
+            self.cursor_cell = [cell_x(cursor_col), cell_y(cursor_line as usize), cw, ch];
+        }
         if cursor_line >= 0 && cursor_shape != CursorShape::Hidden {
             let kind = match cursor_shape {
                 CursorShape::Beam => CursorKind::Beam,
@@ -2227,10 +2630,19 @@ impl Renderer {
             };
             variant.theme.draw_strike(variant, &ctx, &span, &mut overlay);
         }
+        // The link Cmd+click would open, underlined in the cursor's colour.
+        if !self.thumbnail && self.pane_focused {
+            for &(line, col, len) in &self.link {
+                let y = cell_y(line) + ch * 0.88;
+                overlay.push(Shape::new(cell_x(col), y, cw * len as f32, (ch * 0.07).max(1.0), variant.cursor, 1.0));
+            }
+        }
         self.ink_rects.extend(overlay);
-        self.layout_controls(variant, term.is_focused);
-        self.layout_notice(variant);
-        self.layout_tabs(variant);
+        if chrome {
+            self.layout_controls(variant, self.window.has_focus());
+            self.layout_notice(variant);
+            self.layout_tabs(variant);
+        }
 
         let now = self.now();
         let writing = Writing {
@@ -2241,11 +2653,12 @@ impl Renderer {
         };
         // A preview shows the screen as it is: no writing in, and it leaves
         // the live screen's record of what was written alone.
-        let births = if self.thumbnail { Vec::new() } else { self.animator.update(columns, &chars, now, writing) };
+        let Some(pane) = self.panes.get_mut(&self.pane) else { return };
+        let births = if self.thumbnail { Vec::new() } else { pane.animator.update(columns, &chars, now, writing) };
         if births.len() == columns * lines {
             let cells: Vec<[f32; 2]> = births.iter().zip(&slots).map(|(&b, &s)| [b, s]).collect();
             self.queue.write_texture(
-                self.targets.births.as_image_copy(),
+                pane.births.as_image_copy(),
                 bytemuck::cast_slice(&cells),
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
@@ -2391,7 +2804,7 @@ impl Renderer {
     /// up with it, where it does not cover anything.
     fn notice_origin(&self) -> (f32, f32) {
         let scale = self.window.scale_factor() as f32;
-        let (pad, _) = self.padding();
+        let pad = PADDING * scale;
         (pad, self.config.height as f32 - (pad + 16.0 * scale) / 2.0)
     }
 
@@ -2445,7 +2858,10 @@ impl Renderer {
         }
     }
 
-    fn draw(&mut self, variant: &Variant, view: &wgpu::TextureView) {
+    /// Draws the pane laid out last into the scene: the `first` pane lays
+    /// the surface under all of them, the `last` adds the window's marks and
+    /// shows the scene in `view`, through any transition.
+    fn draw(&mut self, variant: &Variant, view: &wgpu::TextureView, first: bool, last: bool) {
         let (w, h) = (self.config.width, self.config.height);
         let scale = self.window.scale_factor() as f32;
         let now = self.now();
@@ -2478,7 +2894,7 @@ impl Renderer {
             from_color,
             grid_origin: [pad, top],
             cell: [self.cell_width, self.cell_height],
-            grid_size: [self.targets.grid.0 as f32, self.targets.grid.1 as f32],
+            grid_size: [self.grid().0 as f32, self.grid().1 as f32],
             slot_size: [self.tracer.slot_size.0 as f32, self.tracer.slot_size.1 as f32],
             write_time: if self.animation.0 && !self.thumbnail { WRITE_TIME / self.animation.1 } else { 0.0 },
             atlas_columns: self.tracer.columns() as f32,
@@ -2503,15 +2919,17 @@ impl Renderer {
             self.stages.insert(theme.id(), stages);
         }
 
-        // Both rect lists share one buffer: surface rects, then ink rects.
+        // The rect lists share one buffer: surface rects, ink rects, then
+        // what goes over the ink.
         let surface_count = self.rects.len() as u32;
-        let total = self.rects.len() + self.ink_rects.len();
+        let ink_end = (self.rects.len() + self.ink_rects.len()) as u32;
+        let total = self.rects.len() + self.ink_rects.len() + self.after_ink.len();
         let needed = (total * std::mem::size_of::<Shape>()) as u64;
         if needed > self.rect_buffer.size() {
             self.rect_buffer = Self::create_rect_buffer(&self.device, total.next_power_of_two());
         }
         if total > 0 {
-            let all: Vec<Shape> = self.rects.iter().chain(&self.ink_rects).copied().collect();
+            let all: Vec<Shape> = self.rects.iter().chain(&self.ink_rects).chain(&self.after_ink).copied().collect();
             self.queue
                 .write_buffer(&self.rect_buffer, 0, bytemuck::cast_slice(&all));
         }
@@ -2544,7 +2962,7 @@ impl Renderer {
             }
         }
         let strip = (TITLE_STRIP * self.window.scale_factor() as f32) as i32;
-        for (slot, buffer) in self.tab_slots.iter().zip(&self.tab_text) {
+        for (slot, buffer) in self.tab_slots.iter().zip(&self.tab_text).filter(|_| last) {
             areas.push(TextArea {
                 buffer,
                 left: slot.text.0,
@@ -2555,7 +2973,7 @@ impl Renderer {
                 custom_glyphs: &[],
             });
         }
-        if self.notice.is_some() {
+        if self.notice.is_some() && last {
             let (left, top) = self.notice_origin();
             // Long messages are cut at the right margin.
             let right = (w as f32 - left) as i32;
@@ -2609,7 +3027,7 @@ impl Renderer {
                 pass.set_pipeline(&stages.shapes);
                 pass.set_bind_group(0, &self.frame_group, &[]);
                 pass.set_vertex_buffer(0, self.rect_buffer.slice(..needed));
-                pass.draw(0..4, surface_count..total as u32);
+                pass.draw(0..4, surface_count..ink_end);
             }
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
@@ -2620,16 +3038,18 @@ impl Renderer {
                 label: Some("main pass"),
                 color_attachments: &[attachment(
                     &self.targets.scene_view,
-                    wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    if first { wgpu::LoadOp::Clear(wgpu::Color::BLACK) } else { wgpu::LoadOp::Load },
                 )],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&stages.surface);
-            pass.set_bind_group(0, &self.frame_group, &[]);
-            pass.draw(0..3, 0..1);
+            if first {
+                pass.set_pipeline(&stages.surface);
+                pass.set_bind_group(0, &self.frame_group, &[]);
+                pass.draw(0..3, 0..1);
+            }
 
             if surface_count > 0 {
                 pass.set_pipeline(&stages.shapes);
@@ -2638,9 +3058,23 @@ impl Renderer {
                 pass.draw(0..4, 0..surface_count);
             }
 
-            pass.set_pipeline(&stages.ink);
-            pass.set_bind_group(0, &self.targets.ink_bind_group, &[]);
-            pass.draw(0..3, 0..1);
+            // Each pane's ink layer holds only its own ink, so it can be
+            // laid over the whole window.
+            if let Some(pane) = self.panes.get(&self.pane) {
+                pass.set_pipeline(&stages.ink);
+                pass.set_bind_group(0, &pane.ink_bind_group, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            if !self.after_ink.is_empty() {
+                pass.set_pipeline(&stages.shapes);
+                pass.set_bind_group(0, &self.frame_group, &[]);
+                pass.set_vertex_buffer(0, self.rect_buffer.slice(..needed));
+                pass.draw(0..4, ink_end..total as u32);
+            }
+        }
+        if !last {
+            self.queue.submit(Some(encoder.finish()));
+            return;
         }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

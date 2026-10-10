@@ -137,7 +137,19 @@ Milestone 1, a working terminal:
 - Mouse reporting for full-screen apps (vim, htop, tmux): clicks, drags, wheel, SGR and legacy encodings
 - Full-screen apps always get at least 80x24 cells: if the window is too small at the chosen
   font size (btop would refuse to draw), the text shrinks while the app runs (down to half
-  size) and returns to normal when it exits
+  size) and returns to normal when it exits (in a window without splits)
+- Splits: panes side by side (Cmd+D) or one above the other (Cmd+Shift+D), each its own
+  shell started in the same folder, on one continuous sheet; the panes without the keyboard
+  are veiled a little, and the dividers between them can be dragged
+- Find (Cmd+F): every match in the scrollback and on screen highlighted, the current one in
+  the cursor's colour; Return / Shift+Return (or Cmd+G / Cmd+Shift+G, ↑ / ↓) go to older and
+  newer ones, and Esc leaves the current one selected. Lowercase matches either case
+- Links: hold Cmd to underline the one under the pointer, Cmd+click to open it. Web
+  addresses (also wrapped over two rows), hyperlinks programs mark (OSC 8, as
+  `ls --hyperlink` sends) and names of files and folders that exist (`src/main.rs:12` opens
+  the file)
+- Input methods (IME): Chinese, Japanese, Korean and accents typed as two keys are composed
+  at the cursor, underlined, with the system's candidate window beside it
 - Box-drawing and block characters drawn as shapes, so borders and bars join without seams
 - Focus reporting, left Option as Meta (right Option still types é, €, ...)
 - Themes as isolated modules on a common framework (`src/theme`, `src/themes`), with a live
@@ -150,13 +162,17 @@ Milestone 1, a working terminal:
 | Cmd+1 … Cmd+9 | go to tab 1 … 8, Cmd+9 the last |
 | Cmd+Shift+] / Cmd+Shift+[ | next / previous tab |
 | Cmd+N | new window |
+| Cmd+D / Cmd+Shift+D | split the pane side by side / one above the other (drag a divider to resize) |
+| Cmd+Option+arrows, Cmd+] / Cmd+[ | the pane that way, the next / previous pane; a click in a pane also gives it the keyboard |
+| Cmd+F | find; Return / Shift+Return older / newer match, Esc closes |
+| Cmd+click | open the link under the pointer (hold Cmd to see it underlined) |
 | Cmd+Shift+L | flip between light and dark |
 | Cmd+Option+T | theme picker |
-| Cmd+W / Cmd+M | close tab (the window with the last one) / minimize; the theme's controls, top left, close or minimize the window |
+| Cmd+W / Cmd+M | close the pane, the tab with its last pane (the window with the last tab) / minimize; the theme's controls, top left, close or minimize the window |
 | drag top strip | move the window; double-click it to zoom |
 | Cmd+= / Cmd+- / Cmd+0 | bigger / smaller / actual-size text |
 | Cmd+A / Cmd+K | select all (scrollback too) / clear screen and scrollback |
-| right-click | menu: copy, paste, select all, clear, tabs, text size, light / dark, themes, settings (Shift+right-click when an app has the mouse) |
+| right-click | menu: copy, paste, select all, clear, find, tabs, splits, text size, light / dark, themes, settings (Shift+right-click when an app has the mouse) |
 | Cmd+C | copy selection |
 | Cmd+V | paste (bracketed when the app asks for it) |
 | drag / double / triple click | select text / word / line |
@@ -183,8 +199,8 @@ To make a release, `scripts/release.sh` builds a self-contained universal app an
 signed, notarized `target/dist/oneprompt-<version>.dmg` (setup steps are at the top of
 the script).
 
-Not yet: IME (composed input for Chinese, Japanese, ...), clickable links, search,
-splits.
+Not yet: running a pane's full-screen app shrunk to fit, and a search that takes regular
+expressions.
 
 ## Settings
 
@@ -243,10 +259,13 @@ src/boxdraw.rs              box-drawing and block characters as rectangles
 src/chrome.rs               theme-drawn window controls: layout and hit testing
 src/config.rs               settings file: parsing, theme overrides, edits that keep comments, live reload
 src/settings.rs             settings panel: its rows, from the settings and the theme's own, and what changing them writes
-src/renderer.rs             the passes and each theme's stages: ink layer, surface + cells + ink, transition; the picker and settings panel
+src/renderer.rs             the passes and each theme's stages: ink layer, surface + cells + ink a pane at a time, transition; the picker, settings panel, find bar and composed input
 src/picker.rs               theme picker: card layout and hit testing
 src/animation.rs            per-cell write times (reading order, scroll-aware) and window transitions
 src/strike.rs               names on screen whose files were deleted, to strike out
+src/panes.rs                splits: each tab's tree of panes, their boxes, dividers and neighbours
+src/search.rs               find: matches in the scrollback, the current one, scrolling to it
+src/links.rs                links under the pointer: web addresses, OSC 8 hyperlinks, existing files
 src/trace.rs                pen paths: per-glyph stroke order for the hand-writing reveal
 src/color.rs                program-chosen colours mapped onto the sheet (OKLab)
 src/theme/mod.rs            the theme API: Theme, Variant, settings, shapes, plans, hooks

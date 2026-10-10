@@ -19,6 +19,8 @@ pub enum Action {
     Clear,
     NewTab,
     NewWindow,
+    SplitRight,
+    SplitDown,
     RenameTab,
     CloseTab,
     Bigger,
@@ -28,16 +30,19 @@ pub enum Action {
     Themes,
     Settings,
     SettingsFile,
+    Find,
 }
 
 impl Action {
-    const ALL: [Action; 15] = [
+    const ALL: [Action; 18] = [
         Action::Copy,
         Action::Paste,
         Action::SelectAll,
         Action::Clear,
         Action::NewTab,
         Action::NewWindow,
+        Action::SplitRight,
+        Action::SplitDown,
         Action::RenameTab,
         Action::CloseTab,
         Action::Bigger,
@@ -47,6 +52,7 @@ impl Action {
         Action::Themes,
         Action::Settings,
         Action::SettingsFile,
+        Action::Find,
     ];
 
     fn id(self) -> String {
@@ -63,6 +69,8 @@ pub struct State {
     pub has_selection: bool,
     pub dark: bool,
     pub tabs: usize,
+    /// Panes in the active tab.
+    pub panes: usize,
 }
 
 pub struct ContextMenu {
@@ -93,9 +101,12 @@ impl ContextMenu {
             &item(Action::Paste, "Paste", cmd(Code::KeyV)),
             &item(Action::SelectAll, "Select All", cmd(Code::KeyA)),
             &item(Action::Clear, "Clear", cmd(Code::KeyK)),
+            &item(Action::Find, "Find…", cmd(Code::KeyF)),
             &PredefinedMenuItem::separator(),
             &item(Action::NewTab, "New Tab", cmd(Code::KeyT)),
             &item(Action::NewWindow, "New Window", cmd(Code::KeyN)),
+            &item(Action::SplitRight, "Split Right", cmd(Code::KeyD)),
+            &item(Action::SplitDown, "Split Down", cmd_shift(Code::KeyD)),
             &item(Action::RenameTab, "Rename Tab…", None),
             &close,
             &PredefinedMenuItem::separator(),
@@ -116,7 +127,13 @@ impl ContextMenu {
     pub fn show(&self, window: &Window, state: State) {
         self.copy.set_enabled(state.has_selection);
         self.flip.set_text(if state.dark { "Switch to Light" } else { "Switch to Dark" });
-        self.close.set_text(if state.tabs > 1 { "Close Tab" } else { "Close Window" });
+        self.close.set_text(if state.panes > 1 {
+            "Close Pane"
+        } else if state.tabs > 1 {
+            "Close Tab"
+        } else {
+            "Close Window"
+        });
         let Ok(handle) = window.window_handle() else { return };
         #[cfg(target_os = "macos")]
         if let RawWindowHandle::AppKit(handle) = handle.as_raw() {

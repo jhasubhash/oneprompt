@@ -53,6 +53,11 @@ impl Strikes {
         Self { pty, cwd: None, cwd_checked: f32::NEG_INFINITY, paths: HashMap::new() }
     }
 
+    /// The working directory of the terminal's foreground process, now.
+    pub fn cwd(&self) -> Option<PathBuf> {
+        self.pty.as_ref().and_then(foreground).and_then(working_directory)
+    }
+
     /// Finds the mentions of deleted paths in the visible grid (`chars`,
     /// row-major, `columns` wide), in reading order.
     pub fn find(&mut self, chars: &[char], columns: usize, now: f32) -> Vec<Struck> {

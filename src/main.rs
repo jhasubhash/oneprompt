@@ -18,9 +18,12 @@ mod chrome;
 mod color;
 mod config;
 mod input;
+mod links;
 mod menu;
+mod panes;
 mod picker;
 mod renderer;
+mod search;
 mod settings;
 mod strike;
 mod terminal;
@@ -44,7 +47,7 @@ use chrome::Control;
 use config::{Config, OptionAsMeta};
 use menu::Action;
 use renderer::{Notice, Renderer};
-use terminal::{TabId, Terminal, UserEvent};
+use terminal::{PaneId, Terminal, UserEvent};
 use theme::Variant;
 
 /// How long snapshot mode lets the command run before capturing.
@@ -63,7 +66,8 @@ struct App {
     /// Each tab runs its own shell; the window shows the active one.
     tabs: Vec<Tab>,
     active: usize,
-    next_tab: TabId,
+    /// The id the next pane gets (each pane runs its own shell).
+    next_pane: PaneId,
     /// The tab name being edited in the strip.
     renaming: Option<Rename>,
     menu: Option<menu::ContextMenu>,
@@ -80,6 +84,18 @@ struct App {
     written: Option<String>,
     /// Why the settings file could not be applied, while it cannot.
     config_error: Option<String>,
+    /// Where the input method's candidate window was last told to go.
+    ime_area: [f32; 4],
+    /// The link under the pointer while Cmd is held, and the cell it was
+    /// looked up for (screen column and line).
+    link: Option<(links::Link, (usize, usize))>,
+    /// Find, while its bar is open; the text being composed for it in an
+    /// input method; and whether the terminal has changed since the
+    /// matches were found, and when they were.
+    search: Option<search::Search>,
+    search_preedit: String,
+    search_stale: bool,
+    searched_at: Instant,
     mods: ModifiersState,
     /// Which Option keys are held right now: (left, right).
     option_keys: (bool, bool),
@@ -116,23 +132,50 @@ struct Rename {
     all: bool,
 }
 
+/// A tab: one or more panes (splits), one of them with the keyboard.
 struct Tab {
-    id: TabId,
+    panes: Vec<Pane>,
+    layout: panes::Layout,
+    focus: PaneId,
+    /// Given by the user (Rename Tab); wins over the title.
+    name: Option<String>,
+}
+
+/// A shell in a tab.
+struct Pane {
+    id: PaneId,
     terminal: Terminal,
     /// Set by the program running in it (OSC 0/2).
     title: Option<String>,
-    /// Given by the user (Rename Tab); wins over the title.
-    name: Option<String>,
     /// Names on its screen whose files were deleted.
     strikes: strike::Strikes,
 }
 
-impl Tab {
-    fn new(id: TabId, terminal: Terminal) -> Self {
+impl Pane {
+    fn new(id: PaneId, terminal: Terminal) -> Self {
         let strikes = strike::Strikes::new(terminal.pty.as_ref().and_then(|f| f.try_clone().ok()));
-        Self { id, terminal, title: None, name: None, strikes }
+        Self { id, terminal, title: None, strikes }
     }
 }
+
+impl Tab {
+    fn new(pane: Pane) -> Self {
+        Self { layout: panes::Layout::Pane(pane.id), focus: pane.id, panes: vec![pane], name: None }
+    }
+
+    /// The pane with the keyboard.
+    fn pane(&self) -> &Pane {
+        self.panes.iter().find(|p| p.id == self.focus).unwrap_or(&self.panes[0])
+    }
+
+    /// The tab's title: its focused pane's.
+    fn title(&self) -> Option<&str> {
+        self.pane().title.as_deref()
+    }
+}
+
+/// How wide a divider between panes is to grab, in logical pixels.
+const DIVIDER_GRAB: f32 = 8.0;
 
 #[derive(Default)]
 struct Mouse {
@@ -153,6 +196,8 @@ struct Mouse {
     last_strip_click: Option<Instant>,
     /// Last click on a tab, for double-click to rename.
     last_tab_click: Option<(Instant, usize)>,
+    /// The divider between panes being dragged.
+    divider: Option<panes::Divider>,
 }
 
 /// Clicks closer together than this count as a double/triple click.
@@ -163,33 +208,167 @@ impl App {
         &self.themes[self.current]
     }
 
-    /// The active tab's terminal.
+    /// The terminal of the active tab's focused pane.
     fn terminal(&self) -> Option<&Terminal> {
-        self.tabs.get(self.active).map(|t| &t.terminal)
+        self.tabs.get(self.active).map(|t| &t.pane().terminal)
     }
 
-    /// Recomputes the grid for the window and theme, and tells the shells.
-    /// Every tab gets the window's size, so switching never resizes.
+    /// The active tab's panes and their boxes in the window, physical
+    /// pixels, in reading order.
+    fn pane_rects(&self) -> Vec<(PaneId, [f32; 4])> {
+        let (Some(r), Some(tab)) = (self.renderer.as_ref(), self.tabs.get(self.active)) else { return Vec::new() };
+        tab.layout.rects(r.window_rect())
+    }
+
+    /// The box of the active tab's focused pane.
+    fn focus_rect(&self) -> Option<[f32; 4]> {
+        let focus = self.tabs.get(self.active)?.focus;
+        self.pane_rects().into_iter().find(|(id, _)| *id == focus).map(|(_, rect)| rect)
+    }
+
+    /// Where the tab and pane with this id are.
+    fn find_pane(&self, id: PaneId) -> Option<(usize, usize)> {
+        self.tabs
+            .iter()
+            .enumerate()
+            .find_map(|(t, tab)| tab.panes.iter().position(|p| p.id == id).map(|p| (t, p)))
+    }
+
+    /// Recomputes every pane's grid for the window and theme, and tells the
+    /// shells. Every tab is laid out for the window, so switching never
+    /// resizes.
     fn relayout(&mut self) {
         let theme = self.themes[self.current].clone();
         let Some(renderer) = self.renderer.as_mut() else { return };
-        let size = renderer.grid_size(&theme);
+        let window = renderer.window_rect();
         for tab in &mut self.tabs {
-            tab.terminal.resize(size);
+            for (id, rect) in tab.layout.rects(window) {
+                let size = renderer.grid_size(&theme, id, rect);
+                if let Some(pane) = tab.panes.iter_mut().find(|p| p.id == id) {
+                    pane.terminal.resize(size);
+                }
+            }
         }
         renderer.window().request_redraw();
     }
 
+    /// Starts a shell in pane `id` at `rect`, in `cwd` (None: home).
+    fn spawn_pane(&mut self, id: PaneId, rect: [f32; 4], cwd: Option<PathBuf>) -> std::io::Result<Pane> {
+        let theme = self.themes[self.current].clone();
+        let Some(renderer) = self.renderer.as_mut() else { return Err(std::io::Error::other("no window")) };
+        let size = renderer.grid_size(&theme, id, rect);
+        let terminal = Terminal::spawn(self.proxy.clone(), id, size, self.command.clone(), cwd)?;
+        Ok(Pane::new(id, terminal))
+    }
+
     /// Starts a shell in a new tab and shows it.
     fn new_tab(&mut self) -> std::io::Result<()> {
-        let theme = self.themes[self.current].clone();
-        let Some(renderer) = self.renderer.as_mut() else { return Ok(()) };
-        let id = self.next_tab;
-        self.next_tab += 1;
-        let terminal = Terminal::spawn(self.proxy.clone(), id, renderer.grid_size(&theme), self.command.clone())?;
-        self.tabs.push(Tab::new(id, terminal));
+        let Some(window) = self.renderer.as_ref().map(|r| r.window_rect()) else { return Ok(()) };
+        let id = self.next_pane;
+        self.next_pane += 1;
+        let pane = self.spawn_pane(id, window, None)?;
+        self.tabs.push(Tab::new(pane));
         self.switch_tab(self.tabs.len() - 1);
         Ok(())
+    }
+
+    /// Splits the focused pane in two, side by side (`across`) or one above
+    /// the other; the new half runs a new shell in the same folder and gets
+    /// the keyboard.
+    fn split(&mut self, across: bool) -> std::io::Result<()> {
+        let Some(tab) = self.tabs.get(self.active) else { return Ok(()) };
+        let (focus, cwd) = (tab.focus, tab.pane().strikes.cwd());
+        let mut layout = tab.layout.clone();
+        let id = self.next_pane;
+        self.next_pane += 1;
+        layout.split(focus, id, across);
+        let Some(window) = self.renderer.as_ref().map(|r| r.window_rect()) else { return Ok(()) };
+        let rect = layout.rects(window).into_iter().find(|(p, _)| *p == id).map_or(window, |(_, r)| r);
+        let pane = self.spawn_pane(id, rect, cwd)?;
+        let tab = &mut self.tabs[self.active];
+        tab.layout = layout;
+        tab.panes.push(pane);
+        // Writing in starts over: the old panes are not new ink.
+        if let Some(r) = self.renderer.as_mut() {
+            r.reset_writing();
+        }
+        self.relayout();
+        self.focus_pane(id);
+        Ok(())
+    }
+
+    /// Gives pane `id` of the active tab the keyboard.
+    fn focus_pane(&mut self, id: PaneId) {
+        let window_focused = self.renderer.as_ref().is_some_and(|r| r.window().has_focus());
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        if !tab.panes.iter().any(|p| p.id == id) {
+            return;
+        }
+        tab.focus = id;
+        for pane in &tab.panes {
+            pane.terminal.set_focused(window_focused && pane.id == id);
+        }
+        self.mouse.selecting = false;
+        self.mouse.reported_button = None;
+        self.mouse.reported_cell = None;
+        if let Some(search) = self.search.as_mut() {
+            search.refresh(&self.tabs[self.active].pane().terminal.term.lock());
+        }
+        self.update_tabs();
+        self.redraw();
+    }
+
+    /// Closes the focused pane, or the tab with its last one; returns false
+    /// when that was the window's last tab.
+    fn close_pane(&mut self) -> bool {
+        let Some(tab) = self.tabs.get(self.active) else { return true };
+        if tab.panes.len() < 2 {
+            return self.close_tab(self.active);
+        }
+        let focus = tab.focus;
+        self.remove_pane(self.active, focus);
+        true
+    }
+
+    /// Takes pane `id` out of tab `index`, which has another; the pane
+    /// beside it in reading order gets the keyboard if it had it.
+    fn remove_pane(&mut self, index: usize, id: PaneId) {
+        let tab = &mut self.tabs[index];
+        let order = tab.layout.ids();
+        let at = order.iter().position(|p| *p == id).unwrap_or(0);
+        tab.layout.remove(id);
+        tab.panes.retain(|p| p.id != id);
+        let next = order.iter().filter(|p| **p != id).nth(at.saturating_sub(1)).copied();
+        if tab.focus == id
+            && let Some(next) = next
+        {
+            tab.focus = next;
+        }
+        if let Some(r) = self.renderer.as_mut() {
+            r.forget_pane(id);
+        }
+        self.relayout();
+        if index == self.active {
+            let focus = self.tabs[index].focus;
+            self.focus_pane(focus);
+        }
+    }
+
+    /// Moves the keyboard to the pane next to the focused one that way.
+    fn focus_toward(&mut self, direction: (i32, i32)) {
+        let Some(focus) = self.tabs.get(self.active).map(|t| t.focus) else { return };
+        if let Some(id) = panes::neighbour(&self.pane_rects(), focus, direction) {
+            self.focus_pane(id);
+        }
+    }
+
+    /// Moves the keyboard to the next (or previous) pane in reading order.
+    fn focus_next(&mut self, by: i32) {
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        let order = tab.layout.ids();
+        let at = order.iter().position(|p| *p == tab.focus).unwrap_or(0) as i32;
+        let next = order[(at + by).rem_euclid(order.len() as i32) as usize];
+        self.focus_pane(next);
     }
 
     /// Shows tab `index`.
@@ -199,19 +378,30 @@ impl App {
         }
         self.finish_rename(true);
         if let Some(old) = self.tabs.get(self.active).filter(|_| self.active != index) {
-            old.terminal.set_focused(false);
+            for pane in &old.panes {
+                pane.terminal.set_focused(false);
+            }
         }
         self.active = index;
         self.mouse.selecting = false;
         self.mouse.reported_button = None;
         self.mouse.reported_cell = None;
         let focused = self.renderer.as_ref().is_some_and(|r| r.window().has_focus());
-        self.tabs[index].terminal.set_focused(focused);
+        let tab = &self.tabs[index];
+        for pane in &tab.panes {
+            pane.terminal.set_focused(focused && pane.id == tab.focus);
+        }
         if let Some(r) = self.renderer.as_mut() {
             // Another tab's screen is not new ink: show it as it stands.
             r.reset_writing();
         }
         self.update_tabs();
+        // Find looks in the tab on show.
+        if let Some(search) = self.search.as_mut()
+            && let Some(tab) = self.tabs.get(index)
+        {
+            search.refresh(&tab.pane().terminal.term.lock());
+        }
         // A full-screen app in the new tab may need its text shrunk.
         let full_screen = self.terminal().is_some_and(|t| t.mode().contains(TermMode::ALT_SCREEN));
         if let Some(r) = self.renderer.as_mut() {
@@ -350,6 +540,7 @@ impl App {
             has_selection: self.terminal().and_then(|t| t.selection_text()).is_some(),
             dark: self.themes[self.current].dark,
             tabs: self.tabs.len(),
+            panes: self.tabs.get(self.active).map_or(1, |t| t.panes.len()),
         };
         if let (Some(m), Some(r)) = (&self.menu, &self.renderer) {
             m.show(r.window(), state);
@@ -392,9 +583,14 @@ impl App {
                 }
             }
             Action::NewWindow => self.new_window(),
+            Action::SplitRight | Action::SplitDown => {
+                if let Err(err) = self.split(action == Action::SplitRight) {
+                    self.show_notice(format!("could not split: {err}"), true);
+                }
+            }
             Action::RenameTab => self.start_rename(self.active),
             Action::CloseTab => {
-                if !self.close_tab(self.active) {
+                if !self.close_pane() {
                     self.close_requested = true;
                 }
             }
@@ -414,10 +610,19 @@ impl App {
                 // The picker's cards show the new appearance too.
                 self.update_picker();
             }
+            Action::Find => {
+                if self.search.is_none() {
+                    self.close_picker();
+                    self.close_settings();
+                    self.search = Some(search::Search::default());
+                }
+                self.update_search(false);
+            }
             Action::Themes => {
                 if self.picker.is_some() {
                     self.close_picker();
                 } else {
+                    self.close_search();
                     self.close_settings();
                     let id = self.themes[self.current].theme.id();
                     self.picker = Some(theme::all().iter().position(|t| t.id() == id).unwrap_or(0));
@@ -429,6 +634,7 @@ impl App {
                     self.close_settings();
                 } else {
                     self.close_picker();
+                    self.close_search();
                     self.settings = Some(SettingsState { items: Vec::new(), focus: 0, drag: None });
                     self.update_settings();
                     if let Some(state) = self.settings.as_mut() {
@@ -693,6 +899,21 @@ impl App {
             self.menu_action(Action::Themes);
             return true;
         }
+        // Cmd+Option+arrows: the pane that way gets the keyboard.
+        if self.mods.alt_key()
+            && let Key::Named(named) = &event.logical_key
+        {
+            use winit::keyboard::NamedKey;
+            let direction = match named {
+                NamedKey::ArrowLeft => (-1, 0),
+                NamedKey::ArrowRight => (1, 0),
+                NamedKey::ArrowUp => (0, -1),
+                NamedKey::ArrowDown => (0, 1),
+                _ => return false,
+            };
+            self.focus_toward(direction);
+            return true;
+        }
         let Key::Character(key) = &event.logical_key else {
             return false;
         };
@@ -702,6 +923,8 @@ impl App {
             "l" | "L" if shift => Some(Action::FlipAppearance),
             "t" => Some(Action::NewTab),
             "n" => Some(Action::NewWindow),
+            "d" if !shift => Some(Action::SplitRight),
+            "d" | "D" => Some(Action::SplitDown),
             "=" | "+" => Some(Action::Bigger),
             "-" => Some(Action::Smaller),
             "0" => Some(Action::ActualSize),
@@ -711,6 +934,7 @@ impl App {
             "v" => Some(Action::Paste),
             "a" => Some(Action::SelectAll),
             "k" => Some(Action::Clear),
+            "f" => Some(Action::Find),
             _ => None,
         };
         if let Some(action) = action {
@@ -727,6 +951,9 @@ impl App {
                 let n = self.tabs.len();
                 self.switch_tab((self.active + n.max(1) - 1) % n.max(1));
             }
+            // Cmd+] / Cmd+[: the next / previous pane.
+            "]" => self.focus_next(1),
+            "[" => self.focus_next(-1),
             // Cmd+1..8 pick a tab, Cmd+9 the last one.
             digit @ ("1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9") => {
                 let n: usize = digit.parse().unwrap_or(1);
@@ -798,6 +1025,17 @@ impl App {
         self.themes = config.themes();
         // Snapshots must be deterministic, so they never animate.
         let (enabled, speed, writing_speed) = config.animation();
+        // With input methods on, macOS would take Option+key as a dead key
+        // (Option+E starts an accent); the Meta keys must reach the shell.
+        #[cfg(target_os = "macos")]
+        if let Some(r) = self.renderer.as_ref() {
+            use winit::platform::macos::{OptionAsAlt, WindowExtMacOS};
+            r.window().set_option_as_alt(match config.option_as_meta {
+                OptionAsMeta::Left => OptionAsAlt::OnlyLeft,
+                OptionAsMeta::Both => OptionAsAlt::Both,
+                OptionAsMeta::None => OptionAsAlt::None,
+            });
+        }
         if let Some(r) = self.renderer.as_mut() {
             r.set_animation(enabled && self.snapshot_dir.is_none(), speed, writing_speed);
             r.set_harmonize(config.harmonize_colors.unwrap_or(true));
@@ -871,6 +1109,208 @@ impl App {
         self.update_settings();
     }
 
+    /// Input method events: text being composed is shown at the cursor;
+    /// finished text goes where typing goes (a tab name being edited, else
+    /// the shell).
+    fn on_ime(&mut self, ime: winit::event::Ime) {
+        use winit::event::Ime;
+        let preedit = match ime {
+            // Text composed for the find bar is shown in it.
+            Ime::Preedit(text, _) if self.search.is_some() => {
+                self.search_preedit = text;
+                self.update_search(false);
+                None
+            }
+            Ime::Preedit(text, cursor) if !text.is_empty() => Some((text, cursor)),
+            Ime::Preedit(..) | Ime::Disabled | Ime::Enabled => None,
+            Ime::Commit(text) => {
+                if let Some(search) = self.search.as_ref() {
+                    let query = search.query.clone() + &text;
+                    self.search_preedit.clear();
+                    self.set_search_query(query);
+                } else if let Some(rename) = self.renaming.as_mut() {
+                    if rename.all {
+                        rename.text.clear();
+                        rename.all = false;
+                    }
+                    rename.text.push_str(&text);
+                    self.update_tabs();
+                } else if self.picker.is_none()
+                    && self.settings.is_none()
+                    && let Some(t) = self.terminal()
+                {
+                    t.clear_selection();
+                    t.input(text.into_bytes());
+                }
+                None
+            }
+        };
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_preedit(preedit);
+            r.window().request_redraw();
+        }
+    }
+
+    /// Shows the find bar and its matches as they are, finding them again
+    /// first if the terminal has changed (at most five times a second while
+    /// output pours in), and with `reveal`, scrolls to the current match.
+    fn update_search(&mut self, reveal: bool) {
+        let Some(search) = self.search.as_mut() else { return };
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        let mut term = tab.pane().terminal.term.lock();
+        if self.search_stale && self.searched_at.elapsed() >= Duration::from_millis(200) {
+            search.refresh(&term);
+            self.search_stale = false;
+            self.searched_at = Instant::now();
+        }
+        if reveal {
+            let delta = search.reveal(&term);
+            if delta != 0 {
+                term.scroll_display(alacritty_terminal::grid::Scroll::Delta(delta));
+            }
+        }
+        let marks = search.marks(&term);
+        drop(term);
+        let bar = renderer::SearchBar { query: search.query.clone(), preedit: self.search_preedit.clone(), count: search.count() };
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_search(Some(bar));
+            r.set_search_marks(marks);
+            if self.search_stale {
+                // Come back once the wait is over.
+                r.window().request_redraw();
+            }
+        }
+    }
+
+    /// Changes what is being looked for.
+    fn set_search_query(&mut self, query: String) {
+        let (Some(search), Some(tab)) = (self.search.as_mut(), self.tabs.get(self.active)) else { return };
+        search.set_query(&tab.pane().terminal.term.lock(), query);
+        self.searched_at = Instant::now();
+        self.search_stale = false;
+        self.update_search(true);
+    }
+
+    /// Closes the find bar, leaving the current match selected (Cmd+C
+    /// copies it).
+    fn close_search(&mut self) {
+        let Some(search) = self.search.take() else { return };
+        self.search_preedit.clear();
+        if let (Some(m), Some(tab)) = (search.current_match(), self.tabs.get(self.active)) {
+            use alacritty_terminal::index::Side;
+            let mut selection = alacritty_terminal::selection::Selection::new(SelectionType::Simple, *m.start(), Side::Left);
+            selection.update(*m.end(), Side::Right);
+            tab.pane().terminal.term.lock().selection = Some(selection);
+        }
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_search(None);
+            r.set_search_marks(Vec::new());
+            r.window().request_redraw();
+        }
+    }
+
+    /// Keys while the find bar is open: typing edits what is looked for,
+    /// Return and the arrows go between matches. Other Cmd shortcuts still
+    /// work; nothing reaches the shell.
+    fn search_key(&mut self, event: &KeyEvent) -> bool {
+        use winit::keyboard::NamedKey;
+        let Some(search) = self.search.as_mut() else { return false };
+        let mut query = search.query.clone();
+        let shift = self.mods.shift_key();
+        if self.mods.super_key() {
+            match &event.logical_key {
+                Key::Character(c) if c.eq_ignore_ascii_case("g") => {
+                    search.step(!shift);
+                    self.update_search(true);
+                }
+                Key::Character(c) if c == "v" => {
+                    if let Ok(text) = arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+                        query.extend(text.chars().map(|c| if c.is_control() { ' ' } else { c }));
+                        self.set_search_query(query);
+                    }
+                }
+                Key::Character(c) if c == "f" => {}
+                Key::Named(NamedKey::Backspace) => self.set_search_query(String::new()),
+                _ => return false,
+            }
+            self.redraw();
+            return true;
+        }
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => self.close_search(),
+            Key::Named(NamedKey::Enter) => {
+                search.step(!shift);
+                self.update_search(true);
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                search.step(true);
+                self.update_search(true);
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                search.step(false);
+                self.update_search(true);
+            }
+            Key::Named(NamedKey::Backspace) => {
+                if self.mods.alt_key() {
+                    // A word, and the spaces before it.
+                    let kept = query.trim_end().len();
+                    let cut = query[..kept].rfind(char::is_whitespace).map_or(0, |i| i + 1);
+                    query.truncate(cut);
+                } else {
+                    query.pop();
+                }
+                self.set_search_query(query);
+            }
+            _ => {
+                if let Some(typed) = event.text.as_deref().filter(|t| !t.chars().any(char::is_control)) {
+                    query.push_str(typed);
+                    self.set_search_query(query);
+                }
+            }
+        }
+        self.redraw();
+        true
+    }
+
+    /// Finds the link under the pointer while Cmd is held, underlines it
+    /// and shows the pointing hand; otherwise clears them.
+    fn update_link(&mut self) {
+        let cell = self.pointer_cell().map(|(col, line, _)| (col, line));
+        let wanted = self.mods.super_key() && self.picker.is_none() && self.settings.is_none() && !self.in_strip();
+        let cell = cell.filter(|_| wanted);
+        if cell.is_some() && self.link.as_ref().map(|(_, at)| Some(*at)) == Some(cell) {
+            return;
+        }
+        let found = cell.and_then(|(col, line)| {
+            let tab = self.tabs.get(self.active)?;
+            let term = tab.pane().terminal.term.lock();
+            let offset = term.grid().display_offset() as i32;
+            let point = alacritty_terminal::index::Point::new(
+                alacritty_terminal::index::Line(line as i32 - offset),
+                alacritty_terminal::index::Column(col),
+            );
+            let link = links::at(&term, point, tab.pane().strikes.cwd().as_deref())?;
+            Some((link, (col, line), offset))
+        });
+        let (underline, cursor) = match &found {
+            Some((link, _, offset)) => (
+                link.spans
+                    .iter()
+                    .filter_map(|&(line, col, len)| usize::try_from(line + offset).ok().map(|l| (l, col, len)))
+                    .collect(),
+                winit::window::CursorIcon::Pointer,
+            ),
+            None => (Vec::new(), winit::window::CursorIcon::Default),
+        };
+        let changed = found.is_some() || self.link.is_some();
+        self.link = found.map(|(link, at, _)| (link, at));
+        if changed && let Some(r) = self.renderer.as_mut() {
+            r.set_link(underline);
+            r.window().set_cursor(cursor);
+            r.window().request_redraw();
+        }
+    }
+
     /// xterm modifier bits for mouse reports.
     fn mouse_mods(&self) -> u8 {
         4 * self.mods.shift_key() as u8
@@ -884,9 +1324,30 @@ impl App {
         self.mouse.y < renderer::TITLE_STRIP as f64 * scale
     }
 
+    /// The cell of the focused pane under the pointer (clamped to its grid).
     fn pointer_cell(&self) -> Option<(usize, usize, bool)> {
-        let (r, t) = (self.renderer.as_ref()?, self.terminal()?);
-        Some(r.cell_at(self.mouse.x, self.mouse.y, t.size()))
+        let (r, t, rect) = (self.renderer.as_ref()?, self.terminal()?, self.focus_rect()?);
+        Some(r.cell_at(rect, self.mouse.x, self.mouse.y, t.size()))
+    }
+
+    /// The active tab's pane under the pointer.
+    fn pane_under_pointer(&self) -> Option<PaneId> {
+        let (x, y) = (self.mouse.x as f32, self.mouse.y as f32);
+        self.pane_rects()
+            .into_iter()
+            .find(|(_, [rx, ry, rw, rh])| x >= *rx && x < rx + rw && y >= *ry && y < ry + rh)
+            .map(|(id, _)| id)
+    }
+
+    /// The divider between panes under the pointer.
+    fn divider_under_pointer(&self) -> Option<panes::Divider> {
+        let (r, tab) = (self.renderer.as_ref()?, self.tabs.get(self.active)?);
+        let grab = DIVIDER_GRAB * r.window().scale_factor() as f32;
+        let (x, y) = (self.mouse.x as f32, self.mouse.y as f32);
+        tab.layout
+            .dividers(r.window_rect(), grab)
+            .into_iter()
+            .find(|d| x >= d.line[0] && x < d.line[0] + d.line[2] && y >= d.line[1] && y < d.line[1] + d.line[3])
     }
 
     /// Clicks on the theme-drawn window controls and the drag strip.
@@ -959,6 +1420,17 @@ impl App {
             }
             return;
         }
+        // Cmd+click opens the link under the pointer, even in programs
+        // that take the mouse.
+        if pressed && button == MouseButton::Left && self.mods.super_key() {
+            self.update_link();
+            if let Some((link, _)) = &self.link {
+                if let Err(err) = links::open(&link.target) {
+                    self.show_notice(format!("could not open the link: {err}"), true);
+                }
+                return;
+            }
+        }
         // A click anywhere else keeps a name being edited.
         if pressed && self.renaming.is_some() {
             let on_tab = self.renderer.as_ref().and_then(|r| r.tab_at(self.mouse.x));
@@ -968,6 +1440,24 @@ impl App {
         }
         if self.on_chrome_button(pressed, button) {
             return;
+        }
+        // Dividers between panes are dragged; a click in a pane gives it
+        // the keyboard, and then acts in it as usual.
+        if button == MouseButton::Left && !pressed && self.mouse.divider.take().is_some() {
+            return;
+        }
+        if pressed {
+            if button == MouseButton::Left
+                && let Some(divider) = self.divider_under_pointer()
+            {
+                self.mouse.divider = Some(divider);
+                return;
+            }
+            if let Some(id) = self.pane_under_pointer()
+                && self.tabs.get(self.active).is_some_and(|t| t.focus != id)
+            {
+                self.focus_pane(id);
+            }
         }
         // Right-click opens the menu, unless the program wants the mouse
         // (Shift+right-click still opens it then). On a tab, for that tab.
@@ -984,7 +1474,7 @@ impl App {
             }
         }
         let Some((col, line, right_half)) = self.pointer_cell() else { return };
-        let Some(t) = self.tabs.get(self.active).map(|t| &t.terminal) else { return };
+        let Some(t) = self.tabs.get(self.active).map(|t| &t.pane().terminal) else { return };
 
         // Programs that asked for the mouse get it; Shift bypasses that so
         // you can still select text, as in other terminals.
@@ -1043,6 +1533,28 @@ impl App {
             }
             return;
         }
+        if let Some(divider) = self.mouse.divider.clone() {
+            let [x, y, w, h] = divider.split;
+            let ratio = if divider.across { (self.mouse.x as f32 - x) / w } else { (self.mouse.y as f32 - y) / h };
+            if let Some(tab) = self.tabs.get_mut(self.active) {
+                tab.layout.set_ratio(&divider.path, ratio);
+            }
+            self.relayout();
+            return;
+        }
+        self.update_link();
+        // Over a divider, the pointer says it can be dragged.
+        if self.link.is_none()
+            && let Some(r) = self.renderer.as_ref()
+        {
+            use winit::window::CursorIcon;
+            let icon = match self.divider_under_pointer() {
+                Some(d) if d.across => CursorIcon::ColResize,
+                Some(_) => CursorIcon::RowResize,
+                None => CursorIcon::Default,
+            };
+            r.window().set_cursor(icon);
+        }
         if let Some(r) = self.renderer.as_mut() {
             let over = chrome::over_group(self.mouse.x, self.mouse.y, r.window().scale_factor() as f32);
             if r.set_controls_hover(over) {
@@ -1050,7 +1562,7 @@ impl App {
             }
         }
         let Some((col, line, right_half)) = self.pointer_cell() else { return };
-        let Some(t) = self.tabs.get(self.active).map(|t| &t.terminal) else { return };
+        let Some(t) = self.tabs.get(self.active).map(|t| &t.pane().terminal) else { return };
         if self.mouse.selecting {
             t.update_selection(col, line, right_half);
             self.redraw();
@@ -1077,7 +1589,7 @@ impl App {
             self.relayout();
             let theme = self.themes[i].clone();
             let name = theme.name.to_lowercase().replace(' ', "-");
-            if let (Some(r), Some(t)) = (self.renderer.as_mut(), self.tabs.get(self.active).map(|t| &t.terminal)) {
+            if let (Some(r), Some(t)) = (self.renderer.as_mut(), self.tabs.get(self.active).map(|t| &t.pane().terminal)) {
                 let term = t.term.lock();
                 r.snapshot(&theme, &term, &dir.join(format!("{name}.png")));
             }
@@ -1093,7 +1605,7 @@ impl App {
             self.relayout();
             let to = self.themes[i].clone();
             let name = to.name.to_lowercase().replace(' ', "-");
-            if let (Some(r), Some(t)) = (self.renderer.as_mut(), self.tabs.get(self.active).map(|t| &t.terminal)) {
+            if let (Some(r), Some(t)) = (self.renderer.as_mut(), self.tabs.get(self.active).map(|t| &t.pane().terminal)) {
                 let term = t.term.lock();
                 r.snapshot_switch(&from, &to, &term, frames, &dir.join(format!("to-{name}")));
             }
@@ -1124,12 +1636,16 @@ impl ApplicationHandler<UserEvent> for App {
         #[cfg(not(target_os = "macos"))]
         let attrs = attrs.with_decorations(false);
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
+        // Input methods: composed text (Chinese, Japanese, Korean, accents
+        // typed as two keys) arrives as Ime events.
+        window.set_ime_allowed(true);
         let mut renderer = Renderer::new(window);
-        let size = renderer.grid_size(self.theme());
-        let id = self.next_tab;
-        self.next_tab += 1;
-        match Terminal::spawn(self.proxy.clone(), id, size, self.command.clone()) {
-            Ok(terminal) => self.tabs.push(Tab::new(id, terminal)),
+        let id = self.next_pane;
+        self.next_pane += 1;
+        let window = renderer.window_rect();
+        let size = renderer.grid_size(self.theme(), id, window);
+        match Terminal::spawn(self.proxy.clone(), id, size, self.command.clone(), None) {
+            Ok(terminal) => self.tabs.push(Tab::new(Pane::new(id, terminal))),
             Err(err) => {
                 eprintln!("oneprompt: could not start shell: {err}");
                 event_loop.exit();
@@ -1185,10 +1701,10 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
-        let tab = |id: TabId| self.tabs.iter().position(|t| t.id == id);
         match event {
             // Background tabs keep running; only the visible one is drawn.
-            UserEvent::Wakeup(id) if tab(id) == Some(self.active) => {
+            UserEvent::Wakeup(id) if self.find_pane(id).is_some_and(|(t, _)| t == self.active) => {
+                self.search_stale = true;
                 // Full-screen apps get room for at least 80x24 cells.
                 let full_screen = self.terminal().is_some_and(|t| t.mode().contains(TermMode::ALT_SCREEN));
                 if self.renderer.as_mut().is_some_and(|r| r.set_full_screen(full_screen)) {
@@ -1198,25 +1714,28 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::Wakeup(_) => {}
             UserEvent::Title(id, title) => {
-                if let Some(i) = tab(id) {
-                    self.tabs[i].title = title;
+                if let Some((t, p)) = self.find_pane(id) {
+                    self.tabs[t].panes[p].title = title;
                     self.update_tabs();
                 }
             }
             UserEvent::PtyWrite(id, text) => {
-                if let Some(i) = tab(id) {
-                    self.tabs[i].terminal.write(text.into_bytes());
+                if let Some((t, p)) = self.find_pane(id) {
+                    self.tabs[t].panes[p].terminal.write(text.into_bytes());
                 }
             }
             // In snapshot mode the command may finish before we capture.
             UserEvent::Exit(_) if self.snapshot_dir.is_some() => {}
-            UserEvent::Exit(id) => {
-                if let Some(i) = tab(id)
-                    && !self.close_tab(i)
-                {
-                    event_loop.exit();
+            // A shell that exits closes its pane, and the tab with its last.
+            UserEvent::Exit(id) => match self.find_pane(id) {
+                Some((t, _)) if self.tabs[t].panes.len() > 1 => self.remove_pane(t, id),
+                Some((t, _)) => {
+                    if !self.close_tab(t) {
+                        event_loop.exit();
+                    }
                 }
-            }
+                None => {}
+            },
             UserEvent::ConfigChanged => self.reload_config(),
             UserEvent::Menu(action) => {
                 self.menu_action(action);
@@ -1228,8 +1747,8 @@ impl ApplicationHandler<UserEvent> for App {
             // (to choose a light or dark palette) see the sheet they are on.
             UserEvent::ColorRequest(id, index, reply) => {
                 let [r, g, b] = renderer::query_color(&self.themes[self.current], index);
-                if let Some(i) = tab(id) {
-                    self.tabs[i].terminal.write(reply(alacritty_terminal::vte::ansi::Rgb { r, g, b }).into_bytes());
+                if let Some((t, p)) = self.find_pane(id) {
+                    self.tabs[t].panes[p].terminal.write(reply(alacritty_terminal::vte::ansi::Rgb { r, g, b }).into_bytes());
                 }
             }
         }
@@ -1251,6 +1770,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::ModifiersChanged(mods) => {
                 self.mods = mods.state();
+                self.update_link();
                 self.option_keys = (
                     mods.lalt_state() == ModifiersKeyState::Pressed,
                     mods.ralt_state() == ModifiersKeyState::Pressed,
@@ -1266,7 +1786,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.renaming.is_some() && self.rename_key(&event) {
                     return;
                 }
-                if self.picker_key(&event) || self.settings_key(&event) {
+                if self.picker_key(&event) || self.settings_key(&event) || self.search_key(&event) {
                     return;
                 }
                 if self.shortcut(&event) {
@@ -1284,6 +1804,7 @@ impl ApplicationHandler<UserEvent> for App {
                     t.input(bytes);
                 }
             }
+            WindowEvent::Ime(ime) => self.on_ime(ime),
             WindowEvent::CursorMoved { position, .. } => {
                 (self.mouse.x, self.mouse.y) = (position.x, position.y);
                 self.on_mouse_move();
@@ -1313,7 +1834,12 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                let (Some(r), Some(t)) = (&self.renderer, self.tabs.get(self.active).map(|t| &t.terminal)) else {
+                // The pane under the pointer scrolls, keyboard or not.
+                let under = self.pane_under_pointer();
+                let Some(tab) = self.tabs.get(self.active) else { return };
+                let focused = under.is_none_or(|id| id == tab.focus);
+                let pane = under.and_then(|id| tab.panes.iter().find(|p| p.id == id)).unwrap_or(tab.pane());
+                let (Some(r), t) = (&self.renderer, &pane.terminal) else {
                     return;
                 };
                 let line_px = r.cell_height() as f64;
@@ -1326,7 +1852,7 @@ impl ApplicationHandler<UserEvent> for App {
                         lines as i32
                     }
                 };
-                if t.mouse_mode() && lines != 0 {
+                if t.mouse_mode() && lines != 0 && focused {
                     // Wheel buttons 64 (up) / 65 (down), one report per line.
                     if let Some((col, line, _)) = self.pointer_cell() {
                         let code = if lines > 0 { 64 } else { 65 } + self.mouse_mods();
@@ -1350,12 +1876,59 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
+                // Matches follow the text as it scrolls and changes.
+                self.update_search(false);
                 let theme = self.themes[self.current].clone();
                 let strike = self.config.strike_deleted.unwrap_or(true);
                 if let (Some(r), Some(tab)) = (self.renderer.as_mut(), self.tabs.get_mut(self.active)) {
-                    let term = tab.terminal.term.lock();
-                    r.render(&theme, &term, strike.then_some(&mut tab.strikes));
-                    drop(term);
+                    let window = r.window_rect();
+                    let rects = tab.layout.rects(window);
+                    let scale = r.window().scale_factor() as f32;
+                    // Dividers start below the title strip, which runs across.
+                    let strip = renderer::TITLE_STRIP * scale;
+                    let dividers: Vec<[f32; 4]> = tab
+                        .layout
+                        .dividers(window, scale)
+                        .into_iter()
+                        .map(|d| match d.line {
+                            [x, y, w, h] if d.across && y < strip => [x, strip, w, h - (strip - y)],
+                            line => line,
+                        })
+                        .collect();
+                    let focus = tab.focus;
+                    // Every pane's screen, held still while it is drawn.
+                    let mut held = Vec::new();
+                    for pane in tab.panes.iter_mut() {
+                        let Some(&(_, rect)) = rects.iter().find(|(id, _)| *id == pane.id) else { continue };
+                        let Pane { id, terminal, strikes, .. } = pane;
+                        held.push((*id, rect, terminal.term.lock(), strike.then_some(strikes)));
+                    }
+                    let mut views: Vec<renderer::PaneView<_>> = held
+                        .iter_mut()
+                        .map(|(id, rect, term, strikes)| renderer::PaneView {
+                            id: *id,
+                            term: &**term,
+                            strikes: strikes.as_deref_mut(),
+                            rect: *rect,
+                            focused: *id == focus,
+                        })
+                        .collect();
+                    // In reading order, the focused pane last so the window's
+                    // marks are drawn with it.
+                    views.sort_by_key(|v| rects.iter().position(|(id, _)| *id == v.id));
+                    r.render(&theme, &mut views, &dividers);
+                    drop(views);
+                    drop(held);
+                    // The input method's candidates open by the cursor.
+                    let area = r.ime_area();
+                    if area != self.ime_area {
+                        self.ime_area = area;
+                        let [x, y, w, h] = area;
+                        r.window().set_ime_cursor_area(
+                            winit::dpi::PhysicalPosition::new(x as f64, y as f64),
+                            winit::dpi::PhysicalSize::new(w as f64, h as f64),
+                        );
+                    }
                     // Keep drawing while ink is still being brushed in or a
                     // reveal is running; vsync paces it, idle costs nothing.
                     if r.is_animating() {
@@ -1373,7 +1946,7 @@ fn tab_label(tab: &Tab, index: usize) -> String {
     if let Some(name) = &tab.name {
         return name.clone();
     }
-    if let Some(title) = tab.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+    if let Some(title) = tab.title().map(str::trim).filter(|t| !t.is_empty()) {
         return title.to_string();
     }
     let shell = std::env::var("SHELL").ok();
@@ -1432,7 +2005,7 @@ fn main() {
         renderer: None,
         tabs: Vec::new(),
         active: 0,
-        next_tab: 0,
+        next_pane: 0,
         renaming: None,
         menu: None,
         themes,
@@ -1441,6 +2014,12 @@ fn main() {
         settings: None,
         written: None,
         config_error: None,
+        ime_area: [0.0; 4],
+        link: None,
+        search: None,
+        search_preedit: String::new(),
+        search_stale: false,
+        searched_at: Instant::now(),
         mods: ModifiersState::empty(),
         option_keys: (false, false),
         config_path,

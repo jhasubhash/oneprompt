@@ -20,30 +20,30 @@ use winit::event_loop::EventLoopProxy;
 /// Answers a colour query: formats the reply for a given colour.
 pub type ColorReply = Arc<dyn Fn(Rgb) -> String + Sync + Send + 'static>;
 
-/// Which tab a terminal event came from.
-pub type TabId = u64;
+/// Which pane a terminal event came from (each pane runs its own shell).
+pub type PaneId = u64;
 
 /// Events from the PTY threads to the UI thread.
 pub enum UserEvent {
     /// New output was parsed; redraw.
-    Wakeup(TabId),
+    Wakeup(PaneId),
     /// `None`: back to the default title.
-    Title(TabId, Option<String>),
+    Title(PaneId, Option<String>),
     /// The terminal wants to answer a query (e.g. cursor position).
-    PtyWrite(TabId, String),
+    PtyWrite(PaneId, String),
     /// The shell exited.
-    Exit(TabId),
+    Exit(PaneId),
     /// The settings file was saved (or created / deleted).
     ConfigChanged,
     /// A program asked for a colour (OSC 4/10/11/12): palette index, or
     /// 256/257/258 for foreground, background, cursor.
-    ColorRequest(TabId, usize, ColorReply),
+    ColorRequest(PaneId, usize, ColorReply),
     /// An item was chosen in the right-click menu.
     Menu(crate::menu::Action),
 }
 
 #[derive(Clone)]
-pub struct Listener(EventLoopProxy<UserEvent>, TabId);
+pub struct Listener(EventLoopProxy<UserEvent>, PaneId);
 
 impl EventListener for Listener {
     fn send_event(&self, event: Event) {
@@ -109,14 +109,15 @@ impl Terminal {
     /// Spawns the user's login shell, or `/bin/sh -c command` when given.
     pub fn spawn(
         proxy: EventLoopProxy<UserEvent>,
-        id: TabId,
+        id: PaneId,
         size: GridSize,
         command: Option<String>,
+        cwd: Option<std::path::PathBuf>,
     ) -> std::io::Result<Self> {
         tty::setup_env();
         let options = tty::Options {
             shell: command.map(|c| tty::Shell::new("/bin/sh".into(), vec!["-c".into(), c])),
-            working_directory: std::env::var_os("HOME").map(Into::into),
+            working_directory: cwd.or_else(|| std::env::var_os("HOME").map(Into::into)),
             drain_on_exit: true,
             env: HashMap::new(),
         };
