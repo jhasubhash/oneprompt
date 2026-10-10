@@ -267,9 +267,32 @@ impl Theme for Tsushima {
     /// takes the paper's grain like the text. It goes under the text, so a
     /// block cursor shows its character in the paper's colour.
     fn cursor(&self, v: &Variant, _ctx: &Ctx, cursor: &Cursor, out: &mut Vec<Shape>) {
-        let [x, y, cw, ch] = cursor.cell;
+        let [x0, y0, cw0, ch0] = cursor.cell;
         let c = v.cursor;
         let seed = cursor.column as f32 * 1.37 + cursor.line as f32 * 7.11;
+        // The brush flicks from where it was: a tapering stroke of seal ink
+        // along the jump that thins and fades.
+        if let Some(([fx, fy, _, _], faded)) = cursor.trail {
+            let left = 1.0 - faded;
+            // A dab every half cell, so the flick is one stroke.
+            let distance = ((x0 - fx).powi(2) + (y0 - fy).powi(2)).sqrt();
+            let steps = ((distance / (cw0 * 0.5)) as usize).clamp(6, 80);
+            for k in 0..steps {
+                let t = (k as f32 + 0.5) / steps as f32;
+                // Only the stretch nearest the cursor is still wet.
+                if t < faded {
+                    continue;
+                }
+                let (tx, ty) = (fx + (x0 - fx) * t, fy + (y0 - fy) * t);
+                let w = cw0 * (0.25 + 0.55 * t) * left.max(0.3);
+                let h = ch0 * (0.2 + 0.5 * t) * left.max(0.3);
+                out.push(dab(tx + (cw0 - w) / 2.0, ty + (ch0 - h) / 2.0, w, h, c, 0.55 * left * t).rough(1.0, seed + k as f32));
+            }
+        }
+        // On a beat the dab swells a touch and darkens.
+        let swell = 1.0 + 0.1 * cursor.pulse;
+        let (cw, ch) = (cw0 * swell, ch0 * swell);
+        let (x, y) = (x0 - (cw - cw0) / 2.0, y0 - (ch - ch0) / 2.0);
         let t = (cw * 0.1).max(1.0);
         match cursor.kind {
             CursorKind::Beam => out.push(dab(x, y, (cw * 0.18).max(2.5), ch, c, 1.0).rough(0.6, seed)),
@@ -280,7 +303,7 @@ impl Theme for Tsushima {
                 Shape::new(x, y, t, ch, c, 0.9),
                 Shape::new(x + cw - t, y, t, ch, c, 0.9),
             ]),
-            CursorKind::Block => out.push(dab(x, y + ch * 0.04, cw, ch * 0.92, c, 0.95).rough(1.0, seed)),
+            CursorKind::Block => out.push(dab(x, y + ch * 0.04, cw, ch * 0.92, c, 0.8 + 0.2 * cursor.pulse).rough(1.0, seed)),
         }
     }
 

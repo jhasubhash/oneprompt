@@ -55,6 +55,8 @@ use theme::Variant;
 
 /// How long snapshot mode lets the command run before capturing.
 const SNAPSHOT_DELAY: Duration = Duration::from_millis(1500);
+/// A beating cursor is drawn this often.
+const PULSE_FRAME: Duration = Duration::from_millis(50);
 
 struct App {
     proxy: EventLoopProxy<UserEvent>,
@@ -108,6 +110,8 @@ struct App {
     notice_until: Option<Instant>,
     /// Sleeping until the idle scene is due.
     idle_waiting: bool,
+    /// When the beating cursor was last drawn.
+    pulse_at: Instant,
     /// macOS is in dark mode.
     system_dark: bool,
     /// Cmd+Shift+L override for this session: Some(true) = dark.
@@ -1085,6 +1089,7 @@ impl App {
             r.set_ink_life(dry_time, config.ink_aging.unwrap_or(0.3));
             r.set_idle(config.idle_scene.unwrap_or(true).then(|| config.idle_after.unwrap_or(60.0)));
             r.set_effects(config.close_effect.unwrap_or(true), config.clear_effect.unwrap_or(true));
+            r.set_cursor_life(config.cursor_trail.unwrap_or(true), config.cursor_pulse.unwrap_or(true));
         }
         // ONEPROMPT_SEED (used for screenshots) wins over the file.
         if std::env::var_os("ONEPROMPT_SEED").is_none()
@@ -1838,6 +1843,15 @@ impl ApplicationHandler<UserEvent> for App {
             }
             None => {}
         }
+        // A beating cursor needs a frame now and then, not every vsync.
+        if self.renderer.as_ref().is_some_and(|r| r.is_pulsing()) {
+            if self.pulse_at.elapsed() >= PULSE_FRAME {
+                self.pulse_at = Instant::now();
+                self.redraw();
+            }
+            let next = self.pulse_at + PULSE_FRAME;
+            wake = Some(wake.map_or(next, |w| w.min(next)));
+        }
         event_loop.set_control_flow(wake.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 
@@ -2161,6 +2175,7 @@ fn main() {
         config,
         notice_until: None,
         idle_waiting: false,
+        pulse_at: Instant::now(),
         system_dark: false,
         flip: None,
         startup_error,

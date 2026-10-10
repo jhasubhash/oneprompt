@@ -56,6 +56,11 @@ const PADDING: f32 = 24.0;
 const FULL_SCREEN_MIN: (usize, usize) = (80, 24);
 /// Text shrinks to no less than this share of its size.
 const MIN_FIT: f32 = 0.5;
+/// A jumping cursor's trail fades over this long; a still one starts
+/// beating after PULSE_AFTER, once every PULSE_PERIOD (seconds at speed 1).
+const TRAIL_TIME: f32 = 0.5;
+const PULSE_AFTER: f32 = 2.0;
+const PULSE_PERIOD: f32 = 1.4;
 /// The idle scene is swept away this fast, at speed 1.
 const SWEEP_TIME: f32 = 0.9;
 /// Commands remembered per pane, for their marks.
@@ -611,6 +616,13 @@ pub struct Renderer {
     closing: bool,
     /// The theme's effects for closing and for clearing, on or off.
     effects: (bool, bool),
+    /// Per pane, where its cursor was and is, and when it moved there; the
+    /// cursor's trail and heartbeat, on or off; until when a trail fades.
+    cursor_moves: HashMap<u64, ([f32; 4], [f32; 4], f32)>,
+    cursor_life: (bool, bool),
+    trail_until: f32,
+    /// The focused pane's cursor is beating (the app wakes for it).
+    pulsing: bool,
     /// Whether struck names fling blood.
     splatter: bool,
     /// Every pane's grid and writing state, by pane id, and the one being
@@ -830,6 +842,10 @@ impl Renderer {
             idle_until: f32::NEG_INFINITY,
             closing: false,
             effects: (true, true),
+            cursor_moves: HashMap::new(),
+            cursor_life: (true, true),
+            trail_until: f32::NEG_INFINITY,
+            pulsing: false,
             splatter: true,
             panes: HashMap::new(),
             pane: 0,
@@ -983,6 +999,7 @@ impl Renderer {
     pub fn forget_pane(&mut self, id: u64) {
         self.panes.remove(&id);
         self.commands.remove(&id);
+        self.cursor_moves.remove(&id);
         self.full_screen.remove(&id);
         self.pane_metrics.remove(&id);
         self.divider_births.remove(&id);
@@ -1277,6 +1294,17 @@ impl Renderer {
         self.effects = (close, clear);
     }
 
+    /// Whether the cursor leaves a trail when it jumps, and beats while it
+    /// is still.
+    pub fn set_cursor_life(&mut self, trail: bool, pulse: bool) {
+        self.cursor_life = (trail, pulse);
+    }
+
+    /// The cursor is beating: the app should wake now and then to draw it.
+    pub fn is_pulsing(&self) -> bool {
+        self.pulsing && self.window.has_focus()
+    }
+
     /// Starts `plan` over the frame last shown.
     fn start_over_last(&mut self, plan: api::Plan) {
         let mut encoder = self.device.create_command_encoder(&Default::default());
@@ -1305,6 +1333,7 @@ impl Renderer {
             || now < self.dividers_until
             || now < self.marks_until
             || now < self.idle_until
+            || now < self.trail_until
             || (self.animation.0
                 && self.panes.values().any(|p| now - p.animator.latest_birth() < (write_time * 4.0).max(settle_time)))
     }
@@ -2897,12 +2926,34 @@ impl Renderer {
                 CursorShape::HollowBlock => CursorKind::Hollow,
                 _ => CursorKind::Block,
             };
-            let cursor = Cursor {
-                cell: [cell_x(cursor_col), cell_y(cursor_line as usize), cw, ch],
-                column: cursor_col,
-                line: cursor_line as usize,
-                kind,
+            let cell = [cell_x(cursor_col), cell_y(cursor_line as usize), cw, ch];
+            let now = self.now();
+            let moved = self.cursor_moves.entry(self.pane).or_insert((cell, cell, f32::NEG_INFINITY));
+            if moved.1 != cell {
+                *moved = (moved.1, cell, now);
+            }
+            let (from, _, at) = *moved;
+            let since = (now - at) * self.animation.1;
+            // A step (typing, an arrow key) leaves no trail; a jump does.
+            let jumped = (from[1] - cell[1]).abs() > ch * 0.5 || (from[0] - cell[0]).abs() > cw * 2.5;
+            let trail = (self.cursor_life.0 && self.animation.0 && !self.thumbnail && jumped && since < TRAIL_TIME)
+                .then(|| (from, since / TRAIL_TIME));
+            if trail.is_some() {
+                self.trail_until = self.trail_until.max(at + TRAIL_TIME / self.animation.1);
+            }
+            let beats = self.cursor_life.1 && self.animation.0 && !self.thumbnail && self.pane_focused && since > PULSE_AFTER;
+            if self.pane_focused {
+                self.pulsing = beats;
+            }
+            let pulse = if beats {
+                // A heartbeat: two quick beats, then rest.
+                let t = ((since - PULSE_AFTER) / PULSE_PERIOD).fract();
+                let beat = |c: f32| (-((t - c) * 22.0).powi(2)).exp();
+                (beat(0.12) + 0.6 * beat(0.3)).min(1.0)
+            } else {
+                0.0
             };
+            let cursor = Cursor { cell, column: cursor_col, line: cursor_line as usize, kind, trail, pulse };
             variant.theme.cursor(variant, &ctx, &cursor, &mut self.ink_rects);
         }
         // Seeded without the line, so a strike keeps its shape as the text

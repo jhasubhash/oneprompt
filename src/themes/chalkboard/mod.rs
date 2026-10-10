@@ -210,6 +210,16 @@ impl Theme for Chalkboard {
     fn cursor(&self, v: &Variant, ctx: &Ctx, cursor: &Cursor, out: &mut Vec<Shape>) {
         let [x, y, cw, ch] = cursor.cell;
         let seed = cursor.column as f32 * 1.91 + cursor.line as f32 * 5.37;
+        // The stick drags a puff of dust along a jump, settling as it goes.
+        if let Some(([fx, fy, _, _], faded)) = cursor.trail {
+            let mut rng = Rng::new(seed.to_bits() as u64 + 5);
+            for _ in 0..14 {
+                let t = rng.unit();
+                let (tx, ty) = (fx + (x - fx) * t + cw * rng.unit(), fy + (y - fy) * t + ch * (0.3 + 0.6 * rng.unit()));
+                let r = rng.range(0.6, 1.6) * ctx.scale;
+                out.push(Shape::round(DISC, tx, ty + faded * ch * 0.4, r, v.ink, 0.5 * (1.0 - faded) * t));
+            }
+        }
         let stick = |x, y, w, h, alpha| {
             let mut s = Shape::new(x, y, w, h, v.cursor, alpha).kind(STICK);
             s.params[1] = 1.0;
@@ -217,7 +227,7 @@ impl Theme for Chalkboard {
             s
         };
         match cursor.kind {
-            CursorKind::Block => out.push(stick(x, y + ch * 0.06, cw, ch * 0.88, 0.85)),
+            CursorKind::Block => out.push(stick(x, y + ch * 0.06, cw, ch * 0.88, 0.7 + 0.3 * cursor.pulse)),
             CursorKind::Beam => out.push(stick(x, y, (cw * 0.2).max(2.5), ch, 1.0)),
             CursorKind::Underline => out.push(stick(x, y + ch * 0.82, cw, (ch * 0.14).max(2.5), 1.0)),
             CursorKind::Hollow => theme::plain_cursor(v, ctx, cursor, out),

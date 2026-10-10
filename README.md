@@ -92,6 +92,11 @@ light or dark palette.
   ahead darkening as the water reaches it. Chalkboard wipes the old look off with an
   eraser, back and forth in a few passes, leaving streaky smears and pushing dust along
   its edge. No two are alike.
+- **A living cursor**: when the cursor jumps (more than a step, or to another line) it
+  flicks a stroke of seal ink behind it in Tsushima, a puff of chalk dust on the
+  Chalkboard; left still for two seconds it beats gently, like a heart (a double beat
+  every 1.4 s), so it is easy to find. The beat redraws 20 times a second, only while the
+  window has focus. `cursor_trail = false` and `cursor_pulse = false` turn them off.
 - **Closing burns the sheet**: closing a tab or the window takes its sheet away the theme's
   way. Tsushima sets it alight near a corner: a ragged front of fire spreads across it,
   browning and charring the paper ahead and leaving ash and embers, the next tab showing
@@ -285,6 +290,8 @@ strike_splatter = true        # with the theme's extras (blood, chalk dust)
 ink_drying = true             # fresh ink looks wet, then dries
 drying_time = 4               # seconds
 ink_aging = 0.3               # how far ink an hour old fades, 0..1
+cursor_trail = true           # the cursor flicks a trail when it jumps
+cursor_pulse = true           # a still cursor beats gently
 close_effect = true           # closing burns / wipes the sheet away
 clear_effect = true           # Cmd+K cuts the screen in two / sweeps it
 idle_scene = true             # leaves fall / dust settles on an idle window

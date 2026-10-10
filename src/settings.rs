@@ -333,6 +333,18 @@ pub fn items(config: &Config, variant: &Variant, fonts: &Fonts) -> Vec<Item> {
     ));
     items.push(top("Drying time", "Seconds fresh ink stays wet.", slider(config.drying_time.unwrap_or(4.0), 1.0, 20.0), "drying_time"));
     items.push(top(
+        "Cursor trail",
+        "The cursor flicks a trail of ink behind it when it jumps.",
+        Control::Toggle(config.cursor_trail.unwrap_or(true)),
+        "cursor_trail",
+    ));
+    items.push(top(
+        "Cursor heartbeat",
+        "A still cursor beats gently, so it is easy to find.",
+        Control::Toggle(config.cursor_pulse.unwrap_or(true)),
+        "cursor_pulse",
+    ));
+    items.push(top(
         "Closing",
         "A closed tab or window burns away, or is wiped off the board.",
         Control::Toggle(config.close_effect.unwrap_or(true)),

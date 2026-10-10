@@ -87,6 +87,10 @@ pub struct Config {
     pub drying_time: Option<f32>,
     /// How far ink an hour old has faded, 0..1 (default 0.3; 0: never).
     pub ink_aging: Option<f32>,
+    /// The cursor flicks a trail of ink when it jumps, and beats gently
+    /// while it is still. Default on.
+    pub cursor_trail: Option<bool>,
+    pub cursor_pulse: Option<bool>,
     /// Closing a tab or the window, and clearing the screen (Cmd+K), the
     /// theme's way. Default on.
     pub close_effect: Option<bool>,
@@ -160,6 +164,12 @@ strike_splatter = true       # extras: Tsushima's blood; false: a clean strike
 ink_drying = true
 drying_time = 4
 ink_aging = 0.3
+
+# The cursor is a brush (a stick of chalk on the Chalkboard): it flicks a
+# trail behind it when it jumps, and while it is still it beats gently, like
+# a heart, so it is easy to find.
+cursor_trail = true
+cursor_pulse = true
 
 # Closing a tab or the window burns its sheet away in Tsushima and wipes it off
 # the Chalkboard. Clearing the screen (Cmd+K) cuts it in two with a sword in

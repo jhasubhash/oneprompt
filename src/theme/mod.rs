@@ -296,6 +296,11 @@ pub struct Cursor {
     pub column: usize,
     pub line: usize,
     pub kind: CursorKind,
+    /// It just jumped (more than a step): the cell it came from, and how far
+    /// the jump's trail has faded, 0..1.
+    pub trail: Option<([f32; 4], f32)>,
+    /// It has been still a while: its heartbeat, 0 (rest) .. 1 (beat).
+    pub pulse: f32,
 }
 
 /// What the terminal asks the cursor to look like.
@@ -445,10 +450,18 @@ impl Shape {
     }
 }
 
-/// The plain cursor: a block, a bar or an underline in the cursor colour.
+/// The plain cursor: a block, a bar or an underline in the cursor colour,
+/// with a fading line along a jump and a slight brightening on a beat.
 pub fn plain_cursor(variant: &Variant, ctx: &Ctx, cursor: &Cursor, out: &mut Vec<Shape>) {
     let [x, y, w, h] = cursor.cell;
     let c = variant.cursor;
+    if let Some(([fx, fy, _, _], faded)) = cursor.trail {
+        for k in 0..6 {
+            let t = k as f32 / 6.0;
+            let (tx, ty) = (fx + (x - fx) * t, fy + (y - fy) * t);
+            out.push(Shape::new(tx + w * 0.3, ty + h * 0.4, w * 0.4, h * 0.2, c, (1.0 - faded) * t * 0.5));
+        }
+    }
     let t = (w * 0.1).max(1.0);
     match cursor.kind {
         CursorKind::Block => out.push(Shape::new(x, y, w, h, c, 1.0)),
