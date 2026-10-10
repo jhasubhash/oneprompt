@@ -264,7 +264,8 @@ Milestone 1, a working terminal:
   the file)
 - Input methods (IME): Chinese, Japanese, Korean and accents typed as two keys are composed
   at the cursor, underlined, with the system's candidate window beside it
-- Box-drawing and block characters drawn as shapes, so borders and bars join without seams
+- Box-drawing and block characters drawn as shapes, so borders and bars join without seams; bullet dots (Claude Code's ⏺, ●, •) drawn as ink dots, not
+  borrowed from the colour emoji font as glossy buttons
 - Focus reporting, left Option as Meta (right Option still types é, €, ...)
 - Themes as isolated modules on a common framework (`src/theme`, `src/themes`), with a live
   theme picker

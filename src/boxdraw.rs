@@ -1,6 +1,11 @@
 //! Box-drawing (U+2500..) and block elements (U+2580..) drawn as rectangles
 //! instead of font glyphs. Fonts rarely size these to fill the cell exactly,
 //! which leaves seams between cells in TUI borders, progress bars and charts.
+//!
+//! Also the round dots programs use as bullets (Claude Code starts its
+//! replies with ⏺): text fonts lack some of them, and the fallback is a
+//! colour emoji, a glossy button on the page. Drawn here, a dot is ink like
+//! the text around it.
 
 /// Weight of one arm of a box-drawing character.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -69,6 +74,9 @@ pub type Piece = (f32, f32, f32, f32, f32);
 pub fn pieces(c: char, w: f32, h: f32) -> Option<Vec<Piece>> {
     if let Some(block) = block(c, w, h) {
         return Some(block);
+    }
+    if let Some(r) = dot(c) {
+        return Some(disc(w, h, w.min(h) * r));
     }
     let arms = arms(c)?;
 
@@ -175,6 +183,18 @@ fn block(c: char, w: f32, h: f32) -> Option<Vec<Piece>> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn bullets_are_round_dots_in_the_cell() {
+        let dot = pieces('⏺', 10.0, 20.0).unwrap();
+        assert!(dot.len() >= 7);
+        // Widest in the middle, inside the cell, centred.
+        let widest = dot.iter().fold(0.0f32, |m, p| m.max(p.2));
+        assert!((widest - 7.2).abs() < 0.8, "{widest}");
+        assert!(dot.iter().all(|p| p.0 >= 0.0 && p.0 + p.2 <= 10.0 && p.1 >= 0.0 && p.1 < 20.0));
+        assert!(pieces('•', 10.0, 20.0).unwrap().len() < dot.len());
+        assert!(pieces('a', 10.0, 20.0).is_none());
+    }
+
     fn covers(pieces: &[Piece], x: f32, y: f32) -> bool {
         pieces.iter().any(|&(px, py, pw, ph, _)| x >= px && x < px + pw && y >= py && y < py + ph)
     }
@@ -214,4 +234,32 @@ mod tests {
     fn letters_are_left_to_the_font() {
         assert!(pieces('a', 10.0, 20.0).is_none());
     }
+}
+
+/// The dots drawn as discs, and their radius as a share of the cell's width.
+fn dot(c: char) -> Option<f32> {
+    match c {
+        '⏺' | '●' | '⬤' => Some(0.36),
+        '•' | '∙' | '⦁' => Some(0.2),
+        _ => None,
+    }
+}
+
+/// A disc of radius `r` in the middle of a `w` x `h` cell, a strip per pixel
+/// row, the edge rows faded for a soft rim.
+fn disc(w: f32, h: f32, r: f32) -> Vec<Piece> {
+    let (cx, cy) = (w / 2.0, h / 2.0);
+    let rows = (r * 2.0).ceil() as i32;
+    let mut out = Vec::new();
+    for k in 0..=rows {
+        let y = (cy - r).floor() + k as f32;
+        let dy = (y + 0.5 - cy).abs();
+        if dy > r + 0.5 {
+            continue;
+        }
+        let half = (r * r - (dy - 0.5).max(0.0).powi(2)).max(0.0).sqrt();
+        let alpha = (r + 0.5 - dy).clamp(0.0, 1.0);
+        out.push((cx - half, y, half * 2.0, 1.0, alpha));
+    }
+    out
 }
