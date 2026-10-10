@@ -182,6 +182,13 @@ const STRIKE_TIME: f32 = 0.22;
 const STRIKE_STAGGER: f32 = 0.04;
 /// How far struck text fades towards the paper.
 const STRIKE_FADE: f32 = 0.45;
+/// Blood flung off the blade: how long until it has dried to a stain (at
+/// speed 1, after the cut), and how strong the dried stain stays.
+const SPLATTER_DRY: f32 = 2.4;
+const SPLATTER_STAIN: f32 = 0.3;
+/// Mentions beyond this many get no splatter, so deleting a whole tree
+/// does not drown the screen.
+const MAX_SPLATTERED: usize = 60;
 
 impl Rect {
     fn new(x: f32, y: f32, w: f32, h: f32, rgb: [u8; 3], alpha: f32) -> Self {
@@ -380,6 +387,8 @@ pub struct Renderer {
     harmonize: bool,
     /// Until when a sword is still cutting through a deleted name.
     strikes_until: f32,
+    /// Whether struck names fling blood.
+    splatter: bool,
     animator: TextAnimator,
     transition: Option<Transition>,
     /// Makes up the brushwork for reveals.
@@ -763,6 +772,7 @@ impl Renderer {
             writing_speed: 500.0,
             harmonize: true,
             strikes_until: f32::NEG_INFINITY,
+            splatter: true,
             animator: TextAnimator::default(),
             transition: None,
             rng: animation::Rng::new(random_seed()),
@@ -924,6 +934,10 @@ impl Renderer {
 
     fn now(&self) -> f32 {
         self.clock.elapsed().as_secs_f32()
+    }
+
+    pub fn set_splatter(&mut self, splatter: bool) {
+        self.splatter = splatter;
     }
 
     pub fn set_harmonize(&mut self, harmonize: bool) {
@@ -1342,14 +1356,15 @@ impl Renderer {
     }
 
     /// The mentions of deleted paths on screen, each with how far its cut has
-    /// got (0..1). Full-screen apps draw their own screens, so none there.
+    /// got (0..1) and how long since it started, in seconds at speed 1.
+    /// Full-screen apps draw their own screens, so none there.
     fn find_struck(
         &mut self,
         cells: &[Indexed<&Cell>],
         display_offset: usize,
         strikes: Option<&mut Strikes>,
         full_screen: bool,
-    ) -> Vec<(Struck, f32)> {
+    ) -> Vec<(Struck, f32, f32)> {
         let Some(strikes) = strikes.filter(|_| !full_screen) else { return Vec::new() };
         let (columns, lines) = (self.targets.grid.0 as usize, self.targets.grid.1 as usize);
         let mut chars = vec![' '; columns * lines];
@@ -1371,11 +1386,16 @@ impl Renderer {
                 let k = order.entry(s.born.to_bits()).or_default();
                 let start = s.born + (*k as f32 * STRIKE_STAGGER / self.animation.1).min(0.5);
                 *k += 1;
-                self.strikes_until = self.strikes_until.max(start + duration);
-                let progress = if self.animation.0 { ((now - start) / duration).clamp(0.0, 1.0) } else { 1.0 };
-                (s, progress)
+                let dry = if self.splatter { SPLATTER_DRY / self.animation.1 } else { 0.0 };
+                self.strikes_until = self.strikes_until.max(start + duration + dry);
+                let (progress, age) = if self.animation.0 {
+                    (((now - start) / duration).clamp(0.0, 1.0), (now - start) * self.animation.1)
+                } else {
+                    (1.0, f32::INFINITY)
+                };
+                (s, progress, age)
             })
-            .filter(|&(_, progress)| progress > 0.0)
+            .filter(|&(_, progress, _)| progress > 0.0)
             .collect()
     }
 
@@ -1433,7 +1453,7 @@ impl Renderer {
         let struck = self.find_struck(&cells, content.display_offset, strikes, full_screen);
         // How far each cell's strike has got (0: not struck), to fade it.
         let mut struck_cells = vec![0.0f32; columns * lines];
-        for &(s, progress) in &struck {
+        for &(s, progress, _) in &struck {
             for col in s.col..(s.col + s.len).min(columns) {
                 struck_cells[s.line * columns + col] = progress;
             }
@@ -1597,11 +1617,18 @@ impl Renderer {
                 _ => self.ink_rects.push(Rect::dab(x, y + ch * 0.04, cw, ch * 0.92, c, 0.95).rough(1.0, seed)),
             }
         }
-        // Deleted names are cut through in seal ink, a little past each end.
-        for &(s, progress) in &struck {
+        // Deleted names are cut through in seal ink, a little past each end,
+        // flinging blood off the blade. Seeded without the line, so the cut
+        // and its splatter keep their shape as the text scrolls.
+        for (i, &(s, progress, age)) in struck.iter().enumerate() {
             let (x, y) = (cell_x(s.col) - cw * 0.3, cell_y(s.line));
-            let seed = s.col as f32 * 3.71 + s.line as f32 * 1.93 + s.born;
-            overlay.push(Rect::slash(x, y, cw * (s.len as f32 + 0.6), ch, theme.cursor, progress, seed));
+            let w = cw * (s.len as f32 + 0.6);
+            let seed = s.col as f32 * 3.71 + s.len as f32 * 1.93 + s.born;
+            overlay.push(Rect::slash(x, y, w, ch, theme.cursor, progress, seed));
+            if self.splatter && i < MAX_SPLATTERED {
+                // Only over the name itself, not the cut's overhang.
+                splatter(&mut overlay, [cell_x(s.col), y, cw * s.len as f32, ch], age, seed, theme.cursor);
+            }
         }
         self.ink_rects.extend(overlay);
         self.layout_controls(theme, term.is_focused);
@@ -2126,6 +2153,56 @@ type LooseKey = (String, u16, bool);
 /// Share of the screen one background colour must cover to count as the
 /// program's canvas.
 const CANVAS_SHARE: f32 = 0.5;
+
+/// Blood flung off a sword cut through a name in the box (x, y, w, h), `age` seconds
+/// (at speed 1) after the cut began: drops leave the blade as it passes
+/// them and flick a short way, mostly the way it moves, then splat and dry
+/// to a faint stain. Everything stays inside the struck name's own box, so
+/// no blood lands on the text around it. Big drops fall close; small ones
+/// flick further, some with a fine mist.
+fn splatter(out: &mut Vec<Rect>, [x, y, w, h]: [f32; 4], age: f32, seed: f32, rgb: [u8; 3]) {
+    let mut rng = animation::Rng::new(seed.to_bits() as u64 * 0x9e37_79b9 + 7);
+    let drops = 3 + (w / h * 1.2) as usize;
+    // Where drops may be: the line the name is on, end to end.
+    let (top, bottom) = (y + h * 0.12, y + h * 0.95);
+    let inside = |cx: f32, cy: f32, r: f32| (cx.clamp(x + r, x + w - r), cy.clamp(top + r, bottom - r));
+    for _ in 0..drops.min(10) {
+        let along = rng.range(0.1, 0.92);
+        let release = along * STRIKE_TIME;
+        let flight = rng.range(0.1, 0.18);
+        let angle = rng.range(-0.9, 0.9);
+        let reach = rng.unit();
+        let distance = h * mix_f(0.15, 0.9, reach);
+        let radius = h * mix_f(0.13, 0.05, reach) * rng.range(0.75, 1.15);
+        let mist = rng.unit() < 0.35;
+        let mist_seed = rng.unit();
+        if age < release {
+            continue;
+        }
+        let u = ((age - release) / flight).clamp(0.0, 1.0);
+        let eased = 1.0 - (1.0 - u) * (1.0 - u);
+        let origin = (x + w * along, y + h * 0.55);
+        // In flight a drop is smaller; it spreads as it lands.
+        let r = (radius * if u < 1.0 { 0.65 } else { 1.0 }).max(0.8);
+        let (cx, cy) = inside(origin.0 + angle.cos() * distance * eased, origin.1 + angle.sin() * distance * eased, r);
+        let dried = ((age - release - flight - 0.5) / (SPLATTER_DRY - 0.5)).clamp(0.0, 1.0);
+        let alpha = 0.95 - (0.95 - SPLATTER_STAIN) * dried;
+        out.push(Rect::shape(SHAPE_DISC, cx, cy, r, rgb, alpha).rough(0.35, seed + along * 17.0));
+        if mist && u >= 1.0 {
+            let fine = (h * 0.025).max(0.6);
+            for k in 0..3 {
+                let a = (mist_seed + k as f32 * 0.37) * std::f32::consts::TAU;
+                let d = radius * (1.6 + k as f32 * 0.5);
+                let (mx, my) = inside(cx + a.cos() * d, cy + a.sin() * d, fine);
+                out.push(Rect::shape(SHAPE_DISC, mx, my, fine, rgb, alpha * 0.8));
+            }
+        }
+    }
+}
+
+fn mix_f(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
 
 /// The background a full-screen app paints everywhere (btop, themed TUIs):
 /// it stands for "the screen", so it is drawn as the bare sheet rather than

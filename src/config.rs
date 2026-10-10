@@ -82,6 +82,8 @@ pub struct Config {
     /// Strike out names of files and folders deleted while on screen.
     /// Default on.
     pub strike_deleted: Option<bool>,
+    /// Blood flung off the sword cut when a name is struck. Default on.
+    pub strike_splatter: Option<bool>,
     /// Font settings for every theme (per-theme sections win).
     pub font_family: Option<String>,
     pub font_size: Option<f32>,
@@ -126,6 +128,7 @@ harmonize_colors = true
 # When a file or folder named on screen is deleted (rm, a script, the
 # Finder, ...), every mention of it is struck through with a sword cut.
 strike_deleted = true
+strike_splatter = true       # blood flung off the cut; false: a clean cut
 
 # The light and dark variants, set to their built-in values; change any of them.
 # Fonts must be monospace. font_weight snaps to the weights the font has

@@ -532,6 +532,7 @@ impl App {
         if let Some(r) = self.renderer.as_mut() {
             r.set_animation(enabled && self.snapshot_dir.is_none(), speed, writing_speed);
             r.set_harmonize(config.harmonize_colors.unwrap_or(true));
+            r.set_splatter(config.strike_splatter.unwrap_or(true));
         }
         // ONEPROMPT_SEED (used for screenshots) wins over the file.
         if std::env::var_os("ONEPROMPT_SEED").is_none()

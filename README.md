@@ -56,7 +56,9 @@ light or dark palette.
   a script, the Finder, ...), every mention of it, in `ls` output, the command that
   deleted it, anywhere, is cut through with a quick sword stroke in seal ink and fades.
   Words are looked up relative to the shell's working directory; a name that comes back
-  is no longer struck. `strike_deleted = false` turns it off.
+  is no longer struck. Blood flies off the blade as it cuts, splats and dries to a faint
+  stain. `strike_deleted = false` turns it all off, `strike_splatter = false` just the
+  blood.
 - `animation = false` turns it off, `animation_speed` scales it. The app only redraws while
   something is moving.
 
@@ -153,6 +155,7 @@ animation_speed = 1.0
 writing_speed = 500           # characters per second for output
 harmonize_colors = true       # program-chosen colours as inks on the sheet
 strike_deleted = true         # strike out names of deleted files on screen
+strike_splatter = true        # with blood flung off the cut
 option_as_meta = "left"       # left | both | none
 seed = 11                     # pin the paper; unset = new sheet each session
 
