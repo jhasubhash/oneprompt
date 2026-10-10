@@ -16,7 +16,8 @@ struct Frame {
     slot_size: vec2<f32>,   // pen-order atlas slot, pixels (cell + 2 px margin)
     write_time: f32,        // seconds to write one character; 0 = off
     atlas_columns: f32,     // slots per row in the pen-order atlas
-    _pad1: vec2<f32>,
+    dry_time: f32,          // seconds fresh ink stays wet; 0 = it never looks wet
+    aging: f32,             // how far ink an hour old has faded, 0..1
     surface: vec4<f32>,     // the variant's surface colour (sRGB)
     ink: vec4<f32>,         // its text colour
     accent: vec4<f32>,      // its cursor colour

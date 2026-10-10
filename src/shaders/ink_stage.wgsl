@@ -61,6 +61,35 @@ fn cell_ink(px: vec2<f32>, nudge: vec2<f32>) -> CellInk {
     return CellInk(age, along, false);
 }
 
+// How wet the ink at `px` still is: 1 as it is written, drying to 0 over
+// `frame.dry_time`, quickly at first. Themes make wet ink darker, glossier,
+// brighter: whatever drying means for theirs.
+fn wetness(px: vec2<f32>) -> f32 {
+    if (frame.dry_time <= 0.0) {
+        return 0.0;
+    }
+    let age = cell_ink(px, vec2<f32>(0.0)).age;
+    if (age > 1.0e5) {
+        return 0.0;
+    }
+    let t = clamp(age / frame.dry_time, 0.0, 1.0);
+    return (1.0 - t) * (1.0 - t);
+}
+
+// How old the ink at `px` is: 0 for ink written in the last ten minutes,
+// rising to `frame.aging` for ink an hour old. Themes fade it, as old ink
+// fades. Outside the grid (window controls) ink never ages.
+fn aged(px: vec2<f32>) -> f32 {
+    if (frame.aging <= 0.0 || frame.write_time <= 0.0) {
+        return 0.0;
+    }
+    let age = cell_ink(px, vec2<f32>(0.0)).age;
+    if (age > 1.0e5) {
+        return 0.0;
+    }
+    return smoothstep(600.0, 3600.0, age) * frame.aging;
+}
+
 // How much of the ink at `pos` has been written yet: 0 before the pen
 // reaches it, 1 once written (`sp`: `pos` with the sheet's seed offset, for
 // the sweep's raggedness). Apply it to every sample, so effects spreading

@@ -89,7 +89,8 @@ struct Frame {
     slot_size: [f32; 2],
     write_time: f32,
     atlas_columns: f32,
-    _pad1: [f32; 2],
+    dry_time: f32,
+    aging: f32,
     surface: [f32; 4],
     ink: [f32; 4],
     accent: [f32; 4],
@@ -595,6 +596,8 @@ pub struct Renderer {
     mark_failures: bool,
     /// Commands that ran at least this long get a stamp; None: none do.
     stamp_after: Option<f32>,
+    /// Seconds fresh ink looks wet (0: never), and how far old ink fades.
+    ink_life: (f32, f32),
     /// Whether struck names fling blood.
     splatter: bool,
     /// Every pane's grid and writing state, by pane id, and the one being
@@ -807,6 +810,7 @@ impl Renderer {
             marks_until: f32::NEG_INFINITY,
             mark_failures: true,
             stamp_after: Some(10.0),
+            ink_life: (4.0, 0.3),
             splatter: true,
             panes: HashMap::new(),
             pane: 0,
@@ -1060,6 +1064,12 @@ impl Renderer {
         self.splatter = splatter;
     }
 
+    /// How long fresh ink looks wet (seconds, 0: never) and how far ink an
+    /// hour old fades (0..1).
+    pub fn set_ink_life(&mut self, dry_time: f32, aging: f32) {
+        self.ink_life = (dry_time, aging);
+    }
+
     /// Which marks commands get at their prompts: failures beside them,
     /// and a stamp after the ones that ran at least `stamp_after` seconds.
     pub fn set_command_marks(&mut self, failures: bool, stamp_after: Option<f32>) {
@@ -1148,7 +1158,7 @@ impl Renderer {
         let now = self.now();
         let write_time = WRITE_TIME / self.animation.1;
         // Ink is wet for a few write times; it may keep settling for longer.
-        let settle_time = self.settle_time / self.animation.1;
+        let settle_time = self.settle_time.max(self.ink_life.0) / self.animation.1;
         self.transition.as_ref().is_some_and(|t| !t.done(now))
             || now < self.strikes_until
             || now < self.dividers_until
@@ -3070,7 +3080,8 @@ impl Renderer {
             slot_size: [self.tracer.slot_size.0 as f32, self.tracer.slot_size.1 as f32],
             write_time: if self.animation.0 && !self.thumbnail { WRITE_TIME / self.animation.1 } else { 0.0 },
             atlas_columns: self.tracer.columns() as f32,
-            _pad1: [0.0; 2],
+            dry_time: if self.animation.0 && !self.thumbnail { self.ink_life.0 / self.animation.1 } else { 0.0 },
+            aging: if self.thumbnail { 0.0 } else { self.ink_life.1 },
             surface: [variant.surface[0], variant.surface[1], variant.surface[2], 1.0],
             ink: rgb(variant.ink),
             accent: rgb(variant.cursor),

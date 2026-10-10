@@ -1045,6 +1045,8 @@ impl App {
             r.set_splatter(config.strike_splatter.unwrap_or(true));
             let stamp_after = config.stamp_long_commands.unwrap_or(true).then(|| config.stamp_after.unwrap_or(10.0));
             r.set_command_marks(config.mark_failures.unwrap_or(true), stamp_after);
+            let dry_time = if config.ink_drying.unwrap_or(true) { config.drying_time.unwrap_or(4.0) } else { 0.0 };
+            r.set_ink_life(dry_time, config.ink_aging.unwrap_or(0.3));
         }
         // ONEPROMPT_SEED (used for screenshots) wins over the file.
         if std::env::var_os("ONEPROMPT_SEED").is_none()

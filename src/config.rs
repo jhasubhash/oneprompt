@@ -81,6 +81,12 @@ pub struct Config {
     /// Extras on top of the strike (Tsushima: blood flung off the sword).
     /// Default on.
     pub strike_splatter: Option<bool>,
+    /// Fresh ink looks wet for `drying_time` seconds (default 4) and dries.
+    /// Default on.
+    pub ink_drying: Option<bool>,
+    pub drying_time: Option<f32>,
+    /// How far ink an hour old has faded, 0..1 (default 0.3; 0: never).
+    pub ink_aging: Option<f32>,
     /// Have the shell mark its prompts (marks.rs), for what follows. Default
     /// on; applies to shells started after it changes.
     pub shell_integration: Option<bool>,
@@ -138,6 +144,14 @@ harmonize_colors = true
 # Finder, ...), every mention of it is struck through, as the theme does it.
 strike_deleted = true
 strike_splatter = true       # extras: Tsushima's blood; false: a clean strike
+
+# Fresh ink is wet: darker and glossy in Tsushima, brighter and dustier chalk
+# on the Chalkboard, drying over drying_time seconds. Ink that has been on
+# screen a long while fades a little, as old ink does: ink_aging is how far
+# (0 never; reached after an hour).
+ink_drying = true
+drying_time = 4
+ink_aging = 0.3
 
 # The shell marks its prompts so the terminal knows where each command starts
 # and how it ended (zsh: automatic; fish 4: built in; bash: see the README).
@@ -289,6 +303,16 @@ impl Config {
             && !(10.0..=100_000.0).contains(&speed)
         {
             return Err(format!("writing_speed {speed} is out of range (10 to 100000)"));
+        }
+        if let Some(time) = self.drying_time
+            && !(0.5..=60.0).contains(&time)
+        {
+            return Err(format!("drying_time {time} is out of range (0.5 to 60)"));
+        }
+        if let Some(aging) = self.ink_aging
+            && !(0.0..=1.0).contains(&aging)
+        {
+            return Err(format!("ink_aging {aging} is out of range (0 to 1)"));
         }
         if let Some(after) = self.stamp_after
             && !(1.0..=86_400.0).contains(&after)
@@ -589,6 +613,8 @@ mod tests {
         assert_eq!(Config::parse("writing_speed = 120").unwrap().animation().2, 120.0);
         assert!(Config::parse("writing_speed = 1").unwrap_err().contains("out of range"));
         assert!(Config::parse("stamp_after = 0").unwrap_err().contains("out of range"));
+        assert!(Config::parse("ink_aging = 2").unwrap_err().contains("out of range"));
+        assert!(Config::parse("drying_time = 0.1").unwrap_err().contains("out of range"));
         assert!(Config::parse("stamp_after = 30\nstamp_long_commands = false").is_ok());
         assert!(Config::parse("theme = \"nope\"").unwrap_err().contains("tsushima"));
         assert!(Config::parse("theme = \"tsushima\"").is_ok());

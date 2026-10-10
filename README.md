@@ -99,6 +99,11 @@ light or dark palette.
   with a sword that flings blood, which splats and dries to a faint stain; Chalkboard
   draws a quick chalk line that knocks off a little dust. `strike_deleted = false` turns it
   all off, `strike_splatter = false` just the extras (blood, dust).
+- **Ink dries and ages**: fresh text is wet for `drying_time` seconds (4): Tsushima's sumi
+  is heavier and glossy, the sheen dulling as it dries to matte; Chalkboard's chalk is at
+  its brightest and dustiest. Ink that has been on screen a long while fades a little, as
+  old ink does (`ink_aging`, 0.3, reached after an hour: Tsushima's browns, chalk greys
+  towards the board). `ink_drying = false` and `ink_aging = 0` turn them off.
 - **Failed commands are marked**: a command that exits with an error gets the theme's mark
   in the margin beside its prompt, so scrolling back shows where things went wrong.
   Tsushima drags a stroke of seal ink down the margin and a drop of it runs and dries;
@@ -134,7 +139,8 @@ another theme). A theme implements the `Theme` trait:
 - **Settings** it declares (name, range, description): the settings file, its template,
   its validation and the theme's rows in the settings panel are generated from them.
 - **Stages** in WGSL, each a function the framework calls: `surface` (the sheet),
-  `theme_ink` (how the ink layer lands on it, with the framework's hand-writing state),
+  `theme_ink` (how the ink layer lands on it, with the framework's hand-writing state and
+  each cell's `wetness` and `aged`),
   `theme_shape` (its own shapes: Tsushima's brush dab and sword slash, Chalkboard's chalk
   stick and line) and `theme_transition` (its reveals). Each gets a shared prelude (the
   frame: size, time, seed, grid, colours; and `hash`, `noise`, `rotate`) plus its own data
@@ -260,6 +266,9 @@ writing_speed = 500           # characters per second for output
 harmonize_colors = true       # program-chosen colours as inks on the sheet
 strike_deleted = true         # strike out names of deleted files on screen
 strike_splatter = true        # with the theme's extras (blood, chalk dust)
+ink_drying = true             # fresh ink looks wet, then dries
+drying_time = 4               # seconds
+ink_aging = 0.3               # how far ink an hour old fades, 0..1
 shell_integration = true      # the shell marks its prompts (new shells)
 mark_failures = true          # mark failed commands beside their prompt
 stamp_long_commands = true    # stamp commands that ran a while when they finish

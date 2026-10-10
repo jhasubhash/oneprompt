@@ -14,6 +14,10 @@
 //   creep  - the bleed keeps wicking outwards for a while after a character
 //            is written, while the pen moves on; every character carries its
 //            own load of ink, so some bleed more than others.
+//   drying - fresh ink is wet (`wetness`): heavier, with a glossy sheen that
+//            dulls as it dries to sumi's matte black
+//   age    - ink an hour old (`aged`) has faded a little and browned, as old
+//            sumi does on washi
 
 const TAPS: i32 = 12;
 const NIB_TAPS: i32 = 3;
@@ -148,13 +152,15 @@ fn theme_ink(px: vec2<f32>) -> vec4<f32> {
     if (age < frame.write_time * 4.0) {
         wet = 1.0 - clamp(age / (frame.write_time * 4.0), 0.0, 1.0);
     }
+    let soaked = wetness(px);
+    wet = max(wet, soaked);
 
     // Pigment pools at the rim: strongest where the halo is half covered.
     let rim = clamp(halo.a * (1.0 - halo.a) * 4.0, 0.0, 1.0) * look.edge;
 
     // Wet ink is a touch heavier.
     let alpha = clamp(
-        max(body * (1.0 + 0.25 * wet), wick * 0.85) + rim * 0.2 * (1.0 - body),
+        max(body * (1.0 + 0.25 * wet), wick * (0.85 + 0.3 * soaked)) + rim * 0.2 * (1.0 - body),
         0.0,
         1.0,
     );
@@ -164,5 +170,20 @@ fn theme_ink(px: vec2<f32>) -> vec4<f32> {
         rgb = core.rgb / core.a;
     }
     rgb = rgb * (1.0 - rim * 0.25);
-    return vec4<f32>(rgb * alpha, alpha);
+    // A wet stroke catches the light: a soft sheen across its body, in
+    // streaks along the brush, gone once it has dried.
+    if (soaked > 0.0) {
+        let gloss = smoothstep(0.55, 0.92, noise(rotate(sp, -NIB_ANGLE) * vec2<f32>(0.05, 0.4) + 8.0));
+        rgb = mix(rgb, vec3<f32>(1.0), soaked * (0.06 + 0.3 * gloss) * clamp(body, 0.0, 1.0));
+    }
+    // Old ink: a little fainter, and browner on the light paper.
+    let old = aged(px);
+    let faded = alpha * (1.0 - 0.45 * old);
+    let light = dot(frame.surface.rgb, vec3<f32>(0.3, 0.59, 0.11)) > 0.5;
+    if (light) {
+        rgb = mix(rgb, vec3<f32>(0.33, 0.22, 0.12), old * 0.6);
+    } else {
+        rgb = mix(rgb, frame.surface.rgb, old * 0.3);
+    }
+    return vec4<f32>(rgb * faded, faded);
 }

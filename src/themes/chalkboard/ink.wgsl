@@ -1,7 +1,9 @@
 // Chalkboard's ink is chalk: it catches on the board's tooth, so strokes
 // are broken and grainy (more on the low spots, where the chalk skips);
 // their edges are soft with dust, and freshly written letters shed a little
-// more dust that settles over a moment.
+// more dust that settles over a moment. Fresh chalk (`wetness`) is bright
+// and thick with dust; old chalk (`aged`) has been brushed by sleeves and
+// fades.
 
 const DUST_TAPS: i32 = 8;
 
@@ -29,7 +31,8 @@ fn theme_ink(px: vec2<f32>) -> vec4<f32> {
 
     // Dust: a faint halo of the stroke's colour, wider for fresh chalk.
     let age = cell_ink(px, vec2<f32>(0.0)).age;
-    let fresh = 1.0 - clamp(age / max(look.settle, 1e-3), 0.0, 1.0);
+    let new_chalk = wetness(px);
+    let fresh = max(1.0 - clamp(age / max(look.settle, 1e-3), 0.0, 1.0), new_chalk);
     var dust = vec4<f32>(0.0);
     if (look.dust > 0.0) {
         let reach = (2.0 + 2.0 * fresh) * scale;
@@ -51,10 +54,14 @@ fn theme_ink(px: vec2<f32>) -> vec4<f32> {
     // The haze is grainy too, and finer.
     let haze = dust.a * look.dust * (0.3 + 0.3 * fresh) * (0.4 + 0.8 * hash(floor(lp * 2.0)));
 
-    let alpha = clamp(max(body, haze), 0.0, 1.0);
+    let old = aged(px);
+    let alpha = clamp(max(body * (1.0 + 0.2 * new_chalk), haze) * (1.0 - 0.5 * old), 0.0, 1.0);
     var rgb = dust.rgb / max(dust.a, 1e-4);
     if (core.a > 0.02) {
         rgb = core.rgb / core.a;
     }
+    // Fresh chalk is at its brightest; old chalk greys towards the board.
+    rgb = mix(rgb, mix(rgb, vec3<f32>(1.0), 0.25), new_chalk * 0.6);
+    rgb = mix(rgb, frame.surface.rgb, old * 0.35);
     return vec4<f32>(rgb * alpha, alpha);
 }

@@ -325,6 +325,19 @@ pub fn items(config: &Config, variant: &Variant, fonts: &Fonts) -> Vec<Item> {
         *step = 10.0;
     }
     items.push(Item::Row(writing));
+    items.push(top(
+        "Ink dries",
+        "Fresh ink looks wet, then dries: darker and glossy, or brighter chalk.",
+        Control::Toggle(config.ink_drying.unwrap_or(true)),
+        "ink_drying",
+    ));
+    items.push(top("Drying time", "Seconds fresh ink stays wet.", slider(config.drying_time.unwrap_or(4.0), 1.0, 20.0), "drying_time"));
+    items.push(top(
+        "Ink aging",
+        "How far ink an hour old has faded; 0 never.",
+        slider(config.ink_aging.unwrap_or(0.3), 0.0, 1.0),
+        "ink_aging",
+    ));
 
     items.push(heading("Terminal", ""));
     items.push(top(
