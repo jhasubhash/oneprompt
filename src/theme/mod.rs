@@ -96,6 +96,15 @@ pub trait Theme: Sync + 'static {
     fn draw_divider(&self, variant: &Variant, ctx: &Ctx, span: &DividerSpan, out: &mut Vec<Shape>) {
         plain_divider(variant, ctx, span, out);
     }
+    /// How long a mark beside a command (see [`CommandSpan`]) takes to be
+    /// drawn in, seconds at speed 1.
+    fn mark_time(&self) -> f32 {
+        0.35
+    }
+    /// Marks a command that failed, beside its prompt (`span.margin`).
+    fn draw_failure(&self, variant: &Variant, ctx: &Ctx, span: &CommandSpan, out: &mut Vec<Shape>) {
+        plain_failure(variant, ctx, span, out);
+    }
 }
 
 impl fmt::Debug for dyn Theme {
@@ -185,6 +194,34 @@ pub fn plain_divider(variant: &Variant, ctx: &Ctx, span: &DividerSpan, out: &mut
         let len = w * span.progress;
         out.push(Shape::new(x + (w - len) / 2.0, y + (h - t) / 2.0, len, t, rgb, 0.45));
     }
+}
+
+/// A finished command, as seen at its prompt (shell integration).
+#[allow(dead_code)] // `after`, `status` and `seconds` are for marks to come.
+#[derive(Clone, Copy, Debug)]
+pub struct CommandSpan {
+    /// The margin beside the prompt's line (x, y, w, h), physical pixels:
+    /// from the pane's edge to the grid.
+    pub margin: [f32; 4],
+    /// The cell just after the typed command.
+    pub after: [f32; 4],
+    /// The command's exit status, and how long it ran (seconds).
+    pub status: i32,
+    pub seconds: f32,
+    /// How far the mark has been drawn in, 0..1, and seconds since it
+    /// began at speed 1 (infinite with animations off).
+    pub progress: f32,
+    pub age: f32,
+    /// Stable for this command while it scrolls.
+    pub seed: f32,
+}
+
+/// The plain failure mark: a short bar in the red of the palette, in the
+/// margin, growing down beside the prompt.
+pub fn plain_failure(variant: &Variant, ctx: &Ctx, span: &CommandSpan, out: &mut Vec<Shape>) {
+    let [x, y, w, h] = span.margin;
+    let t = (3.0 * ctx.scale).min(w * 0.5);
+    out.push(Shape::new(x + (w - t) / 2.0, y + h * 0.1, t, h * 0.8 * span.progress, variant.palette[1], 0.9));
 }
 
 /// One struck-out name on screen.

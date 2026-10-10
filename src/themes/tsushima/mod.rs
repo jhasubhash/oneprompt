@@ -11,8 +11,8 @@
 mod brush;
 
 use crate::theme::{
-    self, ControlStyle, Controls, Ctx, Cursor, CursorKind, DividerSpan, Param, Plan, Rng, Shape, Shaders, Strike,
-    StrikeSpan, Theme, Variant, CUSTOM, DISC,
+    self, CommandSpan, ControlStyle, Controls, Ctx, Cursor, CursorKind, DividerSpan, Param, Plan, Rng, Shape, Shaders,
+    Strike, StrikeSpan, Theme, Variant, CUSTOM, DISC,
 };
 
 use brush::{Brush, PlanData};
@@ -31,6 +31,9 @@ const CUT_TIME: f32 = 0.32;
 /// Window reveal on opening and switching, at speed 1.
 const REVEAL_TIME: f32 = 1.6;
 const SWITCH_TIME: f32 = 2.8;
+
+/// A failed command's stroke is dragged down the margin this fast.
+const FAILURE_TIME: f32 = 0.3;
 
 /// How long the sword takes to cut through a deleted name, at speed 1.
 const STRIKE_TIME: f32 = 0.22;
@@ -257,6 +260,31 @@ impl Theme for Tsushima {
 
     fn strike(&self) -> Option<Strike> {
         Some(Strike { duration: STRIKE_TIME, linger: SPLATTER_DRY, fade: STRIKE_FADE })
+    }
+
+    fn mark_time(&self) -> f32 {
+        FAILURE_TIME
+    }
+
+    /// A failed command gets a stroke of seal ink down the margin beside its
+    /// prompt, pressed on at the top and dragged down, and a drop of it
+    /// that runs a little further and dries.
+    fn draw_failure(&self, v: &Variant, ctx: &Ctx, span: &CommandSpan, out: &mut Vec<Shape>) {
+        let [mx, y, mw, h] = span.margin;
+        let w = (h * 0.2).clamp(2.5 * ctx.scale, mw * 0.4);
+        let x = mx + mw * 0.55 - w / 2.0;
+        let len = h * 0.9 * span.progress;
+        out.push(dab(x, y + h * 0.04, w, len, v.cursor, 0.95).rough(0.9, span.seed));
+        // The drop gathers at the end of the stroke, then runs and dries.
+        let run = ((span.age - FAILURE_TIME) / 0.9).clamp(0.0, 1.0);
+        if span.progress >= 1.0 && run > 0.0 {
+            let eased = 1.0 - (1.0 - run) * (1.0 - run);
+            let r = w * 0.42;
+            let cy = y + h * 0.94 + eased * h * 0.35;
+            let alpha = 0.9 - 0.35 * ((span.age - FAILURE_TIME - 0.9) / 1.2).clamp(0.0, 1.0);
+            out.push(dab(x + w * 0.5 - r * 0.45, y + h * 0.9, r * 0.9, cy - y - h * 0.9, v.cursor, alpha).rough(0.6, span.seed + 3.0));
+            out.push(Shape::round(DISC, x + w * 0.5, cy, r, v.cursor, alpha).rough(0.3, span.seed + 5.0));
+        }
     }
 
     /// Deleted names are cut through in seal ink, a little past each end,

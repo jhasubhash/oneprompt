@@ -40,6 +40,9 @@ pub enum UserEvent {
     ColorRequest(PaneId, usize, ColorReply),
     /// An item was chosen in the right-click menu.
     Menu(crate::menu::Action),
+    /// A command finished (shell integration): the pane, the number of the
+    /// prompt it was typed at, and how it ended.
+    Command(PaneId, u64, crate::marks::Finished),
 }
 
 #[derive(Clone)]
@@ -107,22 +110,26 @@ pub struct Terminal {
 
 impl Terminal {
     /// Spawns the user's login shell, or `/bin/sh -c command` when given.
+    /// `integrate`: have the login shell mark its prompts (marks.rs).
     pub fn spawn(
         proxy: EventLoopProxy<UserEvent>,
         id: PaneId,
         size: GridSize,
         command: Option<String>,
         cwd: Option<std::path::PathBuf>,
+        integrate: bool,
     ) -> std::io::Result<Self> {
         tty::setup_env();
+        let env = if integrate && command.is_none() { crate::marks::env() } else { HashMap::new() };
         let options = tty::Options {
             shell: command.map(|c| tty::Shell::new("/bin/sh".into(), vec!["-c".into(), c])),
             working_directory: cwd.or_else(|| std::env::var_os("HOME").map(Into::into)),
             drain_on_exit: true,
-            env: HashMap::new(),
+            env,
         };
         let pty = tty::new(&options, size.window_size(), 0)?;
         let pty_handle = pty.file().try_clone().ok();
+        let pty = crate::marks::Marked::new(pty, id, proxy.clone())?;
         let listener = Listener(proxy, id);
         let term = Arc::new(FairMutex::new(Term::new(
             Config::default(),

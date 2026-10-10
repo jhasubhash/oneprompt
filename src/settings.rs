@@ -356,6 +356,20 @@ pub fn items(config: &Config, variant: &Variant, fonts: &Fonts) -> Vec<Item> {
         Control::Toggle(config.strike_splatter.unwrap_or(true)),
         "strike_splatter",
     ));
+
+    items.push(heading("Commands", "the shell's prompts, marked"));
+    items.push(top(
+        "Shell integration",
+        "The shell marks its prompts, so commands can be marked. New shells only.",
+        Control::Toggle(config.shell_integration.unwrap_or(true)),
+        "shell_integration",
+    ));
+    items.push(top(
+        "Mark failures",
+        "A command that fails gets the theme's mark beside its prompt.",
+        Control::Toggle(config.mark_failures.unwrap_or(true)),
+        "mark_failures",
+    ));
     items
 }
 

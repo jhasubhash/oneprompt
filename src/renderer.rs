@@ -39,10 +39,12 @@ use crate::trace::{self, GlyphKey, Slot, Tracer};
 use crate::chrome::{self, Control};
 use crate::picker;
 use crate::settings::{self, Control as Setting, Hit, Item, Part};
+use crate::marks::{self, Finished};
 use crate::strike::{Strikes, Struck};
 use crate::terminal::GridSize;
 use crate::theme::{
-    self as api, ControlStyle, Ctx, Cursor, CursorKind, Shape, StrikeSpan, Theme, Variant, CROSS, DISC, RING,
+    self as api, CommandSpan, ControlStyle, Ctx, Cursor, CursorKind, Shape, StrikeSpan, Theme, Variant, CROSS, DISC,
+    RING,
 };
 
 /// Margin around the grid, in logical pixels.
@@ -54,6 +56,11 @@ const PADDING: f32 = 24.0;
 const FULL_SCREEN_MIN: (usize, usize) = (80, 24);
 /// Text shrinks to no less than this share of its size.
 const MIN_FIT: f32 = 0.5;
+/// Commands remembered per pane, for their marks.
+const MAX_COMMANDS: usize = 4000;
+/// A command's mark keeps moving this long after it is drawn in (drips,
+/// dust), at speed 1.
+const MARK_LINGER: f32 = 1.5;
 /// Height of the drag area at the top of the window, in logical pixels. The
 /// window has no visible title bar; this strip is just more of the surface.
 pub const TITLE_STRIP: f32 = 30.0;
@@ -581,6 +588,11 @@ pub struct Renderer {
     harmonize: bool,
     /// Until when a sword is still cutting through a deleted name.
     strikes_until: f32,
+    /// How each pane's commands ended, by prompt number, with when that was
+    /// heard (for drawing the mark in); and until when a mark is moving.
+    commands: HashMap<u64, HashMap<u64, (Finished, f32)>>,
+    marks_until: f32,
+    mark_failures: bool,
     /// Whether struck names fling blood.
     splatter: bool,
     /// Every pane's grid and writing state, by pane id, and the one being
@@ -789,6 +801,9 @@ impl Renderer {
             writing_speed: 500.0,
             harmonize: true,
             strikes_until: f32::NEG_INFINITY,
+            commands: HashMap::new(),
+            marks_until: f32::NEG_INFINITY,
+            mark_failures: true,
             splatter: true,
             panes: HashMap::new(),
             pane: 0,
@@ -941,6 +956,7 @@ impl Renderer {
     /// Lets go of a closed pane's state.
     pub fn forget_pane(&mut self, id: u64) {
         self.panes.remove(&id);
+        self.commands.remove(&id);
         self.full_screen.remove(&id);
         self.pane_metrics.remove(&id);
         self.divider_births.remove(&id);
@@ -1041,6 +1057,22 @@ impl Renderer {
         self.splatter = splatter;
     }
 
+    /// Which marks commands get beside their prompts.
+    pub fn set_command_marks(&mut self, failures: bool) {
+        self.mark_failures = failures;
+    }
+
+    /// Command `n` in pane `pane` ended (shell integration).
+    pub fn finish_command(&mut self, pane: u64, n: u64, finished: Finished) {
+        let now = self.now();
+        let commands = self.commands.entry(pane).or_default();
+        commands.insert(n, (finished, now));
+        // Old commands have scrolled far out of reach.
+        if commands.len() > MAX_COMMANDS {
+            commands.retain(|&k, _| k + MAX_COMMANDS as u64 / 2 > n);
+        }
+    }
+
     pub fn set_harmonize(&mut self, harmonize: bool) {
         self.harmonize = harmonize;
     }
@@ -1115,6 +1147,7 @@ impl Renderer {
         self.transition.as_ref().is_some_and(|t| !t.done(now))
             || now < self.strikes_until
             || now < self.dividers_until
+            || now < self.marks_until
             || (self.animation.0
                 && self.panes.values().any(|p| now - p.animator.latest_birth() < (write_time * 4.0).max(settle_time)))
     }
@@ -2532,10 +2565,25 @@ impl Renderer {
                 struck_cells[s.line * columns + col] = progress;
             }
         }
+        // Prompts on screen (shell integration): each command's number, with
+        // the last line of its prompt and the column after the typed text.
+        let mut prompts: HashMap<u64, (usize, usize)> = HashMap::new();
         for indexed in cells {
             let line = (indexed.point.line.0 + content.display_offset as i32) as usize;
             let col = indexed.point.column.0;
             let flags = indexed.cell.flags;
+            if !full_screen
+                && line < lines
+                && let Some(n) = indexed.cell.hyperlink().and_then(|h| marks::prompt_number(h.uri()))
+            {
+                let at = prompts.entry(n).or_insert((line, 0));
+                if line > at.0 {
+                    *at = (line, 0);
+                }
+                if line == at.0 && indexed.cell.c != ' ' {
+                    at.1 = at.1.max(col + 1);
+                }
+            }
             if flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
                 continue;
             }
@@ -2714,6 +2762,36 @@ impl Renderer {
             for &(line, col, len) in &self.link {
                 let y = cell_y(line) + ch * 0.88;
                 overlay.push(Shape::new(cell_x(col), y, cw * len as f32, (ch * 0.07).max(1.0), variant.cursor, 1.0));
+            }
+        }
+        // Commands marked beside their prompts, as the theme marks them.
+        if self.mark_failures
+            && let Some(commands) = self.commands.get(&self.pane)
+        {
+            let now = self.now();
+            let time = variant.theme.mark_time().max(1e-3) / self.animation.1;
+            let margin_x = self.pane_rect[0];
+            for (&n, &(line, end)) in &prompts {
+                let Some(&(finished, heard)) = commands.get(&n) else { continue };
+                if !finished.failed() {
+                    continue;
+                }
+                self.marks_until = self.marks_until.max(heard + time + MARK_LINGER / self.animation.1);
+                let (progress, age) = if self.animation.0 {
+                    (((now - heard) / time).clamp(0.0, 1.0), (now - heard) * self.animation.1)
+                } else {
+                    (1.0, f32::INFINITY)
+                };
+                let span = CommandSpan {
+                    margin: [margin_x, cell_y(line), (pad - margin_x).max(1.0), ch],
+                    after: [cell_x(end.min(columns.saturating_sub(1))), cell_y(line), cw, ch],
+                    status: finished.status,
+                    seconds: finished.seconds,
+                    progress,
+                    age,
+                    seed: (n as f32 * 7.77) % 101.0,
+                };
+                variant.theme.draw_failure(variant, &ctx, &span, &mut overlay);
             }
         }
         self.ink_rects.extend(overlay);

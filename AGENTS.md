@@ -41,8 +41,11 @@ cargo clippy --release         # keep it warning-free
 - Capture only the test window (`screencapture -l <window id>`), never the whole screen.
 - The user's own oneprompt is usually running too: pick the test window by its process's
   command line (`ps -o pid,command -p <pid>`), and never send keys to or resize the user's.
-- Before sending keystrokes (System Events), make the test window frontmost and check it
-  is, or the keys go to whatever the user is using.
+- Never send keystrokes (System Events) while the user's oneprompt is running: macOS can't
+  tell the two apart (same executable), and keys sent to the test window have landed in the
+  user's. Script the test shell instead: start it with `ZDOTDIR` pointing at a folder whose
+  `.zshrc` feeds queued commands from a `zle-line-init` widget (shell integration restores
+  that `ZDOTDIR` for zsh), so it types its own commands.
 - No synthetic mouse clicks: window coordinates do not map reliably across the user's
   displays, and clicks have landed in other apps. Ask the user to try mouse behaviour.
 - Tests that use Cmd+C / Cmd+V save the clipboard first and restore it afterwards.

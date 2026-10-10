@@ -8,8 +8,8 @@
 //! through them that knocks a little dust off.
 
 use crate::theme::{
-    self, ControlStyle, Controls, Ctx, Cursor, CursorKind, DividerSpan, Param, Plan, Rng, Shape, Shaders, Strike,
-    StrikeSpan, Theme, Variant, CUSTOM, DISC,
+    self, CommandSpan, ControlStyle, Controls, Ctx, Cursor, CursorKind, DividerSpan, Param, Plan, Rng, Shape, Shaders,
+    Strike, StrikeSpan, Theme, Variant, CUSTOM, DISC,
 };
 
 pub static CHALKBOARD: Chalkboard = Chalkboard;
@@ -20,6 +20,9 @@ pub struct Chalkboard;
 const STICK: f32 = CUSTOM;
 const LINE: f32 = CUSTOM + 1.0;
 const RULE: f32 = CUSTOM + 2.0;
+const STROKE: f32 = CUSTOM + 3.0;
+/// A failed command's cross, both strokes, at speed 1.
+const CROSS_TIME: f32 = 0.4;
 /// A new divider between panes is ruled in this fast, at speed 1.
 const RULE_TIME: f32 = 0.45;
 
@@ -213,6 +216,28 @@ impl Theme for Chalkboard {
         let mut rule = Shape::new(x, y, w, h, v.ink, 0.7);
         rule.params = [RULE, span.progress, if span.upright { 1.0 } else { 0.0 }, span.seed];
         out.push(rule);
+    }
+
+    fn mark_time(&self) -> f32 {
+        CROSS_TIME
+    }
+
+    /// A failed command gets a quick cross in chalk in the margin beside
+    /// its prompt, one stroke and then the other, in the board's red.
+    fn draw_failure(&self, v: &Variant, _ctx: &Ctx, span: &CommandSpan, out: &mut Vec<Shape>) {
+        let [mx, y, mw, h] = span.margin;
+        let size = (h * 0.62).min(mw * 0.8);
+        let (x, top) = (mx + (mw - size) / 2.0, y + (h - size) / 2.0);
+        for (i, flip) in [(0.0, 0.0), (1.0, 1.0)] {
+            let progress = (span.progress * 2.0 - i).clamp(0.0, 1.0);
+            if progress > 0.0 {
+                let mut stroke = Shape::new(x, top, size, size, v.palette[1], 0.95).kind(STROKE);
+                stroke.params[1] = progress;
+                stroke.params[2] = flip;
+                stroke.params[3] = span.seed + i * 3.1;
+                out.push(stroke);
+            }
+        }
     }
 
     fn strike(&self) -> Option<Strike> {

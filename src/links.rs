@@ -105,7 +105,9 @@ fn logical_line<L>(term: &Term<L>, line: Line) -> Vec<Cell> {
                 continue;
             }
             let c = if cell.c == '\0' { ' ' } else { cell.c };
-            cells.push(Cell { c, point: Point::new(l, Column(col)), uri: cell.hyperlink().map(|h| h.uri().to_string()) });
+            // Prompts carry a link of the app's own (marks.rs); it opens nothing.
+            let uri = cell.hyperlink().map(|h| h.uri().to_string()).filter(|u| !u.starts_with(crate::marks::PROMPT_URI));
+            cells.push(Cell { c, point: Point::new(l, Column(col)), uri });
         }
         l += 1;
     }

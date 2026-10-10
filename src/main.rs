@@ -19,6 +19,7 @@ mod color;
 mod config;
 mod input;
 mod links;
+mod marks;
 mod menu;
 mod panes;
 mod picker;
@@ -257,7 +258,8 @@ impl App {
         let theme = self.themes[self.current].clone();
         let Some(renderer) = self.renderer.as_mut() else { return Err(std::io::Error::other("no window")) };
         let size = renderer.grid_size(&theme, id, rect);
-        let terminal = Terminal::spawn(self.proxy.clone(), id, size, self.command.clone(), cwd)?;
+        let integrate = self.config.shell_integration.unwrap_or(true);
+        let terminal = Terminal::spawn(self.proxy.clone(), id, size, self.command.clone(), cwd, integrate)?;
         Ok(Pane::new(id, terminal))
     }
 
@@ -1041,6 +1043,7 @@ impl App {
             r.set_animation(enabled && self.snapshot_dir.is_none(), speed, writing_speed);
             r.set_harmonize(config.harmonize_colors.unwrap_or(true));
             r.set_splatter(config.strike_splatter.unwrap_or(true));
+            r.set_command_marks(config.mark_failures.unwrap_or(true));
         }
         // ONEPROMPT_SEED (used for screenshots) wins over the file.
         if std::env::var_os("ONEPROMPT_SEED").is_none()
@@ -1727,7 +1730,8 @@ impl ApplicationHandler<UserEvent> for App {
         self.next_pane += 1;
         let window = renderer.window_rect();
         let size = renderer.grid_size(self.theme(), id, window);
-        match Terminal::spawn(self.proxy.clone(), id, size, self.command.clone(), None) {
+        let integrate = self.config.shell_integration.unwrap_or(true);
+        match Terminal::spawn(self.proxy.clone(), id, size, self.command.clone(), None, integrate) {
             Ok(terminal) => self.tabs.push(Tab::new(Pane::new(id, terminal))),
             Err(err) => {
                 eprintln!("oneprompt: could not start shell: {err}");
@@ -1823,6 +1827,14 @@ impl ApplicationHandler<UserEvent> for App {
                 None => {}
             },
             UserEvent::ConfigChanged => self.reload_config(),
+            UserEvent::Command(id, n, finished) => {
+                if let Some(r) = self.renderer.as_mut() {
+                    r.finish_command(id, n, finished);
+                }
+                if self.find_pane(id).is_some_and(|(t, _)| t == self.active) {
+                    self.redraw();
+                }
+            }
             UserEvent::Menu(action) => {
                 self.menu_action(action);
                 if self.close_requested {

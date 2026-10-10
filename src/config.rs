@@ -81,6 +81,11 @@ pub struct Config {
     /// Extras on top of the strike (Tsushima: blood flung off the sword).
     /// Default on.
     pub strike_splatter: Option<bool>,
+    /// Have the shell mark its prompts (marks.rs), for what follows. Default
+    /// on; applies to shells started after it changes.
+    pub shell_integration: Option<bool>,
+    /// Mark commands that failed beside their prompt. Default on.
+    pub mark_failures: Option<bool>,
     /// Font settings for every theme (per-theme sections win).
     pub font_family: Option<String>,
     pub font_size: Option<f32>,
@@ -129,6 +134,15 @@ harmonize_colors = true
 # Finder, ...), every mention of it is struck through, as the theme does it.
 strike_deleted = true
 strike_splatter = true       # extras: Tsushima's blood; false: a clean strike
+
+# The shell marks its prompts so the terminal knows where each command starts
+# and how it ended (zsh: automatic; fish 4: built in; bash: see the README).
+# Takes effect in shells started after it changes.
+shell_integration = true
+# A command that fails gets the theme's mark beside its prompt: a stroke of
+# blood-red ink in Tsushima, a chalk cross on the Chalkboard. Ctrl+C is not a
+# failure.
+mark_failures = true
 
 # Each theme's variants, set to their built-in values; change any of them.
 # Fonts must be monospace. font_weight snaps to the weights the font has

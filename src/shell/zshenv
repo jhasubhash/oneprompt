@@ -1,0 +1,22 @@
+# oneprompt's zsh integration (src/shell/zshenv, written out by marks.rs).
+# zsh was started with ZDOTDIR pointing here, so this file is read first:
+# it puts the user's own ZDOTDIR back, reads their .zshenv, and has the
+# prompt marked (OSC 133) so the terminal knows where each command starts
+# and how it ended. zsh then reads the user's .zprofile, .zshrc, ... from
+# their own folder as always.
+if [[ -n "${ONEPROMPT_ZDOTDIR+x}" ]]; then
+    builtin export ZDOTDIR="$ONEPROMPT_ZDOTDIR"
+    builtin unset ONEPROMPT_ZDOTDIR
+else
+    builtin unset ZDOTDIR
+fi
+[[ -f "${ZDOTDIR:-$HOME}/.zshenv" ]] && builtin source "${ZDOTDIR:-$HOME}/.zshenv"
+
+if [[ -o interactive ]]; then
+    builtin autoload -Uz add-zsh-hook
+    # Added before the user's own hooks, so $? is still the command's.
+    _oneprompt_precmd() { builtin print -n "\e]133;D;$?\a\e]133;A\a" }
+    _oneprompt_preexec() { builtin print -n "\e]133;C\a" }
+    add-zsh-hook precmd _oneprompt_precmd
+    add-zsh-hook preexec _oneprompt_preexec
+fi

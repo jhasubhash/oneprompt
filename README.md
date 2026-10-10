@@ -99,6 +99,11 @@ light or dark palette.
   with a sword that flings blood, which splats and dries to a faint stain; Chalkboard
   draws a quick chalk line that knocks off a little dust. `strike_deleted = false` turns it
   all off, `strike_splatter = false` just the extras (blood, dust).
+- **Failed commands are marked**: a command that exits with an error gets the theme's mark
+  in the margin beside its prompt, so scrolling back shows where things went wrong.
+  Tsushima drags a stroke of seal ink down the margin and a drop of it runs and dries;
+  Chalkboard chalks a red cross. Ctrl+C (status 130) is not a failure. It needs shell
+  integration (below); `mark_failures = false` turns it off.
 - `animation = false` turns it off, `animation_speed` scales it. The app only redraws while
   something is moving.
 
@@ -130,8 +135,9 @@ another theme). A theme implements the `Theme` trait:
   frame: size, time, seed, grid, colours; and `hash`, `noise`, `rotate`) plus its own data
   from Rust. A stage it leaves out gets a plain default. A test compiles every stage.
 - **Events**: `reveal` (the window opens), `switch` (switching to it, from its other
-  variant or another theme), `cursor`, `strike` / `draw_strike` (a deleted name), and
-  `draw_divider` (the line between split panes, drawn in when the split is made).
+  variant or another theme), `cursor`, `strike` / `draw_strike` (a deleted name),
+  `draw_divider` (the line between split panes, drawn in when the split is made), and
+  `mark_time` / `draw_failure` (a command that failed, beside its prompt).
 
 Adding a theme is a folder with a `mod.rs` and its shaders, and a line in
 `src/themes/mod.rs`. CONTRIBUTING.md has the details.
@@ -248,6 +254,8 @@ writing_speed = 500           # characters per second for output
 harmonize_colors = true       # program-chosen colours as inks on the sheet
 strike_deleted = true         # strike out names of deleted files on screen
 strike_splatter = true        # with the theme's extras (blood, chalk dust)
+shell_integration = true      # the shell marks its prompts (new shells)
+mark_failures = true          # mark failed commands beside their prompt
 option_as_meta = "left"       # left | both | none
 seed = 11                     # pin the paper; unset = new sheet each session
 
@@ -268,6 +276,21 @@ Font weights snap to the faces the font has (Courier New: 400 and 700); the text
 would otherwise fall back to a different, proportional font. A font that is missing or not
 monospace gets a warning at the bottom of the window. `ONEPROMPT_CONFIG=<path>` uses a different file.
 
+### Shell integration
+
+Marking commands needs the shell to say where each prompt starts and how each command
+ended, with the OSC 133 marks other terminals read too. **zsh** does it without any setup:
+oneprompt starts it with `ZDOTDIR` pointing at a small `.zshenv` that puts yours back,
+reads your own `.zshenv` and adds two hooks; your other files are read as always.
+**fish** 4 sends the marks itself. **bash**: add this to the end of `~/.bashrc`:
+
+```bash
+PROMPT_COMMAND='printf "\e]133;D;%s\a\e]133;A\a" $?'"${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+PS0=$'\e]133;C\a'
+```
+
+`shell_integration = false` leaves zsh alone (it applies to shells started afterwards).
+
 ## Layout
 
 ```
@@ -282,6 +305,8 @@ src/renderer.rs             the passes and each theme's stages: ink layer, surfa
 src/picker.rs               theme picker: card layout and hit testing
 src/animation.rs            per-cell write times (reading order, scroll-aware) and window transitions
 src/strike.rs               names on screen whose files were deleted, to strike out
+src/marks.rs                shell integration: prompt and command marks (OSC 133) read from the PTY, zsh's setup
+src/shell/zshenv            the zsh integration
 src/panes.rs                splits: each tab's tree of panes, their boxes, dividers and neighbours
 src/search.rs               find: matches in the scrollback, the current one, scrolling to it
 src/links.rs                links under the pointer: web addresses, OSC 8 hyperlinks, existing files

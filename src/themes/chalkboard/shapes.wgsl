@@ -7,6 +7,9 @@
 //   18 rule    the line ruled between two panes, end to end along the box
 //              (params.y = how far it has been drawn, params.z = 1 when it
 //              runs up and down, params.w = seed)
+//   19 stroke  a short chalk stroke corner to corner of the box, down to the
+//              right (params.z = 1: up to the right), drawn in up to params.y
+//              of the way (params.w = seed)
 
 fn theme_shape(s: ShapeIn) -> vec4<f32> {
     let kind = u32(s.params.x + 0.5);
@@ -18,6 +21,9 @@ fn theme_shape(s: ShapeIn) -> vec4<f32> {
     }
     if (kind == 18u) {
         return rule(s);
+    }
+    if (kind == 19u) {
+        return stroke(s);
     }
     return vec4<f32>(0.0);
 }
@@ -89,4 +95,28 @@ fn rule(s: ShapeIn) -> vec4<f32> {
     let catches = smoothstep(0.22, 0.58, grain(p, seed));
     let haze = clamp(1.0 - abs(across - centre) / (wide * 0.45), 0.0, 1.0) * grain(p * 0.7, seed * 1.7) * 0.12;
     return vec4<f32>(s.color.rgb, s.color.a * max(inside * mix(0.35, 1.0, catches), haze));
+}
+
+// A short chalk stroke from one corner of the box to the opposite one, as
+// in a cross or a tick: pressed harder in the middle, its end rounder while
+// the chalk is still moving, broken where it skipped the board's tooth.
+fn stroke(s: ShapeIn) -> vec4<f32> {
+    let seed = vec2<f32>(s.params.w * 5.3, s.params.w * 2.9);
+    let size = max(s.size, vec2<f32>(1.0));
+    var a = vec2<f32>(size.x * 0.1, size.y * 0.1);
+    var b = vec2<f32>(size.x * 0.9, size.y * 0.9);
+    if (s.params.z > 0.5) {
+        a = vec2<f32>(size.x * 0.1, size.y * 0.9);
+        b = vec2<f32>(size.x * 0.9, size.y * 0.1);
+    }
+    let reach = mix(a, b, clamp(s.params.y, 0.0, 1.0));
+    let dir = b - a;
+    let t = clamp(dot(s.local - a, dir) / max(dot(dir, dir), 1.0), 0.0, clamp(s.params.y, 0.0, 1.0));
+    let nearest = a + dir * t;
+    let wobble = (noise(vec2<f32>(t * 6.0, 3.0) + seed) - 0.5) * min(size.x, size.y) * 0.05;
+    let thick = max(min(size.x, size.y) * 0.13, 2.0) * (0.6 + 0.4 * sin(3.14159265 * t));
+    let d = length(s.local - nearest) + wobble - thick * 0.5;
+    let inside = clamp(0.5 - d, 0.0, 1.0);
+    let catches = smoothstep(0.22, 0.58, grain(s.local, seed));
+    return vec4<f32>(s.color.rgb, s.color.a * inside * mix(0.35, 1.0, catches));
 }

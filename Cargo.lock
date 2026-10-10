@@ -1517,6 +1517,7 @@ dependencies = [
  "objc2-core-graphics",
  "objc2-quartz-core 0.3.2",
  "png",
+ "polling",
  "pollster",
  "serde",
  "toml",
