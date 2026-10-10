@@ -355,6 +355,14 @@ impl App {
     /// Takes pane `id` out of tab `index`, which has another; the pane
     /// beside it in reading order gets the keyboard if it had it.
     fn remove_pane(&mut self, index: usize, id: PaneId) {
+        // A pane on show goes the theme's way, the others growing beneath.
+        if index == self.active {
+            let theme = self.themes[self.current].clone();
+            let rect = self.pane_rects().into_iter().find(|(p, _)| *p == id).map(|(_, r)| r);
+            if let (Some(rect), Some(r)) = (rect, self.renderer.as_mut()) {
+                r.start_pane_close(&theme, rect);
+            }
+        }
         let tab = &mut self.tabs[index];
         let order = tab.layout.ids();
         let at = order.iter().position(|p| *p == id).unwrap_or(0);
@@ -624,8 +632,9 @@ impl App {
             Action::Clear => {
                 // The old screen goes the theme's way, over the cleared one.
                 let theme = self.themes[self.current].clone();
-                if let Some(r) = self.renderer.as_mut() {
-                    r.start_clear(&theme);
+                let pane = self.tabs.get(self.active).map(|t| t.focus);
+                if let (Some(rect), Some(pane), Some(r)) = (self.focus_rect(), pane, self.renderer.as_mut()) {
+                    r.start_clear(&theme, pane, rect);
                 }
                 if let Some(t) = self.terminal() {
                     t.clear();
@@ -1928,6 +1937,16 @@ impl ApplicationHandler<UserEvent> for App {
                 None => {}
             },
             UserEvent::ConfigChanged => self.reload_config(),
+            UserEvent::Cleared(id, done) => {
+                if self.find_pane(id).is_some_and(|(t, _)| t == self.active) {
+                    let theme = self.themes[self.current].clone();
+                    let rect = self.pane_rects().into_iter().find(|(p, _)| *p == id).map(|(_, r)| r);
+                    if let (Some(rect), Some(r)) = (rect, self.renderer.as_mut()) {
+                        r.start_clear(&theme, id, rect);
+                    }
+                }
+                let _ = done.send(());
+            }
             UserEvent::Progress(id, report) => {
                 if let Some(r) = self.renderer.as_mut() {
                     r.set_progress(id, report);

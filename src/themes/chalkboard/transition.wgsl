@@ -9,12 +9,27 @@ struct Plan {
     passes: f32,  // how many times the eraser crosses the board
     angle: f32,   // tilt of its path, radians
     seed: f32,
-    upward: f32,  // 1: from the bottom up
+    upward: f32,  // 1: from the bottom up (sliding: up)
+    mode: f32,    // 0: the eraser; 1: the chalk is blown away; 2: the board slides
+    at_x: f32,    // where the chalk starts going from (0..1 of the window)
+    at_y: f32,
+    _pad: f32,
+    area: vec4<f32>, // the pane (x, y, w, h, 0..1 of the window)
 };
 
 @group(0) @binding(2) var<uniform> plan: Plan;
 
 fn theme_transition(px: vec2<f32>, now_in: vec4<f32>, before: vec4<f32>) -> vec4<f32> {
+    if (plan.mode > 0.5) {
+        let uv = px / frame.resolution;
+        if (any(uv < plan.area.xy) || any(uv > plan.area.xy + plan.area.zw)) {
+            return now_in;
+        }
+        if (plan.mode > 1.5) {
+            return slide(px, now_in);
+        }
+        return blown(px, now_in);
+    }
     // The window closing: the board is wiped clean before it goes.
     var now = now_in;
     if (frame.closing > 0.5) {
@@ -66,4 +81,55 @@ fn theme_transition(px: vec2<f32>, now_in: vec4<f32>, before: vec4<f32>) -> vec4
     let speck = smoothstep(0.55, 0.95, hash(floor(lp * 1.2))) * edge;
     color = mix(mix(before, color, shown), vec4<f32>(frame.ink.rgb, 1.0), speck * 0.4);
     return vec4<f32>(color.rgb, 1.0);
+}
+
+// Clearing: the chalk is blown off the board. The marks break up into
+// specks of dust that drift away, downwards and out from where the cursor
+// was, fading as they go; those nearest it go first. The chalk is what the
+// old frame has that the clean board (`scene`) doesn't, so the board itself
+// stays put.
+fn blown(px: vec2<f32>, now: vec4<f32>) -> vec4<f32> {
+    let res = frame.resolution;
+    let scale = max(frame.scale, 1.0);
+    let t = frame.progress;
+    let at = vec2<f32>(plan.at_x, plan.at_y) * res;
+    var sum = vec3<f32>(0.0);
+    // A few specks may have drifted onto this pixel from where they were.
+    for (var k = 0; k < 3; k++) {
+        let seed = vec2<f32>(plan.seed + f32(k) * 7.1, f32(k) * 3.3);
+        // Where the dust here came from: further back the longer it has
+        // been going, its start delayed by the distance from the cursor.
+        let away = normalize(px - at + vec2<f32>(0.001, 0.0));
+        let delay = clamp(length(px - at) / length(res) * 1.2, 0.0, 0.6);
+        let go = clamp((t - delay) / 0.5, 0.0, 1.0);
+        let drift = (away * 0.5 + vec2<f32>((noise(px * 0.01 + seed) - 0.5) * 1.2, 1.0)) * go * go * 140.0 * scale;
+        let src = clamp(px - drift, vec2<f32>(0.0), res - 1.0);
+        let old = textureLoad(previous, vec2<i32>(src), 0).rgb;
+        let clean = textureLoad(scene, vec2<i32>(src), 0).rgb;
+        // The chalk breaks into specks, fewer and fewer as it goes.
+        let speck = step(go * 0.95, hash(floor(src / (1.5 * scale)) + seed));
+        sum += (old - clean) * speck * (1.0 - go);
+    }
+    return vec4<f32>(clamp(now.rgb + sum / 1.5, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+}
+
+// Closing a pane: its board slides up (or down) out of the frame, quickly
+// after a heavy start, the panes taking its place behind it; a shadow along
+// its edge, where it leaves.
+fn slide(px: vec2<f32>, now: vec4<f32>) -> vec4<f32> {
+    let res = frame.resolution;
+    let area = plan.area;
+    let t = frame.progress;
+    let move_t = t * t * (3.0 - 2.0 * t) * 0.6 + t * t * 0.4;
+    let dy = move_t * area.w * 1.05 * select(1.0, -1.0, plan.upward > 0.5);
+    let uv = px / res;
+    let src = uv - vec2<f32>(0.0, dy);
+    if (src.y >= area.y && src.y <= area.y + area.w) {
+        let c = textureLoad(previous, vec2<i32>(clamp(src * res, vec2<f32>(0.0), res - 1.0)), 0).rgb;
+        return vec4<f32>(c, 1.0);
+    }
+    // The edge it leaves from casts a shadow on what is behind.
+    let edge = select(area.y + area.w + dy, area.y + dy, plan.upward > 0.5);
+    let shadow = 1.0 - smoothstep(0.0, 0.03, abs(uv.y - edge));
+    return vec4<f32>(now.rgb * (1.0 - 0.45 * shadow), 1.0);
 }

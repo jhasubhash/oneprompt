@@ -226,9 +226,10 @@ weather = "none"
 weather_amount = 0.5         # 0 a few drops .. 1 a downpour
 
 # Closing a tab or the window burns its sheet away in Tsushima and wipes it off
-# the Chalkboard. Clearing the screen (Cmd+K) cuts it in two with a sword in
-# Tsushima, the halves sliding apart and falling; the Chalkboard gets one
-# sweep of the eraser.
+# the Chalkboard; a closed pane is slashed to pieces (Tsushima), torn out
+# (Logbook) or slides off (Chalkboard). Clearing the screen (Cmd+K, or `clear`
+# in the shell) burns it away from where it was typed; on the Chalkboard the
+# chalk drifts off as dust.
 close_effect = true
 clear_effect = true
 

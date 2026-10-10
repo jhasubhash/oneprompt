@@ -76,9 +76,17 @@ pub trait Theme: Sync + 'static {
     fn close(&self, _variant: &Variant, _rng: &mut Rng, _aspect: f32) -> Option<Plan> {
         None
     }
-    /// How the screen is cleared (Cmd+K): the old sheet goes, the cleared
-    /// one beneath. None: it simply clears.
-    fn clear(&self, _variant: &Variant, _rng: &mut Rng, _aspect: f32) -> Option<Plan> {
+    /// How a pane's screen is cleared (Cmd+K, or `clear` in the shell): the
+    /// old screen goes, the cleared one beneath. `area` is the pane (x, y, w,
+    /// h, 0..1 of the window) and `at` where the cursor was (0..1 of the
+    /// window); the transition should leave the rest of the window alone.
+    /// None: it simply clears.
+    fn clear(&self, _variant: &Variant, _rng: &mut Rng, _aspect: f32, _area: [f32; 4], _at: [f32; 2]) -> Option<Plan> {
+        None
+    }
+    /// How a closed pane goes (`area`, 0..1 of the window, as for `clear`):
+    /// the panes that take its place show beneath. None: it simply goes.
+    fn close_pane(&self, _variant: &Variant, _rng: &mut Rng, _aspect: f32, _area: [f32; 4]) -> Option<Plan> {
         None
     }
     /// Seconds the ink keeps changing after a character is written (at

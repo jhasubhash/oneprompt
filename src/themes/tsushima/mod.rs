@@ -31,8 +31,8 @@ const RAIN: f32 = CUSTOM + 5.0;
 /// A paste's splash soaks into the paper over this long, at speed 1.
 const SPLASH_TIME: f32 = 1.0;
 /// Leaves that fall onto an idle window, one about every LEAF_GAP seconds.
-const LEAVES: usize = 9;
-const LEAF_GAP: f32 = 2.4;
+const LEAVES: usize = 24;
+const LEAF_GAP: f32 = 1.0;
 /// A seal comes down onto the paper this fast, and shakes this long.
 const STAMP_TIME: f32 = 0.22;
 const THUD_TIME: f32 = 0.28;
@@ -44,7 +44,8 @@ const CUT_TIME: f32 = 0.32;
 const REVEAL_TIME: f32 = 1.6;
 const SWITCH_TIME: f32 = 2.8;
 const BURN_TIME: f32 = 1.5;
-const CLEAR_TIME: f32 = 1.2;
+const CLEAR_TIME: f32 = 1.3;
+const SHRED_TIME: f32 = 1.3;
 
 /// A failed command's stroke is dragged down the margin this fast.
 const FAILURE_TIME: f32 = 0.3;
@@ -251,18 +252,33 @@ impl Theme for Tsushima {
             .iter()
             .map(|c: &[f32; 2]| ((c[0] - at[0]).powi(2) + (c[1] - at[1]).powi(2)).sqrt())
             .fold(0.0, f32::max);
-        let data = PlanData::burn(at, far + 0.45, rng.unit() * 100.0);
+        let data = PlanData::burn(at, far + 0.45, [0.0, 0.0, 1.0, 1.0], rng.unit() * 100.0);
         Some(Plan { duration: BURN_TIME * rng.range(0.9, 1.15), ease: 1.15, data: theme::bytes(&data) })
     }
 
-    /// Clearing the screen cuts the old sheet in two with one stroke of the
-    /// sword, corner to corner; a breath, then the halves slide apart along
-    /// the cut and drop away, the clean sheet beneath.
-    fn clear(&self, _v: &Variant, rng: &mut Rng, aspect: f32) -> Option<Plan> {
-        let at = [aspect * rng.range(0.4, 0.6), rng.range(0.4, 0.6)];
-        let angle = rng.range(0.35, 0.65) * if rng.unit() < 0.5 { 1.0 } else { -1.0 };
-        let data = PlanData::slash(at, angle, rng.unit() * 100.0);
-        Some(Plan { duration: CLEAR_TIME, ease: 1.0, data: theme::bytes(&data) })
+    /// A closed pane is slashed through twice, crossing, and its pieces
+    /// fall away, the panes taking its place beneath.
+    fn close_pane(&self, _v: &Variant, rng: &mut Rng, aspect: f32, area: [f32; 4]) -> Option<Plan> {
+        let [x, y, w, h] = area;
+        let at = [(x + w * rng.range(0.35, 0.65)) * aspect, y + h * rng.range(0.35, 0.65)];
+        let first = rng.range(0.4, 0.8) * if rng.unit() < 0.5 { 1.0 } else { -1.0 };
+        let second = first + std::f32::consts::FRAC_PI_2 + rng.range(-0.4, 0.4);
+        let data = PlanData::shred(at, [first, second], area, rng.unit() * 100.0);
+        Some(Plan { duration: SHRED_TIME, ease: 1.0, data: theme::bytes(&data) })
+    }
+
+    /// Clearing burns the old screen away from where the cursor was, where
+    /// `clear` was typed: a fire spreads out from it across the pane, the
+    /// clean sheet beneath.
+    fn clear(&self, _v: &Variant, rng: &mut Rng, aspect: f32, area: [f32; 4], at: [f32; 2]) -> Option<Plan> {
+        let [x, y, w, h] = area;
+        let at = [at[0] * aspect, at[1]];
+        let far = [[x, y], [x + w, y], [x, y + h], [x + w, y + h]]
+            .iter()
+            .map(|c| ((c[0] * aspect - at[0]).powi(2) + (c[1] - at[1]).powi(2)).sqrt())
+            .fold(0.0, f32::max);
+        let data = PlanData::burn(at, far + 0.4, area, rng.unit() * 100.0);
+        Some(Plan { duration: CLEAR_TIME, ease: 1.1, data: theme::bytes(&data) })
     }
 
     /// The bleed keeps creeping for `bleed_time`.
@@ -467,7 +483,7 @@ impl Theme for Tsushima {
         let inks = [v.cursor, v.palette[3], v.ink];
         for i in 0..LEAVES {
             let start = i as f32 * LEAF_GAP + rng.range(0.0, 1.6);
-            let size = rng.range(26.0, 42.0) * s;
+            let size = rng.range(13.0, 22.0) * s;
             let x0 = ax + rng.range(0.05, 0.95) * aw;
             let rest_x = (x0 + rng.range(-0.18, 0.18) * aw).clamp(ax + size, ax + aw - size);
             let rest_y = ay + ah - rng.range(8.0, 30.0) * s;

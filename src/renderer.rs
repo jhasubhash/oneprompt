@@ -1324,15 +1324,39 @@ impl Renderer {
 
     /// Starts the way `variant`'s theme clears the screen (Cmd+K), over the
     /// last frame shown.
-    pub fn start_clear(&mut self, variant: &Variant) {
-        if !self.animation.0 || !self.effects.1 {
+    /// `pane` (at `rect`, physical pixels) is cleared: its old screen goes the
+    /// theme's way, from where its cursor was. A clear while one is already
+    /// going (Cmd+K makes the shell clear too) adds nothing.
+    pub fn start_clear(&mut self, variant: &Variant, pane: u64, rect: [f32; 4]) {
+        if !self.animation.0 || !self.effects.1 || !self.transition_done() {
             return;
         }
-        let aspect = self.aspect();
-        if let Some(plan) = variant.theme.clear(variant, &mut self.rng, aspect) {
+        let cursor = self.cursor_moves.get(&pane).map_or(self.cursor_cell, |m| m.1);
+        let (w, h) = (self.config.width as f32, self.config.height as f32);
+        let at = [(cursor[0] + cursor[2] / 2.0) / w, (cursor[1] + cursor[3] / 2.0) / h];
+        let (aspect, area) = (self.aspect(), self.uv_rect(rect));
+        if let Some(plan) = variant.theme.clear(variant, &mut self.rng, aspect, area, at) {
             self.start_over_last(plan);
             self.events.push(api::SoundEvent::Clear);
         }
+    }
+
+    /// The pane at `rect` (physical pixels) closes, the theme's way.
+    pub fn start_pane_close(&mut self, variant: &Variant, rect: [f32; 4]) {
+        if !self.animation.0 || !self.effects.0 {
+            return;
+        }
+        let (aspect, area) = (self.aspect(), self.uv_rect(rect));
+        if let Some(plan) = variant.theme.close_pane(variant, &mut self.rng, aspect, area) {
+            self.start_over_last(plan);
+            self.events.push(api::SoundEvent::Close);
+        }
+    }
+
+    /// `rect` (physical pixels) as shares of the window.
+    fn uv_rect(&self, [x, y, w, h]: [f32; 4]) -> [f32; 4] {
+        let (ww, wh) = (self.config.width as f32, self.config.height as f32);
+        [x / ww, y / wh, w / ww, h / wh]
     }
 
     /// Which of the theme's effects play: closing a tab or the window, and

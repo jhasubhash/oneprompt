@@ -28,7 +28,8 @@ const SEAL: f32 = CUSTOM + 3.0;
 const OPEN_TIME: f32 = 1.2;
 const TURN_TIME: f32 = 1.4;
 const CLOSE_TIME: f32 = 1.1;
-const CLEAR_TIME: f32 = 0.8;
+const CLEAR_TIME: f32 = 1.3;
+const TEAR_TIME: f32 = 1.2;
 /// The quill line through a deleted name, and how long its blot spreads.
 const STRIKE_TIME: f32 = 0.3;
 const BLOT_TIME: f32 = 1.2;
@@ -66,7 +67,13 @@ struct PlanData {
     /// Tilt of the fold, radians.
     tilt: f32,
     seed: f32,
+    /// 0: a page turns; 1: `area` burns from `at`, the front `reach` away
+    /// when done; 2: `area`'s page is torn out.
+    mode: f32,
+    at: [f32; 2],
+    reach: f32,
     _pad: f32,
+    area: [f32; 4],
 }
 
 impl Theme for Logbook {
@@ -197,9 +204,34 @@ impl Theme for Logbook {
         Some(turn(rng, 1.0, CLOSE_TIME))
     }
 
-    /// Clearing turns to a fresh page.
-    fn clear(&self, _v: &Variant, rng: &mut Rng, _aspect: f32) -> Option<Plan> {
-        Some(turn(rng, 1.0, CLEAR_TIME))
+    /// Clearing sets the old page alight where the cursor was, where `clear`
+    /// was typed: it burns away across the pane to a fresh page.
+    fn clear(&self, _v: &Variant, rng: &mut Rng, aspect: f32, area: [f32; 4], at: [f32; 2]) -> Option<Plan> {
+        let [x, y, w, h] = area;
+        let at = [at[0] * aspect, at[1]];
+        let reach = [[x, y], [x + w, y], [x, y + h], [x + w, y + h]]
+            .iter()
+            .map(|c| ((c[0] * aspect - at[0]).powi(2) + (c[1] - at[1]).powi(2)).sqrt())
+            .fold(0.0, f32::max)
+            + 0.4;
+        let data = PlanData { way: 1.0, tilt: 0.0, seed: rng.unit() * 100.0, mode: 1.0, at, reach, _pad: 0.0, area };
+        Some(Plan { duration: CLEAR_TIME, ease: 1.1, data: theme::bytes(&data) })
+    }
+
+    /// A closed pane's page is torn out: a ragged tear runs across it and
+    /// the two pieces are pulled apart and away.
+    fn close_pane(&self, _v: &Variant, rng: &mut Rng, _aspect: f32, area: [f32; 4]) -> Option<Plan> {
+        let data = PlanData {
+            way: if rng.unit() < 0.5 { 1.0 } else { -1.0 },
+            tilt: rng.range(-0.5, 0.5),
+            seed: rng.unit() * 100.0,
+            mode: 2.0,
+            at: [0.0; 2],
+            reach: 0.0,
+            _pad: 0.0,
+            area,
+        };
+        Some(Plan { duration: TEAR_TIME, ease: 1.0, data: theme::bytes(&data) })
     }
 
     /// Fresh iron-gall ink stays dark and blue while it is wet.
@@ -292,6 +324,15 @@ impl Theme for Logbook {
 
 /// A page turning `way` (1: right to left), taking `duration`.
 fn turn(rng: &mut Rng, way: f32, duration: f32) -> Plan {
-    let data = PlanData { way, tilt: rng.range(-0.18, 0.18), seed: rng.unit() * 100.0, _pad: 0.0 };
+    let data = PlanData {
+        way,
+        tilt: rng.range(-0.18, 0.18),
+        seed: rng.unit() * 100.0,
+        mode: 0.0,
+        at: [0.0; 2],
+        reach: 0.0,
+        _pad: 0.0,
+        area: [0.0, 0.0, 1.0, 1.0],
+    };
     Plan { duration, ease: 1.6, data: theme::bytes(&data) }
 }

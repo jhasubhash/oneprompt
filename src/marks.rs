@@ -103,11 +103,21 @@ impl Marked {
         // PTY's own and reads through this one.
         let file = pty.file().try_clone()?;
         let progress = proxy.clone();
+        let reader_proxy = proxy.clone();
         let mut reader = Reader::new(file, Box::new(move |n, finished| {
             let _ = proxy.send_event(UserEvent::Command(pane, n, finished));
         }));
         reader.progress = Some(Box::new(move |p| {
             let _ = progress.send_event(UserEvent::Progress(pane, p));
+        }));
+        let cleared = reader_proxy;
+        reader.cleared = Some(Box::new(move || {
+            // The UI keeps the frame on show (the screen before the clear)
+            // for its transition; until it has, the clear waits.
+            let (done, wait) = std::sync::mpsc::sync_channel(1);
+            if cleared.send_event(UserEvent::Cleared(pane, done)).is_ok() {
+                let _ = wait.recv_timeout(std::time::Duration::from_millis(150));
+            }
         }));
         Ok(Self { pty, reader })
     }
@@ -170,14 +180,42 @@ pub struct Reader {
     started: Option<Instant>,
     done: Box<dyn FnMut(u64, Finished) + Send>,
     progress: Option<Box<dyn FnMut(Progress) + Send>>,
+    /// Told when the screen is about to be erased outside a full-screen app
+    /// (followed by entering and leaving the alternate screen), before the
+    /// terminal sees it: the output from the erase on is held back until it
+    /// returns. Erases soon after one (`clear` sends two) count with it.
+    cleared: Option<Box<dyn FnMut() + Send>>,
+    alternate: bool,
+    held: Option<Vec<u8>>,
+    quiet_until: Option<Instant>,
 }
 
 impl Reader {
     fn new(source: impl Read + Send + 'static, done: Box<dyn FnMut(u64, Finished) + Send>) -> Self {
-        Self { source: Box::new(source), out: Vec::new(), at: 0, carry: Vec::new(), raw: vec![0; 0x10000], prompt: 0, started: None, done, progress: None }
+        Self { source: Box::new(source), out: Vec::new(), at: 0, carry: Vec::new(), raw: vec![0; 0x10000], prompt: 0, started: None, done, progress: None, cleared: None, alternate: false, held: None, quiet_until: None }
     }
 
     /// Takes the marks out of `bytes` (after any carried over) into `out`.
+    /// Notes full-screen apps coming and going from the sequence starting
+    /// `rest`; returns true if it erases the screen outside one, and that is
+    /// news. These pass through as they are.
+    fn watch(&mut self, rest: &[u8]) -> bool {
+        const ENTER: [&[u8]; 3] = [b"\x1b[?1049h", b"\x1b[?1047h", b"\x1b[?47h"];
+        const LEAVE: [&[u8]; 3] = [b"\x1b[?1049l", b"\x1b[?1047l", b"\x1b[?47l"];
+        if ENTER.iter().any(|s| rest.starts_with(s)) {
+            self.alternate = true;
+        } else if LEAVE.iter().any(|s| rest.starts_with(s)) {
+            self.alternate = false;
+        } else if !self.alternate
+            && self.cleared.is_some()
+            && (rest.starts_with(b"\x1b[2J") || rest.starts_with(b"\x1b[3J"))
+            && self.quiet_until.is_none_or(|t| Instant::now() >= t)
+        {
+            return true;
+        }
+        false
+    }
+
     fn scan(&mut self, bytes: &[u8]) {
         let mut input = std::mem::take(&mut self.carry);
         input.extend_from_slice(bytes);
@@ -196,6 +234,13 @@ impl Reader {
             } else if rest.starts_with(PROGRESS) {
                 PROGRESS
             } else {
+                if self.watch(rest) {
+                    // Hand on what came before, and hold the rest until the
+                    // UI has heard (see `read`).
+                    self.out.extend_from_slice(&input[from..j]);
+                    self.held = Some(rest.to_vec());
+                    return;
+                }
                 i = j + 1;
                 continue;
             };
@@ -262,6 +307,16 @@ impl Read for Reader {
         while self.at >= self.out.len() {
             self.out.clear();
             self.at = 0;
+            // What came before an erase has been handed on: say so, then go
+            // on with the erase.
+            if let Some(held) = self.held.take() {
+                self.quiet_until = Some(Instant::now() + std::time::Duration::from_millis(300));
+                if let Some(cleared) = self.cleared.as_mut() {
+                    cleared();
+                }
+                self.scan(&held);
+                continue;
+            }
             let raw = std::mem::take(&mut self.raw);
             let mut raw = raw;
             let got = match self.source.read(&mut raw) {
@@ -395,6 +450,28 @@ mod tests {
         let (out, _) = run(&[b"a\x1b]9;4;1;5", b"0\x1b\\b\x1b]9;1;notify\x07"]);
         // The progress report goes; another OSC 9 (a notification) stays.
         assert_eq!(out, b"ab\x1b]9;1;notify\x07");
+    }
+
+    #[test]
+    fn clearing_is_heard_outside_full_screen_apps() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let count = Arc::new(AtomicUsize::new(0));
+        let counted = count.clone();
+        let input: &[u8] = b"text\x1b[H\x1b[2J\x1b[3J$ \x1b[?1049h\x1b[2J vim \x1b[2J\x1b[?1049l";
+        let mut reader = Reader::new(input, Box::new(|_, _| {}));
+        reader.cleared = Some(Box::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+        }));
+        // The erase reaches the terminal only after the UI has heard of it.
+        let mut first = [0u8; 64];
+        let n = reader.read(&mut first).unwrap();
+        assert_eq!(&first[..n], b"text\x1b[H");
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+        let mut rest = Vec::new();
+        reader.read_to_end(&mut rest).unwrap();
+        // One clear for `clear`'s two erases; none inside the app.
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        assert!(rest.starts_with(b"\x1b[2J\x1b[3J$ "));
     }
 
     #[test]

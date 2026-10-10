@@ -38,7 +38,8 @@ const RULE_TIME: f32 = 0.45;
 const REVEAL_TIME: f32 = 1.3;
 const SWITCH_TIME: f32 = 1.8;
 const CLOSE_TIME: f32 = 1.1;
-const CLEAR_TIME: f32 = 0.6;
+const FLOW_TIME: f32 = 1.4;
+const SLIDE_TIME: f32 = 0.9;
 /// Fresh chalk sheds dust this long.
 const SETTLE_TIME: f32 = 1.0;
 /// The chalk line through a deleted name, and the dust it knocks off.
@@ -73,6 +74,12 @@ struct PlanData {
     angle: f32,
     seed: f32,
     upward: f32,
+    /// 0: the eraser wipes the window; 1: the chalk is blown off `area`
+    /// from `at`; 2: `area`'s board slides away (up if `upward`).
+    mode: f32,
+    at: [f32; 2],
+    _pad: f32,
+    area: [f32; 4],
 }
 
 impl Theme for Chalkboard {
@@ -195,9 +202,20 @@ impl Theme for Chalkboard {
         Some(wipe(rng, 3.0, 5.0, SWITCH_TIME))
     }
 
-    /// Clearing the board is one quick sweep of the eraser.
-    fn clear(&self, _v: &Variant, rng: &mut Rng, _aspect: f32) -> Option<Plan> {
-        Some(wipe(rng, 1.0, 1.0, CLEAR_TIME))
+    /// Clearing the board blows the chalk off it: the marks break up into
+    /// dust and drift away, from where the cursor was outwards, the clean
+    /// board beneath.
+    fn clear(&self, _v: &Variant, rng: &mut Rng, _aspect: f32, area: [f32; 4], at: [f32; 2]) -> Option<Plan> {
+        let data = PlanData { passes: 1.0, angle: 0.0, seed: rng.unit() * 100.0, upward: 0.0, mode: 1.0, at, _pad: 0.0, area };
+        Some(Plan { duration: FLOW_TIME, ease: 1.0, data: theme::bytes(&data) })
+    }
+
+    /// A closed pane's board slides up or down out of the frame, the panes
+    /// taking its place behind it.
+    fn close_pane(&self, _v: &Variant, rng: &mut Rng, _aspect: f32, area: [f32; 4]) -> Option<Plan> {
+        let upward = if rng.unit() < 0.5 { 1.0 } else { 0.0 };
+        let data = PlanData { passes: 1.0, angle: 0.0, seed: rng.unit() * 100.0, upward, mode: 2.0, at: [0.5, 0.5], _pad: 0.0, area };
+        Some(Plan { duration: SLIDE_TIME, ease: 1.0, data: theme::bytes(&data) })
     }
 
     /// A closed tab is wiped off the board with the eraser, the next one
@@ -447,6 +465,10 @@ fn wipe(rng: &mut Rng, lo: f32, hi: f32, duration: f32) -> Plan {
         angle: rng.range(-0.12, 0.12),
         seed: rng.unit() * 100.0,
         upward: if rng.unit() < 0.25 { 1.0 } else { 0.0 },
+        mode: 0.0,
+        at: [0.5, 0.5],
+        _pad: 0.0,
+        area: [0.0, 0.0, 1.0, 1.0],
     };
     Plan { duration, ease: 1.3, data: theme::bytes(&data) }
 }

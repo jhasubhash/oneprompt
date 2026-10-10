@@ -6,15 +6,30 @@
 
 // What mod.rs describes (`PlanData`).
 struct Plan {
-    way: f32,   // 1: turning right to left, -1: left to right
-    tilt: f32,  // of the fold, radians
+    way: f32,    // 1: turning right to left, -1: left to right
+    tilt: f32,   // of the fold (or the tear), radians
     seed: f32,
+    mode: f32,   // 0: a page turns; 1: the pane burns; 2: the pane is torn out
+    at_x: f32,   // the burn: where it starts (x across 0..aspect, y down 0..1)
+    at_y: f32,
+    reach: f32,  // how far its front has gone when done
     _pad: f32,
+    area: vec4<f32>, // the pane (x, y, w, h, 0..1 of the window)
 };
 
 @group(0) @binding(2) var<uniform> plan: Plan;
 
 fn theme_transition(px: vec2<f32>, now_in: vec4<f32>, before: vec4<f32>) -> vec4<f32> {
+    if (plan.mode > 0.5) {
+        let uv = px / frame.resolution;
+        if (any(uv < plan.area.xy) || any(uv > plan.area.xy + plan.area.zw)) {
+            return now_in;
+        }
+        if (plan.mode > 1.5) {
+            return torn(px, now_in);
+        }
+        return burnt(px, now_in, before);
+    }
     let res = frame.resolution;
     let aspect = res.x / res.y;
     var now = now_in;
@@ -70,3 +85,77 @@ fn theme_transition(px: vec2<f32>, now_in: vec4<f32>, before: vec4<f32>) -> vec4
     return vec4<f32>(before.rgb * (1.0 - 0.12 * lift), 1.0);
 }
 
+
+// Clearing: the old page burns away from where the cursor was. The front
+// fingers out raggedly, browning and charring the paper ahead of it, a
+// glowing edge, then ash and the fresh page.
+fn burnt(px: vec2<f32>, now: vec4<f32>, before: vec4<f32>) -> vec4<f32> {
+    let aspect = frame.resolution.x / frame.resolution.y;
+    let p = px / frame.resolution * vec2<f32>(aspect, 1.0);
+    let seed = vec2<f32>(plan.seed * 1.3, plan.seed * 0.7);
+    let lp = px / max(frame.scale, 1.0);
+    let ragged = (fbm(p * 3.4 + seed) - 0.5) * 0.4 + (noise(lp * 0.12 + seed) - 0.5) * 0.05;
+    let behind = frame.progress * plan.reach - (length(p - vec2<f32>(plan.at_x, plan.at_y)) + ragged);
+    let edge = 0.03;
+    let ash_rgb = vec3<f32>(0.08, 0.06, 0.05) * (0.7 + 0.6 * noise(lp * 0.3 + seed));
+    let flicker = 0.65 + 0.35 * noise(lp * 0.2 + vec2<f32>(frame.time * 6.0, 0.0) + seed);
+    if (behind > edge) {
+        let ash = 1.0 - smoothstep(edge, edge + 0.14, behind);
+        var rgb = mix(now.rgb, ash_rgb, ash * 0.85);
+        let speck = step(0.965, hash(floor(lp * 0.5) + seed)) * ash;
+        rgb = mix(rgb, vec3<f32>(1.0, 0.48, 0.12), speck * flicker);
+        return vec4<f32>(rgb, 1.0);
+    }
+    if (behind > 0.0) {
+        let t = behind / edge;
+        let hot = mix(vec3<f32>(1.0, 0.74, 0.3), vec3<f32>(0.6, 0.12, 0.04), t);
+        return vec4<f32>(mix(hot * flicker, ash_rgb, smoothstep(0.55, 1.0, t)), 1.0);
+    }
+    let ahead = -behind;
+    var rgb = mix(before.rgb, before.rgb * vec3<f32>(0.66, 0.46, 0.26), (1.0 - smoothstep(0.0, 0.12, ahead)) * 0.8);
+    rgb = mix(rgb, vec3<f32>(0.1, 0.06, 0.03), 1.0 - smoothstep(0.0, 0.016, ahead));
+    return vec4<f32>(rgb, 1.0);
+}
+
+// Closing a pane: its page is torn out. A ragged tear runs across it (at
+// `tilt`), its edges pale and fibrous where the paper parted; the two
+// pieces are pulled apart, one up and away, one down and away, and fall,
+// the panes taking its place beneath. The old pane is in `previous`.
+fn torn(px: vec2<f32>, now: vec4<f32>) -> vec4<f32> {
+    let res = frame.resolution;
+    let aspect = res.x / res.y;
+    let area = plan.area;
+    let t = frame.progress;
+    let p = px / res.y;
+    let centre = (area.xy + area.zw * 0.5) * vec2<f32>(aspect, 1.0);
+    let dir = vec2<f32>(cos(plan.tilt), sin(plan.tilt));
+    let n = vec2<f32>(-dir.y, dir.x);
+    let lo = area.xy * vec2<f32>(aspect, 1.0);
+    let hi = (area.xy + area.zw) * vec2<f32>(aspect, 1.0);
+    let seed = vec2<f32>(plan.seed, plan.seed * 0.37);
+    // How far the tear has run along its line, then the pull apart.
+    let run = clamp(t / 0.3, 0.0, 1.0);
+    let pull = clamp((t - 0.25) / 0.75, 0.0, 1.0);
+    var color = now;
+    for (var k = 0; k < 2; k++) {
+        let side = select(-1.0, 1.0, k == 1);
+        let shift = n * side * pull * 0.06 + dir * side * plan.way * pull * 0.05 + vec2<f32>(0.0, pull * pull * pull * 1.4 * select(0.6, 1.0, k == 1));
+        let src = p - shift;
+        let r = src - centre;
+        let along = dot(r, dir);
+        // The tear's ragged line: big wanders and fine fibres.
+        let line = (fbm(vec2<f32>(along * 9.0, 0.0) + seed) - 0.5) * 0.05 + (noise(vec2<f32>(along * 90.0, 3.0) + seed) - 0.5) * 0.006;
+        let across = dot(r, n) - line;
+        let on_side = across * side >= 0.0;
+        let in_pane = all(src >= lo) && all(src <= hi);
+        if (on_side && in_pane) {
+            var c = textureLoad(previous, vec2<i32>(clamp(src * res.y, vec2<f32>(0.0), res - 1.0)), 0).rgb;
+            // The torn edge: pale fibres where the paper parted.
+            let fibre = 1.0 - smoothstep(0.0, 0.005 + 0.004 * noise(vec2<f32>(along * 140.0, 0.0) + seed), abs(across));
+            let opened = max(pull, step(along * plan.way, (run - 0.5) * 3.0));
+            c = mix(c, vec3<f32>(0.97, 0.94, 0.86), fibre * 0.85 * opened);
+            color = vec4<f32>(c * (1.0 - 0.15 * pull), 1.0);
+        }
+    }
+    return color;
+}

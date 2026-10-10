@@ -16,7 +16,8 @@
 // along it and settling into the grain behind it, and the paper just ahead
 // darkened by the water reaching it first.
 
-// Closing a sheet burns it away (brush.rs, `PlanData::burn`): a fire lit
+// Closing a sheet, or clearing one, burns it away (brush.rs,
+// `PlanData::burn`): a fire lit
 // at marks[0].xy spreads to marks[0].z by the end, its front ragged and
 // fingering out along the paper, the sheet ahead of it browning and
 // charring, the edge glowing, ash and embers behind it fading to what is
@@ -177,7 +178,7 @@ fn arrival(q: vec2<f32>) -> Hit {
 
 fn theme_transition(px: vec2<f32>, now: vec4<f32>, before_in: vec4<f32>) -> vec4<f32> {
     if (plan.front.w > 1.5) {
-        return sliced(px, now, before_in);
+        return shred(px, now, before_in);
     }
     if (plan.front.w > 0.5) {
         return burn(px, now, before_in);
@@ -294,6 +295,12 @@ fn theme_transition(px: vec2<f32>, now: vec4<f32>, before_in: vec4<f32>) -> vec4
 }
 // The burn. Distances are in window heights.
 fn burn(px: vec2<f32>, now_in: vec4<f32>, before: vec4<f32>) -> vec4<f32> {
+    // Only the sheet that burns: the pane cleared (marks[1]), or the window.
+    let area = plan.marks[1];
+    let uv = px / frame.resolution;
+    if (any(uv < area.xy) || any(uv > area.xy + area.zw)) {
+        return now_in;
+    }
     let aspect = frame.resolution.x / frame.resolution.y;
     let p = px / frame.resolution * vec2<f32>(aspect, 1.0);
     let seed = vec2<f32>(plan.info.z * 1.7, plan.info.z * 0.9);
@@ -336,54 +343,62 @@ fn burn(px: vec2<f32>, now_in: vec4<f32>, before: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(rgb, 1.0);
 }
 
-// Clearing: a sword cut through the old sheet along the line through
-// marks[0].xy at angle marks[0].z (window heights). The cut is drawn across
-// in the first sixth; then the two halves slide apart along it, one each
-// way, and fall, faster and faster, the clean sheet beneath. The old sheet
-// is in `previous` (sampled at where each half's pixel came from).
-fn sliced(px: vec2<f32>, now: vec4<f32>, before: vec4<f32>) -> vec4<f32> {
+// Closing a pane: two sword cuts through it, crossing at marks[0].xy at
+// angles marks[0].z and .w (window heights), inside marks[1] (the pane, 0..1
+// of the window). The cuts are drawn across in the first part; then the four
+// pieces fall away, each its own way, faster and faster, the panes taking
+// its place beneath. The old pane is in `previous`.
+fn shred(px: vec2<f32>, now: vec4<f32>, before: vec4<f32>) -> vec4<f32> {
     let res = frame.resolution;
-    let aspect = res.x / res.y;
+    let area = plan.marks[1];
+    let uv = px / res;
+    if (any(uv < area.xy) || any(uv > area.xy + area.zw)) {
+        return now;
+    }
     let t = frame.progress;
     let at = plan.marks[0].xy;
-    let along_dir = vec2<f32>(cos(plan.marks[0].z), sin(plan.marks[0].z));
-    let normal = vec2<f32>(-along_dir.y, along_dir.x);
+    let n1 = vec2<f32>(-sin(plan.marks[0].z), cos(plan.marks[0].z));
+    let n2 = vec2<f32>(-sin(plan.marks[0].w), cos(plan.marks[0].w));
     let p = px / res.y;
     let rel = p - at;
-    let side = select(-1.0, 1.0, dot(rel, normal) >= 0.0);
-    // The blade crosses in the first sixth, source one end of the line.
-    let cut = clamp(t / 0.16, 0.0, 1.0);
-    let span = (aspect + 1.0);
-    let reached = (cut - 0.5) * span * 1.2;
-    // After a breath, the halves move: apart along the cut, then down.
-    let move_t = clamp((t - 0.3) / 0.7, 0.0, 1.0);
-    let slide = along_dir * side * move_t * move_t * 0.35;
-    let fall = vec2<f32>(0.0, move_t * move_t * move_t * 1.4) + normal * side * move_t * 0.04;
-    let source = (p - slide - fall) * res.y;
-    // Where this half has moved from, still on its own side of the cut?
-    let rel_from = source / res.y - at;
-    let on_side = dot(rel_from, normal) * side >= 0.0;
+    // Which piece a point was in: the side of each cut.
+    let s1 = select(-1.0, 1.0, dot(rel, n1) >= 0.0);
+    let s2 = select(-1.0, 1.0, dot(rel, n2) >= 0.0);
+    let move_t = clamp((t - 0.28) / 0.72, 0.0, 1.0);
+    let lo = area.xy * vec2<f32>(res.x / res.y, 1.0);
+    let hi = (area.xy + area.zw) * vec2<f32>(res.x / res.y, 1.0);
+    // Each piece falls with its own sideways drift, away from the cuts.
     var color = now;
-    let inside = all(source >= vec2<f32>(0.0)) && all(source < res);
-    if (on_side && inside) {
-        color = textureLoad(previous, vec2<i32>(source), 0);
-        // A shadow under the half as it lifts off the sheet.
-        color = vec4<f32>(color.rgb * (1.0 - 0.15 * move_t), 1.0);
-    } else if (move_t > 0.0) {
-        // The clean sheet, shaded a little at the halves' edges.
-        let gap = abs(dot(rel_from, normal));
-        color = vec4<f32>(now.rgb * (1.0 - 0.25 * (1.0 - smoothstep(0.0, 0.04, gap)) * move_t), 1.0);
+    for (var k = 0; k < 4; k++) {
+        let a = select(-1.0, 1.0, (k & 1) == 1);
+        let b = select(-1.0, 1.0, (k & 2) == 2);
+        let away = normalize(n1 * a + n2 * b);
+        let shift = away * move_t * 0.12 + vec2<f32>(0.0, move_t * move_t * move_t * 1.5);
+        let src = p - shift;
+        let r2 = src - at;
+        let inside_piece = (dot(r2, n1) >= 0.0) == (a > 0.0) && (dot(r2, n2) >= 0.0) == (b > 0.0);
+        let in_pane = all(src >= lo) && all(src <= hi);
+        if (inside_piece && in_pane) {
+            let c = textureLoad(previous, vec2<i32>(clamp(src * res.y, vec2<f32>(0.0), res - 1.0)), 0);
+            color = vec4<f32>(c.rgb * (1.0 - 0.18 * move_t), 1.0);
+        }
     }
-    // The cut itself: a dark hairline with a glint of seal red, where the
-    // blade has passed, while the halves still touch.
-    if (move_t < 0.25) {
-        let across = abs(dot(rel, normal));
-        let along = dot(rel, along_dir);
-        let lit = step(along, reached) * (1.0 - smoothstep(0.0015, 0.004, across));
-        let glint = (1.0 - smoothstep(0.0, 0.06, abs(along - reached))) * step(cut, 0.999);
-        let fade = 1.0 - move_t / 0.25;
-        color = vec4<f32>(mix(color.rgb, vec3<f32>(0.06, 0.03, 0.02), lit * fade * 0.9), 1.0);
-        color = vec4<f32>(mix(color.rgb, frame.accent.rgb * 1.3, glint * lit * fade), 1.0);
+    // The cuts themselves, drawn across in the first fifth, while the pieces
+    // still touch: a dark hairline with a glint of seal red at the blade.
+    if (move_t < 0.2) {
+        let fade = 1.0 - move_t / 0.2;
+        for (var k = 0; k < 2; k++) {
+            let n = select(n2, n1, k == 0);
+            let dir = vec2<f32>(n.y, -n.x);
+            let cut = clamp((t - f32(k) * 0.1) / 0.14, 0.0, 1.0);
+            let along = dot(rel, dir);
+            let reached = (cut - 0.5) * 2.4;
+            let across = abs(dot(rel, n));
+            let lit = step(along, reached) * (1.0 - smoothstep(0.0015, 0.004, across));
+            let glint = (1.0 - smoothstep(0.0, 0.05, abs(along - reached))) * step(cut, 0.999);
+            color = vec4<f32>(mix(color.rgb, vec3<f32>(0.06, 0.03, 0.02), lit * fade * 0.9), 1.0);
+            color = vec4<f32>(mix(color.rgb, frame.accent.rgb * 1.3, glint * lit * fade), 1.0);
+        }
     }
     return color;
 }

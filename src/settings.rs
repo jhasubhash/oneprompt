@@ -388,13 +388,13 @@ pub fn items(config: &Config, variant: &Variant, fonts: &Fonts) -> Vec<Item> {
     items.push(top("Weather amount", "A few drops to a downpour.", slider(config.weather_amount.unwrap_or(0.5), 0.0, 1.0), "weather_amount"));
     items.push(top(
         "Closing",
-        "A closed tab or window burns away, or is wiped off the board.",
+        "Closed tabs, windows and panes burn, tear or slide away, the theme's way.",
         Control::Toggle(config.close_effect.unwrap_or(true)),
         "close_effect",
     ));
     items.push(top(
         "Clearing",
-        "Cmd+K cuts the old screen in two with a sword, or sweeps it with the eraser.",
+        "Cmd+K or `clear` burns the old screen away from the cursor, or blows the chalk off.",
         Control::Toggle(config.clear_effect.unwrap_or(true)),
         "clear_effect",
     ));

@@ -147,11 +147,17 @@ light or dark palette.
   way. Tsushima sets it alight near a corner: a ragged front of fire spreads across it,
   browning and charring the paper ahead and leaving ash and embers, the next tab showing
   through (closing the window leaves only ash). Chalkboard wipes it off with the eraser.
-  `close_effect = false` closes at once.
-- **Clearing cuts the screen in two**: Cmd+K cuts the old screen with one stroke of the
-  sword in Tsushima; after a breath the halves slide apart along the cut and fall away,
-  clean paper beneath. Chalkboard gives it one sweep of the eraser. `clear_effect = false`
-  clears at once.
+  Closing a pane: Tsushima slashes it through twice and its four pieces fall away;
+  Logbook tears the page out along a ragged line, its two pieces pulled apart; the
+  Chalkboard's board slides up or down out of the frame. The panes taking its place show
+  beneath. `close_effect = false` closes at once.
+- **Clearing burns the screen away**: Cmd+K, or `clear` (or Ctrl+L) in the shell, sets the
+  old screen alight where the cursor was, where `clear` was typed, in Tsushima and Logbook:
+  the fire spreads across the pane to clean paper. On the Chalkboard the chalk breaks up
+  into dust that drifts off the board. Only the pane cleared changes. A full-screen app
+  erasing its own screen doesn't count. The shell's output waits (at most 150 ms) until
+  the old frame is kept, so the fire burns what was there. `clear_effect = false` clears
+  at once.
 - **Deleted names are struck out**: when a file or folder named on screen is deleted (`rm`,
   a script, the Finder, ...), every mention of it, in `ls` output, the command that
   deleted it, anywhere, is struck through and fades. Words are looked up relative to the
