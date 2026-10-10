@@ -193,3 +193,11 @@ src/shaders/present.wgsl    window reveal through a growing brush shape, or swor
 4. **Theme files.** TOML themes with hot reload, image textures (scanned paper, linen)
    alongside procedural ones, and per-role fonts (prompt, output, bold, italic).
 5. **Polish.** Cursor styles (nib, chalk stub), selection as highlighter, ligatures, IME.
+
+## License
+
+Copyright 2026 Subhash Jha. Licensed under the [Apache License, Version 2.0](LICENSE).
+
+You may use, change and share the code, but you must give credit: keep the copyright
+notices and the [NOTICE](NOTICE) file, say which files you changed, and include the
+NOTICE's attribution in what you distribute.

@@ -2,6 +2,9 @@
 name = "oneprompt"
 version = "0.1.0"
 edition = "2024"
+authors = ["Subhash Jha <subhashjha.mail@gmail.com>"]
+license = "Apache-2.0"
+repository = "https://github.com/jhasubhash/oneprompt"
 description = "A GPU terminal that treats the background and fonts as first-class design surfaces"
 
 [dependencies]
