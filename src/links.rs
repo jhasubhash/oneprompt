@@ -105,8 +105,12 @@ fn logical_line<L>(term: &Term<L>, line: Line) -> Vec<Cell> {
                 continue;
             }
             let c = if cell.c == '\0' { ' ' } else { cell.c };
-            // Prompts carry a link of the app's own (marks.rs); it opens nothing.
-            let uri = cell.hyperlink().map(|h| h.uri().to_string()).filter(|u| !u.starts_with(crate::marks::PROMPT_URI));
+            // Prompts and pictures carry links of the app's own (marks.rs,
+            // images.rs); they open nothing.
+            let uri = cell
+                .hyperlink()
+                .map(|h| h.uri().to_string())
+                .filter(|u| !u.starts_with(crate::marks::PROMPT_URI) && !u.starts_with(crate::images::IMAGE_URI));
             cells.push(Cell { c, point: Point::new(l, Column(col)), uri });
         }
         l += 1;

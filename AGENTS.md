@@ -49,6 +49,9 @@ cargo clippy --release         # keep it warning-free
   behind.
 - The user's own oneprompt is usually running too: pick the test window by its process's
   command line (`ps -o pid,command -p <pid>`), and never send keys to or resize the user's.
+- Start test windows with `ONEPROMPT_BACKGROUND=1`: they open behind whatever is in front,
+  so they never take the keyboard from the user (a test window coming to the front has
+  caught the user's typing).
 - Never send keystrokes (System Events) while the user's oneprompt is running: macOS can't
   tell the two apart (same executable), and keys sent to the test window have landed in the
   user's. Script the test shell instead: start it with `ZDOTDIR` pointing at a folder whose

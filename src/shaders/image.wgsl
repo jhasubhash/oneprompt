@@ -1,7 +1,8 @@
-// Draws a picture (a theme's preview in the picker) into a box, scaled down
-// smoothly (a small box filter over the source), with rounded corners.
-// Each instance is a theme::Shape: rect, colour (unused), params.y = corner
-// radius in pixels.
+// Draws a picture (a theme's preview in the picker, or a picture a program
+// showed in the terminal) into a box, scaled down smoothly (a small box
+// filter over the source), with rounded corners. Each instance is a
+// theme::Shape: rect, colour (its alpha fades the picture), params.y =
+// corner radius in pixels.
 
 @group(0) @binding(1) var picture: texture_2d<f32>;
 @group(0) @binding(2) var picture_sampler: sampler;
@@ -18,6 +19,7 @@ struct VsOut {
     @location(1) local: vec2<f32>,
     @location(2) size: vec2<f32>,
     @location(3) radius: f32,
+    @location(4) alpha: f32,
 };
 
 @vertex
@@ -30,6 +32,7 @@ fn vs_main(@builtin(vertex_index) i: u32, inst: Instance) -> VsOut {
     out.local = corner * inst.rect.zw;
     out.size = inst.rect.zw;
     out.radius = inst.params.y;
+    out.alpha = inst.color.a;
     return out;
 }
 
@@ -47,5 +50,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     }
     let q = abs(in.local - in.size * 0.5) - in.size * 0.5 + in.radius;
     let d = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - in.radius;
-    return vec4<f32>((sum / 9.0).rgb, clamp(0.5 - d, 0.0, 1.0));
+    let picture = sum / 9.0;
+    return vec4<f32>(picture.rgb, picture.a * clamp(0.5 - d, 0.0, 1.0) * in.alpha);
 }

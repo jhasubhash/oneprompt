@@ -98,7 +98,12 @@ pub struct Marked {
 }
 
 impl Marked {
-    pub fn new(pty: Pty, pane: PaneId, proxy: EventLoopProxy<UserEvent>) -> io::Result<Self> {
+    pub fn new(
+        pty: Pty,
+        pane: PaneId,
+        proxy: EventLoopProxy<UserEvent>,
+        size: Arc<std::sync::Mutex<crate::terminal::GridSize>>,
+    ) -> io::Result<Self> {
         // A second handle on the same open file: the event loop polls the
         // PTY's own and reads through this one.
         let file = pty.file().try_clone()?;
@@ -109,6 +114,11 @@ impl Marked {
         }));
         reader.progress = Some(Box::new(move |p| {
             let _ = progress.send_event(UserEvent::Progress(pane, p));
+        }));
+        let pictures = reader_proxy.clone();
+        reader.size = Some(size);
+        reader.pictures = Some(Box::new(move |picture| {
+            let _ = pictures.send_event(UserEvent::Picture(pane, Arc::new(picture)));
         }));
         let cleared = reader_proxy;
         reader.cleared = Some(Box::new(move || {
@@ -160,9 +170,19 @@ impl OnResize for Marked {
     }
 }
 
-/// Where a mark starts: a prompt mark, or a progress report.
+/// Where a mark starts: a prompt mark, a progress report, or a picture
+/// (images.rs).
 const MARK: &[u8] = b"\x1b]133;";
 const PROGRESS: &[u8] = b"\x1b]9;4;";
+const IMAGE: &[u8] = b"\x1b]1337;File=";
+/// The longest of those starts: a read ending in less than this of one
+/// waits for the rest.
+const LONGEST: usize = IMAGE.len();
+
+/// Whether `rest` (shorter than `LONGEST`) could be the start of a mark.
+fn could_start(rest: &[u8]) -> bool {
+    [MARK, PROGRESS, IMAGE].iter().any(|m| m.starts_with(rest))
+}
 /// A mark longer than this is not one; it passes through as it is.
 const MAX_MARK: usize = 256;
 
@@ -188,11 +208,16 @@ pub struct Reader {
     alternate: bool,
     held: Option<Vec<u8>>,
     quiet_until: Option<Instant>,
+    /// A picture's sequence being read (it may span many reads), the grid's
+    /// size to fit it to, and who to give it to.
+    image: Option<Vec<u8>>,
+    size: Option<Arc<std::sync::Mutex<crate::terminal::GridSize>>>,
+    pictures: Option<Box<dyn FnMut(crate::images::Picture) + Send>>,
 }
 
 impl Reader {
     fn new(source: impl Read + Send + 'static, done: Box<dyn FnMut(u64, Finished) + Send>) -> Self {
-        Self { source: Box::new(source), out: Vec::new(), at: 0, carry: Vec::new(), raw: vec![0; 0x10000], prompt: 0, started: None, done, progress: None, cleared: None, alternate: false, held: None, quiet_until: None }
+        Self { source: Box::new(source), out: Vec::new(), at: 0, carry: Vec::new(), raw: vec![0; 0x10000], prompt: 0, started: None, done, progress: None, cleared: None, alternate: false, held: None, quiet_until: None, image: None, size: None, pictures: None }
     }
 
     /// Takes the marks out of `bytes` (after any carried over) into `out`.
@@ -216,7 +241,46 @@ impl Reader {
         false
     }
 
+    /// More of a picture's sequence: kept until its terminator, then the
+    /// picture is read and its cells put in its place, and the rest of
+    /// `bytes` scanned as usual.
+    fn picture_bytes(&mut self, bytes: &[u8]) {
+        let Some(buf) = self.image.as_mut() else { return };
+        let start = buf.len();
+        buf.extend_from_slice(bytes);
+        // The terminator: BEL, or ESC \ (perhaps split across reads).
+        let end = buf[start.saturating_sub(1)..].iter().enumerate().find_map(|(k, &b)| {
+            let at = start.saturating_sub(1) + k;
+            match b {
+                0x07 if at >= start => Some((at, 1)),
+                0x1b if buf.get(at + 1) == Some(&b'\\') => Some((at, 2)),
+                _ => None,
+            }
+        });
+        let Some((at, len)) = end else {
+            if buf.len() > crate::images::MAX_BYTES {
+                // Too big to be a picture worth showing: dropped.
+                self.image = None;
+            }
+            return;
+        };
+        let buf = self.image.take().unwrap_or_default();
+        let rest = buf[at + len..].to_vec();
+        if let Some(size) = &self.size
+            && let Some((picture, cells)) = crate::images::read(&buf[..at], size)
+        {
+            if let Some(give) = self.pictures.as_mut() {
+                give(picture);
+            }
+            self.out.extend_from_slice(&cells);
+        }
+        self.scan(&rest);
+    }
+
     fn scan(&mut self, bytes: &[u8]) {
+        if self.image.is_some() {
+            return self.picture_bytes(bytes);
+        }
         let mut input = std::mem::take(&mut self.carry);
         input.extend_from_slice(bytes);
         let mut from = 0;
@@ -224,9 +288,17 @@ impl Reader {
         while let Some(j) = input[i..].iter().position(|&b| b == 0x1b).map(|j| i + j) {
             let rest = &input[j..];
             // Possibly the start of one, cut off by the end of the read.
-            if rest.len() < PROGRESS.len().max(MARK.len()) && (MARK.starts_with(rest) || PROGRESS.starts_with(rest)) {
+            if rest.len() < LONGEST && could_start(rest) {
                 self.out.extend_from_slice(&input[from..j]);
                 self.carry = rest.to_vec();
+                return;
+            }
+            if rest.starts_with(IMAGE) && self.size.is_some() {
+                // A picture: read to its end, here or in later reads.
+                self.out.extend_from_slice(&input[from..j]);
+                self.image = Some(Vec::new());
+                let after = rest[IMAGE.len()..].to_vec();
+                self.picture_bytes(&after);
                 return;
             }
             let prefix = if rest.starts_with(MARK) {
@@ -323,7 +395,7 @@ impl Read for Reader {
                 Ok(got) => got,
                 // Nothing more for now: a bare start of a sequence held back
                 // in case it was a mark is handed on after all.
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock && !self.carry.is_empty() && self.carry.len() < PROGRESS.len().max(MARK.len()) => {
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock && !self.carry.is_empty() && self.carry.len() < LONGEST => {
                     self.raw = raw;
                     self.out = std::mem::take(&mut self.carry);
                     break;

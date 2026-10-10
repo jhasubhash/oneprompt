@@ -19,4 +19,9 @@ if [[ -o interactive ]]; then
     _oneprompt_preexec() { builtin print -n "\e]133;C\a" }
     add-zsh-hook precmd _oneprompt_precmd
     add-zsh-hook preexec _oneprompt_preexec
+    # md and imgcat, unless something by those names is already there.
+    if [[ -n "$ONEPROMPT_EXE" ]]; then
+        (( $+commands[md] || $+functions[md] || $+aliases[md] )) || md() { "$ONEPROMPT_EXE" md "$@" }
+        (( $+commands[imgcat] || $+functions[imgcat] || $+aliases[imgcat] )) || imgcat() { local f; for f in "$@"; do "$ONEPROMPT_EXE" img "$f"; done }
+    fi
 fi

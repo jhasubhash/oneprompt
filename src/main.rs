@@ -9,8 +9,11 @@
 //!   oneprompt -e "command"    run a command through /bin/sh instead
 //!   oneprompt --position X,Y  open the window there (logical pixels; Cmd+N)
 //!   oneprompt --default-config   print the settings file Cmd+, would create
+//!   oneprompt md [FILE]       show Markdown, styled, in the terminal it runs in
+//!   oneprompt img FILE [W]    show a picture inline (iTerm2's protocol)
 //!   ONEPROMPT_SNAPSHOT=dir    render every theme to dir/<theme>.png and exit
 //!   ONEPROMPT_SNAPSHOT_SWITCH=n   with it, also n frames of each switch
+//!   ONEPROMPT_BACKGROUND=1    open without coming to the front (test windows)
 //!   ONEPROMPT_PAPER_RATE=n    sheets age n times faster (to see a worn one)
 //!   ONEPROMPT_ACTIONS="2:clear,4.5:new-tab"   menu actions at those seconds
 //!                             after start (testing without keystrokes)
@@ -20,8 +23,10 @@ mod boxdraw;
 mod chrome;
 mod color;
 mod config;
+mod images;
 mod input;
 mod links;
+mod markdown;
 mod marks;
 mod menu;
 mod panes;
@@ -1978,6 +1983,12 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 let _ = done.send(());
             }
+            UserEvent::Picture(id, picture) => {
+                if let Some(r) = self.renderer.as_mut() {
+                    r.add_picture(id, picture);
+                }
+                self.redraw();
+            }
             UserEvent::Progress(id, report) => {
                 if let Some(r) = self.renderer.as_mut() {
                     r.set_progress(id, report);
@@ -2195,7 +2206,53 @@ fn tab_label(tab: &Tab, index: usize) -> String {
     format!("{name} {}", index + 1)
 }
 
+/// `oneprompt md [FILE]` and `oneprompt img FILE`: Markdown or a picture
+/// shown in the terminal they are run in. Returns false for other arguments.
+fn subcommand(args: &[String]) -> bool {
+    use std::io::{Read, Write};
+    let (Some(command), rest) = (args.first(), args.get(1..).unwrap_or(&[])) else { return false };
+    let fail = |message: String| -> ! {
+        eprintln!("oneprompt {command}: {message}");
+        std::process::exit(1);
+    };
+    match command.as_str() {
+        "md" => {
+            let (source, base) = match rest.first().map(String::as_str) {
+                None | Some("-") => {
+                    let mut text = String::new();
+                    std::io::stdin().read_to_string(&mut text).unwrap_or_else(|e| fail(e.to_string()));
+                    (text, PathBuf::from("."))
+                }
+                Some(file) => {
+                    let path = PathBuf::from(file);
+                    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| fail(format!("{file}: {e}")));
+                    (text, path.parent().map(PathBuf::from).unwrap_or_default())
+                }
+            };
+            let width = markdown::terminal_width().unwrap_or(80);
+            let text = markdown::render(&source, width.min(100), &base);
+            let plain = markdown::terminal_width().is_none() || std::env::var_os("NO_COLOR").is_some();
+            let text = if plain { markdown::plain(&text) } else { text };
+            let _ = writeln!(std::io::stdout(), "{text}");
+            true
+        }
+        "img" => {
+            let Some(file) = rest.first() else { fail("usage: oneprompt img FILE [WIDTH]".into()) };
+            let bytes = std::fs::read(file).unwrap_or_else(|e| fail(format!("{file}: {e}")));
+            let width = rest.get(1).and_then(|w| w.parse().ok());
+            let name = std::path::Path::new(file).file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
+            let _ = write!(std::io::stdout(), "{}", images::sequence(&bytes, &name, width));
+            true
+        }
+        _ => false,
+    }
+}
+
 fn main() {
+    let all: Vec<String> = std::env::args().skip(1).collect();
+    if subcommand(&all) {
+        return;
+    }
     let mut args = std::env::args().skip(1);
     let mut command = None;
     let mut position = None;
@@ -2214,6 +2271,8 @@ fn main() {
             }
             "-h" | "--help" => {
                 println!("usage: oneprompt [-e COMMAND] [--position X,Y] [--default-config]");
+                println!("       oneprompt md [FILE]       show Markdown, styled (stdin if no file)");
+                println!("       oneprompt img FILE [W]    show a picture inline, W cells wide");
                 println!("settings: {}", config::path().display());
                 return;
             }
@@ -2224,9 +2283,15 @@ fn main() {
         }
     }
 
-    let event_loop = EventLoop::<UserEvent>::with_user_event()
-        .build()
-        .expect("create event loop");
+    let mut builder = EventLoop::<UserEvent>::with_user_event();
+    // Test windows open behind whatever is in front, so they never take the
+    // keyboard from someone typing elsewhere.
+    #[cfg(target_os = "macos")]
+    if std::env::var_os("ONEPROMPT_BACKGROUND").is_some() {
+        use winit::platform::macos::EventLoopBuilderExtMacOS;
+        builder.with_activate_ignoring_other_apps(false);
+    }
+    let event_loop = builder.build().expect("create event loop");
     let config_path = config::path();
     let (config, startup_error) = match Config::load(&config_path) {
         Ok(config) => (config, None),

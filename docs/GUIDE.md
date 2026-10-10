@@ -246,6 +246,15 @@ while you type.
   addresses (also wrapped over two rows), hyperlinks programs mark (OSC 8, as
   `ls --hyperlink` sends) and names of files and folders that exist (`src/main.rs:12` opens
   the file)
+- Pictures inline, with the iTerm2 image protocol (`ESC ] 1337 ; File = inline=1 : <base64>`,
+  as `imgcat` and many tools send it): PNG, JPEG, GIF, WebP, BMP, sized by `width` /
+  `height` (cells, px, %) or their own size shrunk to fit, fading in. They sit on a block of
+  cells and scroll with the text. `oneprompt img FILE [WIDTH]` sends one; in zsh, `imgcat`
+  does (if you have no `imgcat` of your own).
+- Markdown, styled: `oneprompt md FILE` (or `md FILE` in zsh, if you have no `md`; stdin with
+  no file) shows headings, emphasis, inline and fenced code, lists and task lists, quotes,
+  tables, rules and links (Cmd+click them) in the theme's own inks, wrapped to the
+  terminal's width, with local images inline. Piped, it prints plain text.
 - Input methods (IME): Chinese, Japanese, Korean and accents typed as two keys are composed
   at the cursor, underlined, with the system's candidate window beside it
 - Box-drawing and block characters drawn as shapes, so borders and bars join without seams; bullet dots (Claude Code's ⏺, ●, •) drawn as ink dots, not
@@ -409,6 +418,8 @@ src/picker.rs               theme picker: card layout and hit testing
 src/animation.rs            per-cell write times (reading order, scroll-aware) and window transitions
 src/strike.rs               names on screen whose files were deleted, to strike out
 src/sound.rs                the themes' sounds, made from noise and tones, played with afplay
+src/images.rs               pictures: the iTerm2 image protocol, decoding, the cells they take
+src/markdown.rs             `oneprompt md`: Markdown as styled terminal text
 src/marks.rs                shell integration: prompt and command marks (OSC 133) and progress (OSC 9;4) read from the PTY, zsh's setup
 src/shell/zshenv            the zsh integration
 src/panes.rs                splits: each tab's tree of panes, their boxes, dividers and neighbours

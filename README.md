@@ -41,6 +41,7 @@ and notarized, Apple silicon and Intel, macOS 11+. It's an alpha: expect rough e
 | 🩸 **Marks failures** | A failed command gets a stroke of seal ink; a long one is stamped with a hanko. |
 | 📜 **Every theme, its own way** | Openings, theme switches, split dividers, closing panes, the settings panel. |
 | 🍁 **Alive when idle** | Leaves fall onto a window left alone; the cursor has a heartbeat. |
+| 🖼️ **Pictures and Markdown** | `imgcat photo.png` shows it inline; `md notes.md` shows Markdown styled in the theme's inks. |
 | 🖥️ **A real terminal** | Tabs, splits, find with regex, clickable links, IME, true colour, mouse, Claude Code-friendly. |
 
 Every effect can be turned off or tuned in the settings panel (**Cmd+,**) or the settings

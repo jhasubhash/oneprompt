@@ -47,6 +47,8 @@ pub enum UserEvent {
     /// apps.
     /// Answer on the channel once the frame on show has been kept.
     Cleared(PaneId, std::sync::mpsc::SyncSender<()>),
+    /// A program showed a picture (images.rs).
+    Picture(PaneId, Arc<crate::images::Picture>),
     /// A program reported its progress (OSC 9;4).
     Progress(PaneId, crate::marks::Progress),
 }
@@ -108,6 +110,8 @@ pub struct Terminal {
     pub term: Arc<FairMutex<Term<Listener>>>,
     sender: EventLoopSender,
     size: GridSize,
+    /// The size again, for the PTY reader to fit pictures to.
+    shared_size: Arc<std::sync::Mutex<GridSize>>,
     /// A handle on the PTY, to ask which process is in the foreground (the
     /// shell at its prompt, or the command it runs) and follow its working
     /// directory. The PTY's child is `login`, not the shell, on macOS.
@@ -126,7 +130,12 @@ impl Terminal {
         integrate: bool,
     ) -> std::io::Result<Self> {
         tty::setup_env();
-        let env = if integrate && command.is_none() { crate::marks::env() } else { HashMap::new() };
+        let mut env = if integrate && command.is_none() { crate::marks::env() } else { HashMap::new() };
+        // Programs in the terminal can find the app: the shell's md and
+        // imgcat run it.
+        if let Ok(exe) = std::env::current_exe() {
+            env.insert("ONEPROMPT_EXE".into(), exe.to_string_lossy().into_owned());
+        }
         let options = tty::Options {
             shell: command.map(|c| tty::Shell::new("/bin/sh".into(), vec!["-c".into(), c])),
             working_directory: cwd.or_else(|| std::env::var_os("HOME").map(Into::into)),
@@ -135,7 +144,8 @@ impl Terminal {
         };
         let pty = tty::new(&options, size.window_size(), 0)?;
         let pty_handle = pty.file().try_clone().ok();
-        let pty = crate::marks::Marked::new(pty, id, proxy.clone())?;
+        let shared_size = Arc::new(std::sync::Mutex::new(size));
+        let pty = crate::marks::Marked::new(pty, id, proxy.clone(), shared_size.clone())?;
         let listener = Listener(proxy, id);
         let term = Arc::new(FairMutex::new(Term::new(
             Config::default(),
@@ -145,7 +155,7 @@ impl Terminal {
         let event_loop = EventLoop::new(term.clone(), listener, pty, options.drain_on_exit, false)?;
         let sender = event_loop.channel();
         event_loop.spawn();
-        Ok(Self { term, sender, size, pty: pty_handle })
+        Ok(Self { term, sender, size, shared_size, pty: pty_handle })
     }
 
     pub fn write(&self, bytes: impl Into<Cow<'static, [u8]>>) {
@@ -293,6 +303,9 @@ impl Terminal {
             return;
         }
         self.size = size;
+        if let Ok(mut shared) = self.shared_size.lock() {
+            *shared = size;
+        }
         self.term.lock().resize(size);
         let _ = self.sender.send(Msg::Resize(size.window_size()));
     }

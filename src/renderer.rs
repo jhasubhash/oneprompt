@@ -39,6 +39,7 @@ use crate::trace::{self, GlyphKey, Slot, Tracer};
 use crate::chrome::{self, Control};
 use crate::picker;
 use crate::settings::{self, Control as Setting, Hit, Item, Part};
+use crate::images::{self, Picture};
 use crate::marks::{self, Finished};
 use crate::strike::{Strikes, Struck};
 use crate::terminal::GridSize;
@@ -375,6 +376,21 @@ struct PaneState {
     offset: usize,
 }
 
+/// A picture a program showed, and its texture on the GPU once made.
+struct PictureState {
+    picture: Arc<Picture>,
+    pane: u64,
+    gpu: Option<(wgpu::Texture, wgpu::BindGroup)>,
+    shown: f32,
+    born: f32,
+}
+
+/// A new picture fades in over this long, seconds at speed 1.
+const PICTURE_FADE: f32 = 0.35;
+/// Pictures kept while off screen, at most; beyond that the ones seen
+/// longest ago go (their cells are blank if scrolled back to).
+const MAX_PICTURES: usize = 48;
+
 /// A divider between panes: which (stable while it exists), the line
 /// between them (x, y, w, h; thin across), and whether it runs up and down.
 pub struct Divider {
@@ -702,6 +718,12 @@ pub struct Renderer {
     /// Drawing a picker preview rather than the live screen.
     thumbnail: bool,
     /// The settings panel, while it is open.
+    /// Pictures programs showed, by id: the picture, its texture once made,
+    /// its pane, and when it was last on screen (old ones are let go); and
+    /// where the pane being drawn shows them this frame (id, box).
+    pictures: HashMap<u64, PictureState>,
+    picture_draws: Vec<(u64, [f32; 4])>,
+    picture_buffer: wgpu::Buffer,
     /// How long the current theme's panel takes to come in, seconds at speed 1.
     settings_duration: f32,
     settings: Option<SettingsView>,
@@ -844,6 +866,7 @@ impl Renderer {
         let (picker_layout, picker_pipeline) = picker_pipeline(&device, format);
         let picker_buffer = Self::create_rect_buffer(&device, 64);
         let settings_buffer = Self::create_rect_buffer(&device, 256);
+        let picture_buffer = Self::create_rect_buffer(&device, 16);
         let mut text = Buffer::new(&mut font_system, Metrics::new(16.0, 22.0));
         text.borrow_with(&mut font_system).set_wrap(Wrap::None);
         let preedit_text = Buffer::new(&mut font_system, Metrics::new(16.0, 22.0));
@@ -923,6 +946,9 @@ impl Renderer {
             picker_buffer,
             picker_text,
             thumbnail: false,
+            pictures: HashMap::new(),
+            picture_draws: Vec::new(),
+            picture_buffer,
             settings_duration: 0.25,
             settings: None,
             settings_buffer,
@@ -1056,6 +1082,7 @@ impl Renderer {
         self.panes.remove(&id);
         self.commands.remove(&id);
         self.cursor_moves.remove(&id);
+        self.pictures.retain(|_, p| p.pane != id);
         self.progress.remove(&id);
         self.full_screen.remove(&id);
         self.pane_metrics.remove(&id);
@@ -1474,6 +1501,55 @@ impl Renderer {
         self.wear = self.wear_hours.map_or(0.0, |h| (seconds / (h * 3600.0)).clamp(0.0, 1.0));
     }
 
+    /// A program in pane `pane` showed a picture.
+    pub fn add_picture(&mut self, pane: u64, picture: Arc<Picture>) {
+        let now = self.now();
+        self.pictures.insert(picture.id, PictureState { picture, pane, gpu: None, shown: now, born: now });
+        if self.pictures.len() > MAX_PICTURES {
+            let oldest = self.pictures.iter().min_by(|a, b| a.1.shown.total_cmp(&b.1.shown)).map(|(&id, _)| id);
+            if let Some(id) = oldest {
+                self.pictures.remove(&id);
+            }
+        }
+    }
+
+    /// Makes picture `id`'s texture if it has none yet.
+    fn picture_texture(&mut self, id: u64) {
+        let Some(state) = self.pictures.get_mut(&id) else { return };
+        if state.gpu.is_some() {
+            return;
+        }
+        let p = &state.picture;
+        let size = wgpu::Extent3d { width: p.width.max(1), height: p.height.max(1), depth_or_array_layers: 1 };
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("picture"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            texture.as_image_copy(),
+            &p.rgba,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * p.width), rows_per_image: Some(p.height) },
+            size,
+        );
+        let view = texture.create_view(&Default::default());
+        let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("picture"),
+            layout: &self.picker_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.buffers.frame.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.ink_sampler) },
+            ],
+        });
+        state.gpu = Some((texture, group));
+    }
+
     /// Whether pasted text lands as a splash of ink.
     pub fn set_splash(&mut self, on: bool) {
         self.splash = on;
@@ -1522,6 +1598,7 @@ impl Renderer {
             || now < self.marks_until
             || now < self.idle_until
             || now < self.trail_until
+            || self.pictures.values().any(|p| now - p.born < PICTURE_FADE / self.animation.1)
             || now < self.splash_until
             || now < self.progress_until
             || self.settings.as_ref().is_some_and(|v| v.closing.is_some() || now < v.opened + SETTINGS_ENTRANCE_MAX / self.animation.1)
@@ -3023,6 +3100,7 @@ impl Renderer {
         let (cw, ch) = (self.cell_width, self.cell_height);
         let cell_x = |col: usize| pad + col as f32 * cw;
         let cell_y = |line: usize| top + line as f32 * ch;
+        let top_y = |line: i32| top + line as f32 * ch;
 
         let cursor = content.cursor;
         let cursor_line = cursor.point.line.0 + content.display_offset as i32;
@@ -3083,10 +3161,19 @@ impl Renderer {
         // Prompts on screen (shell integration): each command's number, with
         // the last line of its prompt and the column after the typed text.
         let mut prompts: HashMap<u64, (usize, usize)> = HashMap::new();
+        // Pictures on screen: each one's top line (perhaps above the screen)
+        // and first column.
+        let mut pictures: HashMap<u64, (i32, usize)> = HashMap::new();
         for indexed in cells {
             let line = (indexed.point.line.0 + content.display_offset as i32) as usize;
             let col = indexed.point.column.0;
             let flags = indexed.cell.flags;
+            if line < lines
+                && let Some((id, row)) = indexed.cell.hyperlink().and_then(|h| images::picture_cell(h.uri()))
+            {
+                let at = pictures.entry(id).or_insert((line as i32 - row as i32, col));
+                at.1 = at.1.min(col);
+            }
             if !full_screen
                 && line < lines
                 && let Some(n) = indexed.cell.hyperlink().and_then(|h| marks::prompt_number(h.uri()))
@@ -3306,6 +3393,20 @@ impl Renderer {
                 let y = cell_y(line) + ch * 0.88;
                 overlay.push(Shape::new(cell_x(col), y, cw * len as f32, (ch * 0.07).max(1.0), variant.cursor, 1.0));
             }
+        }
+        // Pictures over their cells: fitted into the box they cover,
+        // keeping their shape, and faded in when new.
+        self.picture_draws.clear();
+        let now = self.now();
+        for (&id, &(top, col)) in &pictures {
+            let Some(state) = self.pictures.get_mut(&id) else { continue };
+            state.shown = now;
+            let p = state.picture.clone();
+            let (bw, bh) = (cw * p.columns as f32, ch * p.rows as f32);
+            let s = (bw / p.width as f32).min(bh / p.height as f32);
+            let (dw, dh) = (p.width as f32 * s, p.height as f32 * s);
+            let rect = [cell_x(col), top_y(top), dw, dh];
+            self.picture_draws.push((id, rect));
         }
         // A paste's splash, where it landed.
         if let Some((pane, cell, chars, at)) = self.paste
@@ -3737,6 +3838,29 @@ impl Renderer {
             )
             .expect("prepare text");
 
+        // The pane's pictures: their textures, and a box each.
+        let draws = std::mem::take(&mut self.picture_draws);
+        for &(id, _) in &draws {
+            self.picture_texture(id);
+        }
+        let now_s = self.now();
+        let picture_shapes: Vec<Shape> = draws
+            .iter()
+            .map(|&(id, [x, y, w, h])| {
+                let born = self.pictures.get(&id).map_or(now_s, |p| p.born);
+                let fade = if self.animation.0 && !self.thumbnail { ((now_s - born) * self.animation.1 / PICTURE_FADE).clamp(0.0, 1.0) } else { 1.0 };
+                let mut s = Shape::new(x, y, w, h, [0; 3], fade);
+                s.params[1] = 3.0 * scale;
+                s
+            })
+            .collect();
+        if !picture_shapes.is_empty() {
+            if picture_shapes.len() * std::mem::size_of::<Shape>() > self.picture_buffer.size() as usize {
+                self.picture_buffer = Self::create_rect_buffer(&self.device, picture_shapes.len().next_power_of_two());
+            }
+            self.queue.write_buffer(&self.picture_buffer, 0, bytemuck::cast_slice(&picture_shapes));
+        }
+        let picture_bytes = (picture_shapes.len() * std::mem::size_of::<Shape>()) as u64;
         let stages = &self.stages[theme.id()];
         let mut encoder = self
             .device
@@ -3802,6 +3926,24 @@ impl Renderer {
                 pass.set_pipeline(&stages.ink);
                 pass.set_bind_group(0, &pane.ink_bind_group, &[]);
                 pass.draw(0..3, 0..1);
+            }
+            // Pictures, over the ink, within the pane.
+            if picture_bytes > 0 {
+                let [px, py, pw, ph] = self.pane_rect;
+                let (x0, y0) = (px.max(0.0) as u32, py.max(0.0) as u32);
+                let (x1, y1) = (((px + pw) as u32).min(w), ((py + ph) as u32).min(h));
+                if x1 > x0 && y1 > y0 {
+                    pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                    pass.set_pipeline(&self.picker_pipeline);
+                    pass.set_vertex_buffer(0, self.picture_buffer.slice(..picture_bytes));
+                    for (i, &(id, _)) in draws.iter().enumerate() {
+                        if let Some((_, group)) = self.pictures.get(&id).and_then(|p| p.gpu.as_ref()) {
+                            pass.set_bind_group(0, group, &[]);
+                            pass.draw(0..4, i as u32..i as u32 + 1);
+                        }
+                    }
+                    pass.set_scissor_rect(0, 0, w, h);
+                }
             }
             if !self.after_ink.is_empty() {
                 pass.set_pipeline(&stages.shapes);
