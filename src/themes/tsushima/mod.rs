@@ -12,7 +12,7 @@ mod brush;
 
 use crate::theme::{
     self, CommandSpan, ControlStyle, Controls, Ctx, Cursor, CursorKind, DividerSpan, IdleSpan, Param, Plan, Rng, Shape,
-    Entrance, PanelSpan, ProgressSpan, ProgressState, Shaders, Sound, SoundEvent, SplashSpan, Strike, StrikeSpan, Theme, Variant, Weather, WeatherSpan, CUSTOM, DISC,
+    Entrance, PanelSpan, ProgressSpan, ProgressState, Shaders, Sound, SoundEvent, SplashSpan, Strike, StrikeSpan, Theme, Variant, CUSTOM, DISC,
 };
 
 use brush::{Brush, PlanData};
@@ -27,7 +27,6 @@ const SLASH: f32 = CUSTOM + 1.0;
 const CUT: f32 = CUSTOM + 2.0;
 const SEAL: f32 = CUSTOM + 3.0;
 const LEAF: f32 = CUSTOM + 4.0;
-const RAIN: f32 = CUSTOM + 5.0;
 /// A paste's splash soaks into the paper over this long, at speed 1.
 const SPLASH_TIME: f32 = 1.0;
 /// Leaves that fall onto an idle window, one about every LEAF_GAP seconds.
@@ -445,49 +444,6 @@ impl Theme for Tsushima {
         // The wash the text lands in, soaking away.
         let wash = 0.3 * (1.0 - soak);
         out.push(dab(x - cw * 0.3, y - ch * 0.1, length + cw * 0.6, ch * 1.2, v.ink, wash).rough(1.0, span.seed));
-    }
-
-    /// Rain is painted as sumi-e paints it: long thin strokes slanting down
-    /// across the sheet, and where drops land the ink blots and spreads a
-    /// little, then fades. Snow falls as flakes of paper white (parchment on
-    /// the dark sheet), drifting and swaying.
-    fn draw_weather(&self, v: &Variant, ctx: &Ctx, span: &WeatherSpan, out: &mut Vec<Shape>) {
-        let s = ctx.scale;
-        let [ax, ay, aw, ah] = span.area;
-        match span.kind {
-            Weather::Rain => {
-                let n = (20.0 + span.amount * 160.0) as usize;
-                for i in 0..n {
-                    let (x, y, _, own) = theme::weather_particle(span, i, 0.85, 0.22);
-                    let len = (26.0 + 40.0 * own) * s;
-                    let mut stroke = Shape::new(x, y, len * 0.22, len, v.palette[8], 0.28 + 0.2 * own);
-                    stroke.params = [RAIN, 0.0, 0.0, own * 50.0];
-                    out.push(stroke);
-                }
-                // Drops landing: a blot that spreads and fades, here and there.
-                for i in 0..(span.amount * 26.0) as usize {
-                    let mut rng = Rng::new(theme::scramble((span.seed.to_bits() as u64) << 20 ^ (i as u64 + 5000)));
-                    let every = rng.range(0.6, 1.6);
-                    let cycle = span.time / every + rng.unit();
-                    let k = cycle.floor();
-                    let age = cycle.fract();
-                    let mut spot = Rng::new(theme::scramble((k as i64 as u64) << 16 ^ i as u64));
-                    let (cx, cy) = (ax + spot.unit() * aw, ay + spot.unit() * ah);
-                    let r = (1.5 + 3.5 * age.sqrt()) * s;
-                    out.push(Shape::round(DISC, cx, cy, r, v.palette[8], 0.35 * (1.0 - age)).rough(0.5, k + i as f32));
-                }
-            }
-            Weather::Snow => {
-                let flake = if v.dark { v.ink } else { [252, 248, 238] };
-                let n = (20.0 + span.amount * 140.0) as usize;
-                for i in 0..n {
-                    let (x, y, t, own) = theme::weather_particle(span, i, 11.0, 0.06);
-                    let sway = (t * 14.0 + own * 9.0).sin() * 10.0 * s;
-                    let r = (1.2 + 2.6 * own) * s;
-                    out.push(Shape::round(DISC, x + sway, y, r, flake, 0.75).rough(0.3, own * 40.0));
-                }
-            }
-        }
     }
 
     fn idle_time(&self) -> f32 {

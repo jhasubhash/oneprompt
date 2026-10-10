@@ -138,11 +138,6 @@ light or dark palette.
   smudges and ghosts of old lessons. A new tab starts on a fresh sheet. `paper_aging =
   false` keeps every sheet new; `ONEPROMPT_PAPER_RATE=<n>` ages them n times faster, to
   see a worn one now.
-- **Weather**: `weather = "rain"` paints rain over the sheet as sumi-e does, long fine
-  strokes slanting down, drops blotting where they land and fading; `"snow"` drifts flakes of
-  paper white (parchment on the dark sheet); the Chalkboard does both in chalk.
-  `weather_amount` (0..1) is how heavy. Off by default: it draws 30 times a second while the
-  window has focus, and stops when it hasn't.
 - **Closing burns the sheet**: closing a tab or the window takes its sheet away the theme's
   way. Tsushima sets it alight near a corner: a ragged front of fire spreads across it,
   browning and charring the paper ahead and leaving ash and embers, the next tab showing
@@ -223,7 +218,7 @@ another theme). A theme implements the `Theme` trait:
   `draw_divider` (the line between split panes, drawn in when the split is made), and
   `mark_time` / `draw_failure` (a command that failed, beside its prompt) and
   `stamp_time` / `draw_stamp` (a long command that finished), `splash_time` /
-  `draw_splash` (pasted text landing), `draw_weather` (rain and snow), `draw_progress` (a
+  `draw_splash` (pasted text landing), `draw_progress` (a
   program's progress, along the title strip), `sound` (which of
   the framework's sounds goes with typing, strikes, marks, clearing, closing), and
   `idle_time` /
@@ -362,8 +357,6 @@ sounds = false                # brush, sword, seal, chalk; quiet
 sound_volume = 0.4
 paper_aging = true            # a tab's sheet yellows and creases with use
 paper_aging_hours = 8         # hours for a sheet to wear out
-weather = "none"              # none | rain | snow
-weather_amount = 0.5          # how heavy, 0..1
 close_effect = true           # closing burns / wipes the sheet away
 clear_effect = true           # Cmd+K cuts the screen in two / sweeps it
 idle_scene = true             # leaves fall / dust settles on an idle window

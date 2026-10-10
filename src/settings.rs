@@ -12,7 +12,7 @@
 //! This file is the rows and what changing them writes; the renderer draws
 //! them (`Renderer::set_settings`) and main.rs routes keys and clicks.
 
-use crate::config::{Appearance, Config, Edit, OptionAsMeta, Value, WeatherSetting};
+use crate::config::{Appearance, Config, Edit, OptionAsMeta, Value};
 use crate::theme::{self, Variant};
 
 /// A row's control.
@@ -78,7 +78,7 @@ impl Item {
 const SECTIONS: &[(&str, &str, &[&str])] = &[
     ("Animation", "", &["animation", "animation_speed", "writing_speed", "cursor_trail", "cursor_pulse", "paste_splash"]),
     ("Ink and paper", "", &["ink_drying", "drying_time", "ink_aging", "paper_aging", "paper_aging_hours"]),
-    ("Effects", "closing, clearing, idle, weather", &["close_effect", "clear_effect", "idle_scene", "idle_after", "weather", "weather_amount", "show_progress"]),
+    ("Effects", "closing, clearing, idle", &["close_effect", "clear_effect", "idle_scene", "idle_after", "show_progress"]),
     ("Commands", "the shell's prompts, marked", &["shell_integration", "mark_failures", "stamp_long_commands", "stamp_after"]),
     ("Sound", "", &["sounds", "sound_volume"]),
     ("Terminal", "", &["harmonize_colors", "option_as_meta", "strike_deleted", "strike_splatter"]),
@@ -462,18 +462,6 @@ pub fn items(config: &Config, variant: &Variant, fonts: &Fonts) -> Vec<Item> {
         *step = 1.0;
     }
     items.push(Item::Row(hours));
-    let weather = match config.weather {
-        WeatherSetting::None => "none",
-        WeatherSetting::Rain => "rain",
-        WeatherSetting::Snow => "snow",
-    };
-    items.push(top(
-        "Weather",
-        "Rain or snow over the paper. Draws while the window has focus.",
-        choice(&[("None", "none"), ("Rain", "rain"), ("Snow", "snow")], weather),
-        "weather",
-    ));
-    items.push(top("Weather amount", "A few drops to a downpour.", slider(config.weather_amount.unwrap_or(0.5), 0.0, 1.0), "weather_amount"));
     items.push(top(
         "Closing",
         "Closed tabs, windows and panes burn, tear or slide away, the theme's way.",

@@ -39,16 +39,6 @@ pub enum Appearance {
     Dark,
 }
 
-/// Weather over the window.
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum WeatherSetting {
-    #[default]
-    None,
-    Rain,
-    Snow,
-}
-
 /// Per-variant overrides: `[themes.tsushima-light]` and so on. Fonts are
 /// the same for every theme; the rest are the theme's own settings
 /// (`Theme::params`), checked against what it declares.
@@ -113,10 +103,6 @@ pub struct Config {
     pub sound_volume: Option<f32>,
     /// Pasted text lands at once, as a splash of ink. Default on.
     pub paste_splash: Option<bool>,
-    /// Rain or snow falling over the window, `weather_amount` heavy (0..1,
-    /// default 0.5). Default none.
-    pub weather: WeatherSetting,
-    pub weather_amount: Option<f32>,
     /// Closing a tab or the window, and clearing the screen (Cmd+K), the
     /// theme's way. Default on.
     pub close_effect: Option<bool>,
@@ -218,12 +204,6 @@ show_progress = true
 # seal's thud, paper catching fire; the Chalkboard taps and rubs in chalk.
 sounds = false
 sound_volume = 0.4
-
-# Weather over the paper: "none", "rain" (sumi-e strokes of rain, drops
-# blotting where they land; chalk lines on the Chalkboard) or "snow". It keeps
-# the window drawing while it has focus, so it costs a little battery.
-weather = "none"
-weather_amount = 0.5         # 0 a few drops .. 1 a downpour
 
 # Closing a tab or the window burns its sheet away in Tsushima and wipes it off
 # the Chalkboard; a closed pane is slashed to pieces (Tsushima), torn out
@@ -399,11 +379,6 @@ impl Config {
             && !(0.1..=1000.0).contains(&hours)
         {
             return Err(format!("paper_aging_hours {hours} is out of range (0.1 to 1000)"));
-        }
-        if let Some(amount) = self.weather_amount
-            && !(0.0..=1.0).contains(&amount)
-        {
-            return Err(format!("weather_amount {amount} is out of range (0 to 1)"));
         }
         if let Some(time) = self.drying_time
             && !(0.5..=60.0).contains(&time)
@@ -721,8 +696,6 @@ mod tests {
         assert!(Config::parse("stamp_after = 0").unwrap_err().contains("out of range"));
         assert!(Config::parse("ink_aging = 2").unwrap_err().contains("out of range"));
         assert!(Config::parse("idle_after = 1").unwrap_err().contains("out of range"));
-        assert_eq!(Config::parse("weather = \"snow\"").unwrap().weather, WeatherSetting::Snow);
-        assert!(Config::parse("weather = \"hail\"").is_err());
         assert!(Config::parse("drying_time = 0.1").unwrap_err().contains("out of range"));
         assert!(Config::parse("stamp_after = 30\nstamp_long_commands = false").is_ok());
         assert!(Config::parse("theme = \"nope\"").unwrap_err().contains("tsushima"));

@@ -57,9 +57,9 @@ use theme::Variant;
 
 /// How long snapshot mode lets the command run before capturing.
 const SNAPSHOT_DELAY: Duration = Duration::from_millis(1500);
-/// A beating cursor is drawn this often, and falling weather this often.
+/// A beating cursor is drawn this often, and a busy progress stroke this often.
 const PULSE_FRAME: Duration = Duration::from_millis(50);
-const WEATHER_FRAME: Duration = Duration::from_millis(33);
+const BUSY_FRAME: Duration = Duration::from_millis(33);
 
 struct App {
     proxy: EventLoopProxy<UserEvent>,
@@ -1153,12 +1153,6 @@ impl App {
             r.set_splash(config.paste_splash.unwrap_or(true));
             r.set_show_progress(config.show_progress.unwrap_or(true));
             r.set_wear_hours(config.paper_aging.unwrap_or(true).then(|| config.paper_aging_hours.unwrap_or(8.0)));
-            let amount = config.weather_amount.unwrap_or(0.5);
-            r.set_weather(match config.weather {
-                config::WeatherSetting::None => None,
-                config::WeatherSetting::Rain => Some((theme::Weather::Rain, amount)),
-                config::WeatherSetting::Snow => Some((theme::Weather::Snow, amount)),
-            });
         }
         // ONEPROMPT_SEED (used for screenshots) wins over the file.
         if std::env::var_os("ONEPROMPT_SEED").is_none()
@@ -1919,10 +1913,10 @@ impl ApplicationHandler<UserEvent> for App {
             None => {}
         }
         // A beating cursor needs a frame now and then, not every vsync, and
-        // falling rain or snow a few more.
-        let weather = self.renderer.as_ref().is_some_and(|r| r.is_weathering() || r.is_busy());
-        if weather || self.renderer.as_ref().is_some_and(|r| r.is_pulsing()) {
-            let every = if weather { WEATHER_FRAME } else { PULSE_FRAME };
+        // a busy progress stroke a few more.
+        let busy = self.renderer.as_ref().is_some_and(|r| r.is_busy());
+        if busy || self.renderer.as_ref().is_some_and(|r| r.is_pulsing()) {
+            let every = if busy { BUSY_FRAME } else { PULSE_FRAME };
             if self.pulse_at.elapsed() >= every {
                 self.pulse_at = Instant::now();
                 self.redraw();

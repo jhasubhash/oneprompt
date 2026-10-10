@@ -9,7 +9,7 @@
 
 use crate::theme::{
     self, CommandSpan, ControlStyle, Controls, Ctx, Cursor, CursorKind, DividerSpan, IdleSpan, Param, Plan, Rng, Shape,
-    Entrance, PanelSpan, ProgressSpan, ProgressState, Shaders, Sound, SoundEvent, SplashSpan, Strike, StrikeSpan, Theme, Variant, Weather, WeatherSpan, CUSTOM, DISC,
+    Entrance, PanelSpan, ProgressSpan, ProgressState, Shaders, Sound, SoundEvent, SplashSpan, Strike, StrikeSpan, Theme, Variant, CUSTOM, DISC,
     RING,
 };
 
@@ -359,32 +359,6 @@ impl Theme for Chalkboard {
             let r = rng.range(0.8, 2.2) * ctx.scale * (1.0 + t);
             let (cx, cy) = (x + along * length + dx * spread, y + ch * 0.5 + dy * spread * 0.7 + t * ch * 0.3);
             out.push(Shape::round(DISC, cx, cy, r, v.ink, 0.45 * (1.0 - t)));
-        }
-    }
-
-    /// Rain in chalk: quick slanted dashes down the board. Snow: soft chalk
-    /// motes drifting and swaying.
-    fn draw_weather(&self, v: &Variant, ctx: &Ctx, span: &WeatherSpan, out: &mut Vec<Shape>) {
-        let s = ctx.scale;
-        match span.kind {
-            Weather::Rain => {
-                for i in 0..(20.0 + span.amount * 140.0) as usize {
-                    let (x, y, _, own) = theme::weather_particle(span, i, 0.9, 0.2);
-                    let len = (18.0 + 26.0 * own) * s;
-                    let mut dash = Shape::new(x, y, len * 0.2, len, v.ink, 0.3 + 0.2 * own).kind(STROKE);
-                    dash.params[1] = 1.0;
-                    dash.params[2] = 1.0;
-                    dash.params[3] = own * 30.0;
-                    out.push(dash);
-                }
-            }
-            Weather::Snow => {
-                for i in 0..(20.0 + span.amount * 130.0) as usize {
-                    let (x, y, t, own) = theme::weather_particle(span, i, 10.0, 0.05);
-                    let sway = (t * 13.0 + own * 7.0).sin() * 9.0 * s;
-                    out.push(Shape::round(DISC, x + sway, y, (1.0 + 2.2 * own) * s, v.ink, 0.6).rough(0.4, own * 20.0));
-                }
-            }
         }
     }
 
