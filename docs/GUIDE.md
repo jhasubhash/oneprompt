@@ -134,9 +134,11 @@ light or dark palette.
   page swinging away and falling, a ragged stub left behind for a moment; the
   Chalkboard's board slides up or down out of the frame. The panes taking its place show
   beneath. `close_effect = false` closes at once.
-- **Clearing burns the screen away**: Cmd+K, or `clear` (or Ctrl+L) in the shell, sets the
-  old screen alight where the cursor was, where `clear` was typed, in Tsushima and Logbook:
-  the fire spreads across the pane to clean paper. On the Chalkboard the chalk breaks up
+- **Clearing takes the writing away**: Cmd+K, or `clear` (or Ctrl+L) in the shell. In
+  Tsushima the writing goes the way it came, backwards: line by line from the cursor's up,
+  each right to left, every letter lifting off along the brush's stroke, the paper left as
+  it was. Logbook sets the old page alight where `clear` was typed, the fire spreading
+  across the pane to clean paper. On the Chalkboard the chalk breaks up
   into dust that drifts off the board. Only the pane cleared changes. A full-screen app
   erasing its own screen doesn't count. The shell's output waits (at most 150 ms) until
   the old frame is kept, so the fire burns what was there. `clear_effect = false` clears

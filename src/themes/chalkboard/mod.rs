@@ -8,7 +8,7 @@
 //! through them that knocks a little dust off.
 
 use crate::theme::{
-    self, CommandSpan, ControlStyle, Controls, Ctx, Cursor, CursorKind, DividerSpan, IdleSpan, Param, Plan, Rng, Shape,
+    self, ClearSpan, CommandSpan, ControlStyle, Controls, Ctx, Cursor, CursorKind, DividerSpan, IdleSpan, Param, Plan, Rng, Shape,
     Entrance, PanelSpan, ProgressSpan, ProgressState, Shaders, Sound, SoundEvent, SplashSpan, Strike, StrikeSpan, Theme, Variant, CUSTOM, DISC,
     RING,
 };
@@ -205,7 +205,8 @@ impl Theme for Chalkboard {
     /// Clearing the board blows the chalk off it: the marks break up into
     /// dust and drift away, from where the cursor was outwards, the clean
     /// board beneath.
-    fn clear(&self, _v: &Variant, rng: &mut Rng, _aspect: f32, area: [f32; 4], at: [f32; 2]) -> Option<Plan> {
+    fn clear(&self, _v: &Variant, rng: &mut Rng, _aspect: f32, span: &ClearSpan) -> Option<Plan> {
+        let (area, at) = (span.area, span.at);
         let data = PlanData { passes: 1.0, angle: 0.0, seed: rng.unit() * 100.0, upward: 0.0, mode: 1.0, at, _pad: 0.0, area };
         Some(Plan { duration: FLOW_TIME, ease: 1.0, data: theme::bytes(&data) })
     }

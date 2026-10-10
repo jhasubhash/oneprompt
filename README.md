@@ -37,7 +37,7 @@ and notarized, Apple silicon and Intel, macOS 11+. It's an alpha: expect rough e
 |---|---|
 | ✍️ **Written by hand** | New text is traced along each letter's pen path; the ink bleeds, dries and ages. |
 | ⚔️ **Strikes what you delete** | `rm` a file and every mention of it on screen is cut through. |
-| 🔥 **Burns what you clear** | `clear` sets the screen alight from where you typed it. |
+| 🔥 **Undoes what you clear** | `clear` takes the writing back off the page, or burns it away. |
 | 🩸 **Marks failures** | A failed command gets a stroke of seal ink; a long one is stamped with a hanko. |
 | 📜 **Every theme, its own way** | Openings, theme switches, split dividers, closing panes, the settings panel. |
 | 🍁 **Alive when idle** | Leaves fall onto a window left alone; the cursor has a heartbeat. |

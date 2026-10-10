@@ -10,7 +10,7 @@
 //! blot; a failed command gets a cross in the margin, a long one a wax seal.
 
 use crate::theme::{
-    self, CommandSpan, ControlStyle, Controls, Ctx, DividerSpan, Entrance, PanelSpan, Param, Plan, Rng, Shape, Shaders,
+    self, ClearSpan, CommandSpan, ControlStyle, Controls, Ctx, DividerSpan, Entrance, PanelSpan, Param, Plan, Rng, Shape, Shaders,
     Sound, SoundEvent,
     Strike, StrikeSpan, Theme, Variant, CUSTOM, DISC,
 };
@@ -207,7 +207,8 @@ impl Theme for Logbook {
 
     /// Clearing sets the old page alight where the cursor was, where `clear`
     /// was typed: it burns away across the pane to a fresh page.
-    fn clear(&self, _v: &Variant, rng: &mut Rng, aspect: f32, area: [f32; 4], at: [f32; 2]) -> Option<Plan> {
+    fn clear(&self, _v: &Variant, rng: &mut Rng, aspect: f32, span: &ClearSpan) -> Option<Plan> {
+        let (area, at) = (span.area, span.at);
         let [x, y, w, h] = area;
         let at = [at[0] * aspect, at[1]];
         let reach = [[x, y], [x + w, y], [x, y + h], [x + w, y + h]]

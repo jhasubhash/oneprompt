@@ -11,7 +11,7 @@
 mod brush;
 
 use crate::theme::{
-    self, CommandSpan, ControlStyle, Controls, Ctx, Cursor, CursorKind, DividerSpan, IdleSpan, Param, Plan, Rng, Shape,
+    self, ClearSpan, CommandSpan, ControlStyle, Controls, Ctx, Cursor, CursorKind, DividerSpan, IdleSpan, Param, Plan, Rng, Shape,
     Entrance, PanelSpan, ProgressSpan, ProgressState, Shaders, Sound, SoundEvent, SplashSpan, Strike, StrikeSpan, Theme, Variant, CUSTOM, DISC,
 };
 
@@ -43,7 +43,7 @@ const CUT_TIME: f32 = 0.32;
 const REVEAL_TIME: f32 = 1.6;
 const SWITCH_TIME: f32 = 2.8;
 const BURN_TIME: f32 = 1.5;
-const CLEAR_TIME: f32 = 1.3;
+const UNWRITE_TIME: f32 = 1.2;
 const SHRED_TIME: f32 = 1.3;
 
 /// A failed command's stroke is dragged down the margin this fast.
@@ -266,18 +266,15 @@ impl Theme for Tsushima {
         Some(Plan { duration: SHRED_TIME, ease: 1.0, data: theme::bytes(&data) })
     }
 
-    /// Clearing burns the old screen away from where the cursor was, where
-    /// `clear` was typed: a fire spreads out from it across the pane, the
-    /// clean sheet beneath.
-    fn clear(&self, _v: &Variant, rng: &mut Rng, aspect: f32, area: [f32; 4], at: [f32; 2]) -> Option<Plan> {
-        let [x, y, w, h] = area;
-        let at = [at[0] * aspect, at[1]];
-        let far = [[x, y], [x + w, y], [x, y + h], [x + w, y + h]]
-            .iter()
-            .map(|c| ((c[0] * aspect - at[0]).powi(2) + (c[1] - at[1]).powi(2)).sqrt())
-            .fold(0.0, f32::max);
-        let data = PlanData::burn(at, far + 0.4, area, rng.unit() * 100.0);
-        Some(Plan { duration: CLEAR_TIME, ease: 1.1, data: theme::bytes(&data) })
+    /// Clearing takes the writing away the way it came, backwards: line by
+    /// line from the cursor's up to the top, each right to left, every
+    /// letter lifting off along the brush's stroke, the paper left as it
+    /// was.
+    fn clear(&self, _v: &Variant, rng: &mut Rng, _aspect: f32, span: &ClearSpan) -> Option<Plan> {
+        let data = PlanData::unwrite(span.grid, span.columns, span.lines, span.area, rng.unit() * 100.0);
+        // Quick for a few lines, never long for a full screen.
+        let duration = (0.35 + span.lines * 0.05).min(UNWRITE_TIME);
+        Some(Plan { duration, ease: 1.0, data: theme::bytes(&data) })
     }
 
     /// The bleed keeps creeping for `bleed_time`.

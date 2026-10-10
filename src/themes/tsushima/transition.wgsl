@@ -177,6 +177,9 @@ fn arrival(q: vec2<f32>) -> Hit {
 }
 
 fn theme_transition(px: vec2<f32>, now: vec4<f32>, before_in: vec4<f32>) -> vec4<f32> {
+    if (plan.front.w > 2.5) {
+        return unwritten(px, now, before_in);
+    }
     if (plan.front.w > 1.5) {
         return shred(px, now, before_in);
     }
@@ -401,4 +404,42 @@ fn shred(px: vec2<f32>, now: vec4<f32>, before: vec4<f32>) -> vec4<f32> {
         }
     }
     return color;
+}
+
+// Clearing: the writing taken away the way it came, backwards. The grid is
+// marks[0] (first cell's corner, cell size, physical pixels), its columns
+// and the lines with text marks[2].xy, the pane marks[1]. Cells go in
+// reverse reading order, from the last line up and each line right to left,
+// overlapping a little; each cell's ink lifts off along the brush's stroke
+// (the sweep the writing uses), from the end of the stroke back to its
+// start, its edge ragged. What has gone shows the cleared screen; the
+// paper is the same in both.
+fn unwritten(px: vec2<f32>, now: vec4<f32>, before: vec4<f32>) -> vec4<f32> {
+    let area = plan.marks[1];
+    let uv = px / frame.resolution;
+    if (any(uv < area.xy) || any(uv > area.xy + area.zw)) {
+        return now;
+    }
+    let origin = plan.marks[0].xy;
+    let cell = max(plan.marks[0].zw, vec2<f32>(1.0));
+    let columns = max(plan.marks[2].x, 1.0);
+    let lines = max(plan.marks[2].y, 1.0);
+    let g = (px - origin) / cell;
+    // Outside the text: nothing written there.
+    if (any(g < vec2<f32>(0.0)) || g.x >= columns || g.y >= lines) {
+        return now;
+    }
+    let c = floor(g);
+    let total = columns * lines;
+    let order = ((lines - 1.0 - c.y) * columns + (columns - 1.0 - c.x)) / total;
+    // Each cell takes a share of the time, a few cells' worth overlapping.
+    let span = clamp(8.0 / total, 0.004, 0.4);
+    let u = clamp((frame.progress * (1.0 + span) - order) / span, 0.0, 1.0);
+    // Along the brush through the cell: left to right and slightly rising,
+    // as it was written; it lifts from the stroke's end back to its start.
+    let along = dot(fract(g) - 0.5, vec2<f32>(0.94, -0.34)) + 0.5;
+    let sp = px + vec2<f32>(plan.info.z * 13.0, plan.info.z * 7.0);
+    let ragged = along + (noise(sp * 0.4) - 0.5) * 0.3 + (noise(rotate(sp, 0.35) * vec2<f32>(0.08, 0.9)) - 0.5) * 0.2;
+    let gone = clamp((u * 1.45 - (1.0 - ragged)) * 9.0, 0.0, 1.0);
+    return mix(before, now, gone);
 }

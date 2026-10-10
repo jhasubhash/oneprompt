@@ -1353,7 +1353,14 @@ impl Renderer {
         let (w, h) = (self.config.width as f32, self.config.height as f32);
         let at = [(cursor[0] + cursor[2] / 2.0) / w, (cursor[1] + cursor[3] / 2.0) / h];
         let (aspect, area) = (self.aspect(), self.uv_rect(rect));
-        if let Some(plan) = variant.theme.clear(variant, &mut self.rng, aspect, area, at) {
+        // The pane's grid: where it starts, its cells, and the lines that had
+        // text (down to the cursor's).
+        let (ox, oy) = self.origin(rect);
+        let (cw, ch) = self.pane_metrics.get(&pane).map_or((self.cell_width, self.cell_height), |m| (m.1, m.2));
+        let columns = self.panes.get(&pane).map_or(80, |p| p.grid.0) as f32;
+        let lines = (((cursor[1] - oy) / ch.max(1.0)).floor() + 1.0).max(1.0);
+        let span = api::ClearSpan { area, at, grid: [ox, oy, cw, ch], columns, lines };
+        if let Some(plan) = variant.theme.clear(variant, &mut self.rng, aspect, &span) {
             self.start_over_last(plan);
             self.events.push(api::SoundEvent::Clear);
         }

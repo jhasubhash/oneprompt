@@ -77,11 +77,10 @@ pub trait Theme: Sync + 'static {
         None
     }
     /// How a pane's screen is cleared (Cmd+K, or `clear` in the shell): the
-    /// old screen goes, the cleared one beneath. `area` is the pane (x, y, w,
-    /// h, 0..1 of the window) and `at` where the cursor was (0..1 of the
-    /// window); the transition should leave the rest of the window alone.
-    /// None: it simply clears.
-    fn clear(&self, _variant: &Variant, _rng: &mut Rng, _aspect: f32, _area: [f32; 4], _at: [f32; 2]) -> Option<Plan> {
+    /// old screen goes, the cleared one beneath (see [`ClearSpan`]); the
+    /// transition should leave the rest of the window alone. None: it simply
+    /// clears.
+    fn clear(&self, _variant: &Variant, _rng: &mut Rng, _aspect: f32, _span: &ClearSpan) -> Option<Plan> {
         None
     }
     /// How a closed pane goes (`area`, 0..1 of the window, as for `clear`):
@@ -294,6 +293,21 @@ pub fn plain_stamp(variant: &Variant, ctx: &Ctx, span: &CommandSpan, out: &mut V
     let r = h * 0.42 * (1.4 - 0.4 * span.progress);
     let rgb = if span.failed { variant.palette[1] } else { variant.cursor };
     out.push(Shape::round(RING, x + w * 1.5, y + h * 0.5, r, rgb, 0.9 * span.progress).stroke(2.0 * ctx.scale));
+}
+
+/// A pane being cleared.
+#[derive(Clone, Copy, Debug)]
+pub struct ClearSpan {
+    /// The pane (x, y, w, h), 0..1 of the window.
+    pub area: [f32; 4],
+    /// Where the cursor was, 0..1 of the window.
+    pub at: [f32; 2],
+    /// Its text grid: the top-left of its first cell and a cell's size
+    /// (x, y, w, h), physical pixels; and its columns and the lines down to
+    /// the cursor's (the ones with text on them).
+    pub grid: [f32; 4],
+    pub columns: f32,
+    pub lines: f32,
 }
 
 /// How the settings panel comes in.
