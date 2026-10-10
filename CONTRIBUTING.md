@@ -58,8 +58,9 @@ include a screenshot or short recording in your pull request.
    plain defaults fill in. Values come from `Theme::data` (and `Plan` for transitions)
    into a struct the theme declares.
 3. Give it its reactions: `reveal`, `switch`, `cursor`, `strike` / `draw_strike`.
-4. Add it to `all()` in `src/themes/mod.rs`. It then appears in the picker and the
-   settings template, and `cargo test` compiles its shaders.
+4. Add it to `all()` in `src/themes/mod.rs`. It then appears in the picker, the
+   settings panel (a slider per setting it declares) and the settings template, and
+   `cargo test` compiles its shaders.
 5. Look at both variants (`ONEPROMPT_SNAPSHOT=<dir>` renders every variant;
    `ONEPROMPT_SNAPSHOT_SWITCH=<n>` adds frames of each switch), add screenshots to
    `docs/screenshots/` and a short description to README.md.

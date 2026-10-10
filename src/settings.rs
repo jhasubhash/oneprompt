@@ -1,0 +1,493 @@
+//! The settings panel (Cmd+, or Settings… in the menu): a sheet down the
+//! right of the window, so the terminal stays in view and every change can
+//! be seen as it is made. It has the settings every theme shares, the
+//! current theme's own (from `Theme::params`, so each theme brings its own
+//! rows), and the theme and appearance themselves.
+//!
+//! The panel never keeps settings of its own: every change is written to
+//! the settings file (config::apply_edits, keeping the user's comments)
+//! and applied from there, and the rows are rebuilt from the loaded
+//! settings, so the file and the panel always agree, whichever was edited.
+//!
+//! This file is the rows and what changing them writes; the renderer draws
+//! them (`Renderer::set_settings`) and main.rs routes keys and clicks.
+
+use crate::config::{Appearance, Config, Edit, OptionAsMeta, Value};
+use crate::theme::{self, Variant};
+
+/// A row's control.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Control {
+    /// One of a few options, side by side; with more than `SEGMENTS`, one
+    /// at a time with arrows either side.
+    Choice { labels: Vec<String>, values: Vec<Value>, index: usize },
+    Toggle(bool),
+    Slider { value: f32, min: f32, max: f32, step: f32 },
+}
+
+/// Choices with at most this many options show them all.
+pub const SEGMENTS: usize = 3;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Row {
+    pub label: String,
+    pub about: String,
+    pub control: Control,
+    /// Where it is written: top-level, or a variant's section.
+    section: Option<String>,
+    key: &'static str,
+    /// Font size rows move the line height with them, from (size, line height).
+    keeps_spacing: Option<(f32, f32)>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Item {
+    Heading { title: String, note: String },
+    Row(Row),
+}
+
+impl Item {
+    pub fn row(&self) -> Option<&Row> {
+        match self {
+            Item::Row(row) => Some(row),
+            Item::Heading { .. } => None,
+        }
+    }
+}
+
+/// How a row is changed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Change {
+    /// Arrow keys: the next or previous option, or a step of the slider
+    /// (`fine`: a small one).
+    Step { by: i32, fine: bool },
+    /// Return or a click on a toggle: flip it, or the next option.
+    Next,
+    /// A click on an option.
+    Pick(usize),
+    /// A click or drag on a slider, this far along it.
+    Along(f32),
+}
+
+/// What a click landed on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Hit {
+    Row(usize, Part),
+    /// The button that opens the settings file.
+    OpenFile,
+}
+
+/// The part of a row a click landed on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Part {
+    Label,
+    Option(usize),
+    Previous,
+    Next,
+    Toggle,
+    /// The slider, with its track's left edge and width.
+    Slider(f32, f32),
+}
+
+impl Row {
+    fn new(label: &str, about: &str, control: Control, section: Option<String>, key: &'static str) -> Self {
+        Self { label: label.into(), about: about.into(), control, section, key, keeps_spacing: None }
+    }
+
+    /// The settings to write for `change`, or nothing if it changes nothing.
+    pub fn change(&self, change: Change) -> Vec<Edit> {
+        let edit = |key: &str, value| Edit { section: self.section.clone(), key: key.to_string(), value };
+        match &self.control {
+            Control::Choice { values, index, .. } => {
+                let n = values.len() as i32;
+                let to = match change {
+                    Change::Step { by, .. } => (*index as i32 + by).rem_euclid(n.max(1)) as usize,
+                    Change::Next => (*index + 1) % values.len().max(1),
+                    Change::Pick(i) => i,
+                    Change::Along(_) => *index,
+                };
+                match values.get(to) {
+                    Some(value) if to != *index => vec![edit(self.key, value.clone())],
+                    _ => Vec::new(),
+                }
+            }
+            &Control::Toggle(on) => {
+                let to = match change {
+                    Change::Step { by, .. } => by > 0,
+                    _ => !on,
+                };
+                if to == on { Vec::new() } else { vec![edit(self.key, Value::Bool(to))] }
+            }
+            &Control::Slider { value, min, max, step } => {
+                let to = match change {
+                    Change::Step { by, fine } => {
+                        let stride = if fine { step } else { coarse(min, max, step) };
+                        value + by as f32 * stride
+                    }
+                    Change::Along(along) => min + along.clamp(0.0, 1.0) * (max - min),
+                    Change::Next | Change::Pick(_) => value,
+                };
+                let to = snap(to.clamp(min, max), step);
+                if (to - value as f64).abs() < step as f64 * 0.5 {
+                    return Vec::new();
+                }
+                let mut edits = vec![edit(self.key, Value::Num(to))];
+                if let Some((size, line)) = self.keeps_spacing {
+                    edits.push(edit("line_height", Value::Num((line * to as f32 / size).round() as f64)));
+                }
+                edits
+            }
+        }
+    }
+
+    /// The value as shown beside a slider or between a choice's arrows.
+    pub fn value_text(&self) -> String {
+        match &self.control {
+            Control::Choice { labels, index, .. } => labels.get(*index).cloned().unwrap_or_default(),
+            Control::Toggle(on) => if *on { "on" } else { "off" }.into(),
+            &Control::Slider { value, step, .. } => {
+                let decimals = if step < 0.1 { 2 } else if step < 1.0 { 1 } else { 0 };
+                format!("{value:.decimals$}")
+            }
+        }
+    }
+}
+
+/// `value` on the slider's grid, as a number that prints cleanly.
+fn snap(value: f32, step: f32) -> f64 {
+    let steps = (value / step).round() as f64;
+    let decimals = (-(step as f64).log10()).ceil().max(0.0) as i32;
+    let factor = 10f64.powi(decimals);
+    (steps * step as f64 * factor).round() / factor
+}
+
+/// A round step about 1/100 of the range, for dragging and Shift+arrows.
+fn fine_step(min: f32, max: f32) -> f32 {
+    let range = max - min;
+    [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 50.0, 100.0]
+        .into_iter()
+        .find(|&s| s >= range / 100.0)
+        .unwrap_or(range / 100.0)
+}
+
+/// The arrow keys' step: about 1/20 of the range, on the fine grid.
+fn coarse(min: f32, max: f32, step: f32) -> f32 {
+    ((max - min) / 20.0 / step).round().max(1.0) * step
+}
+
+fn slider(value: f32, min: f32, max: f32) -> Control {
+    // A value set in the file beyond the usual range widens the slider.
+    let (min, max) = (min.min(value), max.max(value));
+    Control::Slider { value, min, max, step: fine_step(min, max) }
+}
+
+fn choice(options: &[(&str, &str)], current: &str) -> Control {
+    Control::Choice {
+        labels: options.iter().map(|(label, _)| label.to_string()).collect(),
+        values: options.iter().map(|(_, value)| Value::Str(value.to_string())).collect(),
+        index: options.iter().position(|(_, value)| *value == current).unwrap_or(0),
+    }
+}
+
+/// "bleed_variation" -> "Bleed variation".
+fn label(key: &str) -> String {
+    let words = key.replace('_', " ");
+    let mut chars = words.chars();
+    chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
+}
+
+/// A setting's description as a sentence, without a trailing range
+/// ("..., 0..1"), which the slider already shows.
+fn describe(about: &str) -> String {
+    let text = match about.rsplit_once(", ") {
+        Some((head, range)) if range.contains("..") && range.chars().all(|c| c.is_ascii_digit() || c == '.') => head,
+        _ => about,
+    };
+    let mut chars = text.chars();
+    let mut sentence: String = chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default();
+    if !sentence.ends_with(['.', ')', '!', '?']) {
+        sentence.push('.');
+    }
+    sentence
+}
+
+/// What the rows need besides the settings.
+pub struct Fonts<'a> {
+    /// Installed monospace families, sorted.
+    pub families: &'a [String],
+    /// Weights the current variant's family has.
+    pub weights: &'a [u16],
+}
+
+/// The panel's rows for `config`, showing `variant` (the one on screen).
+pub fn items(config: &Config, variant: &Variant, fonts: &Fonts) -> Vec<Item> {
+    let heading = |title: &str, note: &str| Item::Heading { title: title.into(), note: note.into() };
+    let top = |label: &str, about: &str, control, key| Item::Row(Row::new(label, about, control, None, key));
+    let mut items = vec![heading("Theme", "")];
+
+    let themes = theme::all();
+    let ids: Vec<(&str, &str)> = themes.iter().map(|t| (t.name(), t.id())).collect();
+    items.push(top("Theme", "Cmd+Option+T shows them all side by side.", choice(&ids, variant.theme.id()), "theme"));
+    let appearance = match config.appearance {
+        Appearance::System => "system",
+        Appearance::Light => "light",
+        Appearance::Dark => "dark",
+    };
+    items.push(top(
+        "Appearance",
+        "System follows macOS. Cmd+Shift+L flips it for now.",
+        choice(&[("System", "system"), ("Light", "light"), ("Dark", "dark")], appearance),
+        "appearance",
+    ));
+
+    // The variant on screen: its fonts, then its theme's own settings.
+    let section = Some(variant.key());
+    let own = |label: &str, about: &str, control, key| Item::Row(Row::new(label, about, control, section.clone(), key));
+    items.push(heading(variant.name, "this look only; Cmd+Shift+L shows the other"));
+    let mut families = fonts.families.to_vec();
+    if !families.iter().any(|f| f.eq_ignore_ascii_case(&variant.font_family)) {
+        families.insert(0, variant.font_family.clone());
+    }
+    let family_index = families.iter().position(|f| f.eq_ignore_ascii_case(&variant.font_family)).unwrap_or(0);
+    items.push(own(
+        "Font",
+        "Installed monospace fonts.",
+        Control::Choice {
+            values: families.iter().map(|f| Value::Str(f.clone())).collect(),
+            labels: families,
+            index: family_index,
+        },
+        "font_family",
+    ));
+    let mut size = Row::new("Size", "", slider(variant.font_size, 9.0, 32.0), section.clone(), "font_size");
+    if let Control::Slider { step, .. } = &mut size.control {
+        *step = 0.5;
+    }
+    size.keeps_spacing = Some((variant.font_size, variant.line_height));
+    items.push(Item::Row(size));
+    let mut weights = fonts.weights.to_vec();
+    if weights.is_empty() {
+        weights = vec![variant.font_weight];
+    }
+    let weight_index = weights
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, w)| w.abs_diff(variant.font_weight))
+        .map_or(0, |(i, _)| i);
+    items.push(own(
+        "Weight",
+        "The weights this font has.",
+        Control::Choice {
+            labels: weights.iter().map(|w| weight_name(*w)).collect(),
+            values: weights.iter().map(|&w| Value::Num(w as f64)).collect(),
+            index: weight_index,
+        },
+        "font_weight",
+    ));
+    let mut line = Row::new(
+        "Line height",
+        "Pixels from one line to the next.",
+        slider(variant.line_height, (variant.font_size * 1.0).floor(), (variant.font_size * 2.4).ceil()),
+        section.clone(),
+        "line_height",
+    );
+    if let Control::Slider { step, .. } = &mut line.control {
+        *step = 1.0;
+    }
+    items.push(Item::Row(line));
+    for (param, &value) in variant.theme.params().iter().zip(&variant.params) {
+        items.push(Item::Row(Row::new(
+            &label(param.key),
+            &describe(param.about),
+            slider(value, param.min, param.max),
+            section.clone(),
+            param.key,
+        )));
+    }
+
+    let (animation, animation_speed, writing_speed) = config.animation();
+    items.push(heading("Animation", ""));
+    items.push(top(
+        "Animation",
+        "Writing new characters in, and the theme's reveals and switches.",
+        Control::Toggle(animation),
+        "animation",
+    ));
+    items.push(top("Speed", "2 is twice as fast, 0.5 half speed.", slider(animation_speed, 0.25, 4.0), "animation_speed"));
+    let mut writing = Row::new(
+        "Writing speed",
+        "Characters per second as output is written out.",
+        slider(writing_speed, 50.0, 3000.0),
+        None,
+        "writing_speed",
+    );
+    if let Control::Slider { step, .. } = &mut writing.control {
+        *step = 10.0;
+    }
+    items.push(Item::Row(writing));
+
+    items.push(heading("Terminal", ""));
+    items.push(top(
+        "Harmonise colours",
+        "Turn colours programs pick for a black screen into inks that read on this one.",
+        Control::Toggle(config.harmonize_colors.unwrap_or(true)),
+        "harmonize_colors",
+    ));
+    let meta = match config.option_as_meta {
+        OptionAsMeta::Left => "left",
+        OptionAsMeta::Both => "both",
+        OptionAsMeta::None => "none",
+    };
+    items.push(top(
+        "Option as Meta",
+        "Which Option key sends Alt+B, Alt+F, ...; the other still types é, €.",
+        choice(&[("Left", "left"), ("Both", "both"), ("None", "none")], meta),
+        "option_as_meta",
+    ));
+    items.push(top(
+        "Strike deleted",
+        "Strike through names of files and folders deleted while on screen.",
+        Control::Toggle(config.strike_deleted.unwrap_or(true)),
+        "strike_deleted",
+    ));
+    items.push(top(
+        "Strike extras",
+        "What the theme adds to a strike: Tsushima's blood, Chalkboard's dust.",
+        Control::Toggle(config.strike_splatter.unwrap_or(true)),
+        "strike_splatter",
+    ));
+    items
+}
+
+/// "400" -> "Regular" and so on, as font menus name them.
+fn weight_name(weight: u16) -> String {
+    match weight {
+        100 => "Thin",
+        200 => "Extra Light",
+        300 => "Light",
+        400 => "Regular",
+        500 => "Medium",
+        600 => "Semibold",
+        700 => "Bold",
+        800 => "Heavy",
+        900 => "Black",
+        _ => return weight.to_string(),
+    }
+    .into()
+}
+
+/// The row after (or before, `by` < 0) `from`, skipping headings; `from`
+/// itself when there is none.
+pub fn next_row(items: &[Item], from: usize, by: i32) -> usize {
+    let mut i = from as i32;
+    loop {
+        i += by.signum();
+        match items.get(i.max(0) as usize) {
+            _ if i < 0 => return from,
+            Some(Item::Row(_)) => return i as usize,
+            Some(Item::Heading { .. }) => continue,
+            None => return from,
+        }
+    }
+}
+
+/// The first row.
+pub fn first_row(items: &[Item]) -> usize {
+    items.iter().position(|i| i.row().is_some()).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rows(config: &Config, variant: &Variant) -> Vec<Item> {
+        let families = vec!["Courier New".to_string(), "Menlo".to_string()];
+        items(config, variant, &Fonts { families: &families, weights: &[400, 700] })
+    }
+
+    fn find<'a>(items: &'a [Item], label: &str) -> &'a Row {
+        items.iter().filter_map(Item::row).find(|r| r.label == label).unwrap()
+    }
+
+    /// Applies a row's change to `text`, as the panel does.
+    fn change(text: &str, items: &[Item], label: &str, change: Change) -> String {
+        crate::config::apply_edits(text, &find(items, label).change(change)).unwrap()
+    }
+
+    #[test]
+    fn every_theme_brings_its_own_rows() {
+        let config = Config::default();
+        for variant in theme::builtin() {
+            let items = rows(&config, &variant);
+            for param in variant.theme.params() {
+                find(&items, &label(param.key));
+            }
+            assert!(items.iter().any(|i| matches!(i, Item::Heading { title, .. } if title == variant.name)));
+        }
+    }
+
+    #[test]
+    fn changes_reach_the_file_and_come_back() {
+        let variants = theme::builtin();
+        let light = variants.iter().find(|v| v.key() == "tsushima-light").unwrap();
+        let mut text = crate::config::template();
+        let items = rows(&Config::parse(&text).unwrap(), light);
+        text = change(&text, &items, "Nib", Change::Along(0.5));
+        text = change(&text, &items, "Animation", Change::Next);
+        text = change(&text, &items, "Appearance", Change::Pick(2));
+        text = change(&text, &items, "Speed", Change::Step { by: 1, fine: false });
+        text = change(&text, &items, "Theme", Change::Step { by: 1, fine: false });
+        let config = Config::parse(&text).unwrap();
+        let light = config.themes().into_iter().find(|v| v.key() == "tsushima-light").unwrap();
+        assert_eq!(light.param("nib"), 5.0);
+        assert_eq!(config.animation().0, false);
+        assert_eq!(config.appearance, Appearance::Dark);
+        assert_eq!(config.theme.as_deref(), Some("chalkboard"));
+        // The rows built from the result show what was written.
+        let again = rows(&config, &light);
+        assert_eq!(find(&again, "Nib").value_text(), "5.0");
+        assert_eq!(find(&again, "Animation").control, Control::Toggle(false));
+        assert!(find(&again, "Speed").value_text().starts_with("1.2"));
+    }
+
+    #[test]
+    fn font_size_keeps_the_spacing() {
+        let variants = theme::builtin();
+        let light = &variants[0];
+        let text = crate::config::template();
+        let items = rows(&Config::parse(&text).unwrap(), light);
+        let size = light.font_size;
+        let text = change(&text, &items, "Size", Change::Along(1.0));
+        let after = Config::parse(&text).unwrap().themes().into_iter().find(|v| v.name == light.name).unwrap();
+        assert_eq!(after.font_size, 32.0);
+        assert_eq!(after.line_height, (light.line_height * 32.0 / size).round());
+    }
+
+    #[test]
+    fn sliders_stay_in_range_and_on_their_grid() {
+        let row = Row::new("x", "", slider(0.3, 0.0, 1.0), None, "x");
+        assert!(row.change(Change::Step { by: -1, fine: true }) == vec![Edit { section: None, key: "x".into(), value: Value::Num(0.29) }]);
+        assert_eq!(row.change(Change::Along(3.0))[0].value, Value::Num(1.0));
+        assert!(Row::new("x", "", slider(0.0, 0.0, 1.0), None, "x").change(Change::Step { by: -1, fine: false }).is_empty());
+        assert_eq!(describe("dry-brush streaks, 0..1"), "Dry-brush streaks.");
+        assert_eq!(describe("water-stain tide lines: 1 built-in, 0 none, up to 3"), "Water-stain tide lines: 1 built-in, 0 none, up to 3.");
+    }
+
+    #[test]
+    fn keys_move_between_rows_not_headings() {
+        let items = rows(&Config::default(), &theme::builtin()[0]);
+        let first = first_row(&items);
+        assert_eq!(next_row(&items, first, -1), first);
+        let mut i = first;
+        let mut seen = 1;
+        loop {
+            let next = next_row(&items, i, 1);
+            if next == i {
+                break;
+            }
+            assert!(items[next].row().is_some());
+            (i, seen) = (next, seen + 1);
+        }
+        assert_eq!(seen, items.iter().filter(|i| i.row().is_some()).count());
+    }
+}

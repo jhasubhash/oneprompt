@@ -21,6 +21,7 @@ mod input;
 mod menu;
 mod picker;
 mod renderer;
+mod settings;
 mod strike;
 mod terminal;
 mod theme;
@@ -69,11 +70,16 @@ struct App {
     /// Every theme's variants, with the settings applied.
     themes: Vec<Variant>,
     current: usize,
-    /// Theme chosen in the picker this session (wins over the settings).
-    picked: Option<String>,
     /// The theme picker is open, with this theme (index in `theme::all()`)
     /// chosen.
     picker: Option<usize>,
+    /// The settings panel, while it is open.
+    settings: Option<SettingsState>,
+    /// The settings file as the panel last wrote it, already applied: the
+    /// watcher noticing that write has nothing to do.
+    written: Option<String>,
+    /// Why the settings file could not be applied, while it cannot.
+    config_error: Option<String>,
     mods: ModifiersState,
     /// Which Option keys are held right now: (left, right).
     option_keys: (bool, bool),
@@ -92,6 +98,14 @@ struct App {
     close_requested: bool,
     /// A settings error found before the window existed, shown once it does.
     startup_error: Option<String>,
+}
+
+/// The settings panel's rows, the one the keyboard is on, and the slider
+/// being dragged (its row, and its track's left edge and width).
+struct SettingsState {
+    items: Vec<settings::Item>,
+    focus: usize,
+    drag: Option<(usize, f32, f32)>,
 }
 
 /// A tab name being typed: which tab, the text so far, and whether all of
@@ -404,14 +418,28 @@ impl App {
                 if self.picker.is_some() {
                     self.close_picker();
                 } else {
+                    self.close_settings();
                     let id = self.themes[self.current].theme.id();
                     self.picker = Some(theme::all().iter().position(|t| t.id() == id).unwrap_or(0));
                     self.update_picker();
                 }
             }
             Action::Settings => {
+                if self.settings.is_some() {
+                    self.close_settings();
+                } else {
+                    self.close_picker();
+                    self.settings = Some(SettingsState { items: Vec::new(), focus: 0, drag: None });
+                    self.update_settings();
+                    if let Some(state) = self.settings.as_mut() {
+                        state.focus = settings::first_row(&state.items);
+                    }
+                    self.update_settings();
+                }
+            }
+            Action::SettingsFile => {
                 if let Err(err) = config::open_in_editor(&self.config_path) {
-                    self.show_notice(format!("could not open settings: {err}"), true);
+                    self.show_notice(format!("could not open the settings file: {err}"), true);
                 }
             }
         }
@@ -469,16 +497,156 @@ impl App {
         }
     }
 
-    /// Switches to theme `index` (in `theme::all()`) for good: this session,
-    /// and in the settings file.
+    /// Switches to theme `index` (in `theme::all()`), saving it in the
+    /// settings file.
     fn apply_picked(&mut self, index: usize) {
         self.close_picker();
         let Some(theme) = theme::all().get(index).copied() else { return };
-        self.picked = Some(theme.id().to_string());
-        if let Err(err) = config::save_theme(&self.config_path, theme.id()) {
-            self.show_notice(format!("could not save the theme: {err}"), true);
+        let edit = config::Edit { section: None, key: "theme".into(), value: config::Value::Str(theme.id().into()) };
+        self.write_settings(&[edit]);
+    }
+
+    /// Shows the settings panel as the settings are now, keeping the
+    /// keyboard on the same row (the rows change with the theme).
+    fn update_settings(&mut self) {
+        let variant = self.themes[self.current].clone();
+        let (Some(state), Some(r)) = (self.settings.as_mut(), self.renderer.as_mut()) else { return };
+        let families = r.monospace_families();
+        let weights = r.font_weights(&variant.font_family);
+        let items = settings::items(&self.config, &variant, &settings::Fonts { families: &families, weights: &weights });
+        let label = state.items.get(state.focus).and_then(settings::Item::row).map(|row| row.label.clone());
+        state.focus = label
+            .and_then(|label| items.iter().position(|i| i.row().is_some_and(|row| row.label == label)))
+            .unwrap_or_else(|| settings::first_row(&items));
+        state.items = items;
+        let path = self.config_path.display().to_string();
+        let path = match std::env::var("HOME") {
+            Ok(home) if !home.is_empty() && path.starts_with(&home) => format!("~{}", &path[home.len()..]),
+            _ => path,
+        };
+        r.set_settings(Some(renderer::SettingsPanel {
+            items: state.items.clone(),
+            focus: state.focus,
+            path,
+            error: self.config_error.clone(),
+        }));
+        r.window().request_redraw();
+    }
+
+    fn close_settings(&mut self) {
+        if self.settings.take().is_some()
+            && let Some(r) = self.renderer.as_mut()
+        {
+            r.set_settings(None);
+            r.window().request_redraw();
         }
-        self.select_theme();
+    }
+
+    /// Writes `edits` to the settings file and applies the result, unless
+    /// the settings would then be wrong (or the file cannot be read).
+    fn write_settings(&mut self, edits: &[config::Edit]) {
+        let result = config::read_or_template(&self.config_path)
+            .map_err(|e| e.to_string())
+            .and_then(|text| config::apply_edits(&text, edits))
+            .and_then(|text| Config::parse(&text).map(|config| (text, config)));
+        let (text, config) = match result {
+            Ok(done) => done,
+            Err(err) => return self.show_notice(format!("not saved: {err}"), true),
+        };
+        if let Err(err) = config::write(&self.config_path, &text) {
+            return self.show_notice(format!("not saved: {err}"), true);
+        }
+        self.written = Some(text);
+        self.config_error = None;
+        self.apply_config(config);
+        self.check_font();
+        self.update_settings();
+    }
+
+    /// Makes `change` to settings row `index`.
+    fn settings_change(&mut self, index: usize, change: settings::Change) {
+        let Some(state) = self.settings.as_mut() else { return };
+        state.focus = index;
+        let edits = state.items.get(index).and_then(settings::Item::row).map(|row| row.change(change)).unwrap_or_default();
+        if edits.is_empty() {
+            self.update_settings();
+        } else {
+            self.write_settings(&edits);
+        }
+    }
+
+    /// Keys while the settings panel is open: arrows move between rows and
+    /// change them. Command shortcuts still work (Cmd+, closes it, Cmd+Shift+L
+    /// shows the other variant's settings); nothing reaches the shell.
+    fn settings_key(&mut self, event: &KeyEvent) -> bool {
+        use settings::Change;
+        use winit::keyboard::NamedKey;
+        let Some(state) = self.settings.as_mut() else { return false };
+        if self.mods.super_key() {
+            if event.logical_key == Key::Character("o".into()) {
+                self.menu_action(Action::SettingsFile);
+                return true;
+            }
+            return false;
+        }
+        let (focus, shift) = (state.focus, self.mods.shift_key());
+        let moved = |by| settings::next_row(&state.items, focus, by);
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => self.close_settings(),
+            Key::Named(NamedKey::ArrowUp) => state.focus = moved(-1),
+            Key::Named(NamedKey::ArrowDown) => state.focus = moved(1),
+            Key::Named(NamedKey::Tab) => state.focus = moved(if shift { -1 } else { 1 }),
+            Key::Named(NamedKey::ArrowLeft) => self.settings_change(focus, Change::Step { by: -1, fine: shift }),
+            Key::Named(NamedKey::ArrowRight) => self.settings_change(focus, Change::Step { by: 1, fine: shift }),
+            Key::Named(NamedKey::Enter | NamedKey::Space) => self.settings_change(focus, Change::Next),
+            _ => {}
+        }
+        self.update_settings();
+        true
+    }
+
+    /// A click or release on the settings panel; a click beside it closes it.
+    fn settings_button(&mut self, pressed: bool) {
+        use settings::{Change, Hit, Part};
+        let (x, y) = (self.mouse.x as f32, self.mouse.y as f32);
+        if !pressed {
+            if let Some(state) = self.settings.as_mut() {
+                state.drag = None;
+            }
+            return;
+        }
+        let Some(r) = self.renderer.as_ref() else { return };
+        let (hit, inside) = (r.settings_hit(x, y), r.settings_contains(x, y));
+        match hit {
+            Some(Hit::OpenFile) => self.menu_action(Action::SettingsFile),
+            Some(Hit::Row(index, part)) => match part {
+                Part::Label => {
+                    if let Some(state) = self.settings.as_mut() {
+                        state.focus = index;
+                    }
+                    self.update_settings();
+                }
+                Part::Option(i) => self.settings_change(index, Change::Pick(i)),
+                Part::Previous => self.settings_change(index, Change::Step { by: -1, fine: false }),
+                Part::Next => self.settings_change(index, Change::Step { by: 1, fine: false }),
+                Part::Toggle => self.settings_change(index, Change::Next),
+                Part::Slider(left, width) => {
+                    if let Some(state) = self.settings.as_mut() {
+                        state.drag = Some((index, left, width));
+                    }
+                    self.settings_change(index, Change::Along((x - left) / width.max(1.0)));
+                }
+            },
+            None if !inside => self.close_settings(),
+            None => {}
+        }
+    }
+
+    /// The slider being dragged follows the pointer.
+    fn settings_drag(&mut self) {
+        let Some((index, left, width)) = self.settings.as_ref().and_then(|s| s.drag) else { return };
+        let along = (self.mouse.x as f32 - left) / width.max(1.0);
+        self.settings_change(index, settings::Change::Along(along));
     }
 
     /// Keys while the picker is open. Command shortcuts still work (so
@@ -598,7 +766,7 @@ impl App {
     /// Shows the light or dark variant, per the appearance setting, the
     /// system's mode and any Cmd+Shift+L flip.
     fn select_theme(&mut self) {
-        let index = self.config.theme_index(&self.themes, self.system_dark, self.flip, self.picked.as_deref());
+        let index = self.config.theme_index(&self.themes, self.system_dark, self.flip, None);
         if index != self.current {
             // The incoming theme takes over the window its way, a different
             // way each time, on a new sheet unless the settings pin one.
@@ -613,19 +781,20 @@ impl App {
             self.current = index;
             self.relayout();
             self.check_font();
+            // The panel shows the settings of the variant on screen.
+            self.update_settings();
         }
     }
 
     /// Applies a config: themes with overrides, appearance, paper seed.
+    /// When it changes which theme or variant is shown, the incoming one
+    /// takes over the window its way.
     fn apply_config(&mut self, config: Config) {
-        // A new appearance setting replaces a Cmd+Shift+L flip, and a new
-        // theme setting a choice in the picker.
+        // A new appearance setting replaces a Cmd+Shift+L flip.
         if config.appearance != self.config.appearance {
             self.flip = None;
         }
-        if config.theme != self.config.theme {
-            self.picked = None;
-        }
+        let shown = self.themes[self.current].name;
         self.themes = config.themes();
         // Snapshots must be deterministic, so they never animate.
         let (enabled, speed, writing_speed) = config.animation();
@@ -641,7 +810,17 @@ impl App {
             r.set_seed(config.seed);
         }
         self.config = config;
-        self.current = self.config.theme_index(&self.themes, self.system_dark, self.flip, self.picked.as_deref());
+        self.current = self.config.theme_index(&self.themes, self.system_dark, self.flip, None);
+        if self.themes[self.current].name != shown {
+            let pinned = self.config.seed.is_some() || std::env::var_os("ONEPROMPT_SEED").is_some();
+            let incoming = self.themes[self.current].clone();
+            if let Some(r) = self.renderer.as_mut() {
+                r.start_transition(&incoming);
+                if !pinned {
+                    r.new_sheet();
+                }
+            }
+        }
         self.relayout();
     }
 
@@ -660,25 +839,36 @@ impl App {
     }
 
     fn reload_config(&mut self) {
-        match Config::load(&self.config_path) {
+        let text = match std::fs::read_to_string(&self.config_path) {
+            Ok(text) => Some(text),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            Err(err) => return self.show_notice(format!("settings not read: {err}"), true),
+        };
+        // The panel's own write, applied when it was made.
+        if text.is_some() && text == self.written {
+            return;
+        }
+        self.written = None;
+        match text.as_deref().map_or(Ok(Config::default()), Config::parse) {
             // Saved, but nothing that counts changed: most likely an edit on a
             // line that is still commented out.
-            Ok(config) if config == self.config => self.show_notice(
+            Ok(config) if config == self.config && self.config_error.is_none() => self.show_notice(
                 "settings saved, nothing changed (lines starting with # are ignored)".into(),
                 false,
             ),
             Ok(config) => {
-                // The picker saving its choice needs no word.
-                let picked = config.theme.is_some()
-                    && config.theme == self.picked
-                    && Config { theme: self.config.theme.clone(), ..config.clone() } == self.config;
+                self.config_error = None;
                 self.apply_config(config);
-                if !self.check_font() && !picked {
+                if !self.check_font() {
                     self.show_notice("settings applied".into(), false);
                 }
             }
-            Err(err) => self.show_notice(format!("settings not applied: {err}"), true),
+            Err(err) => {
+                self.show_notice(format!("settings not applied: {err}"), true);
+                self.config_error = Some(err);
+            }
         }
+        self.update_settings();
     }
 
     /// xterm modifier bits for mouse reports.
@@ -753,6 +943,12 @@ impl App {
 
     fn on_mouse_button(&mut self, state: ElementState, button: MouseButton) {
         let pressed = state == ElementState::Pressed;
+        if self.settings.is_some() {
+            if button == MouseButton::Left {
+                self.settings_button(pressed);
+            }
+            return;
+        }
         // A click on a card applies it; anywhere else closes the picker.
         if self.picker.is_some() {
             if pressed && button == MouseButton::Left {
@@ -833,6 +1029,10 @@ impl App {
     }
 
     fn on_mouse_move(&mut self) {
+        if self.settings.is_some() {
+            self.settings_drag();
+            return;
+        }
         // Over the picker, the card under the pointer is the chosen one.
         if self.picker.is_some() {
             if let Some(card) = self.picker_card()
@@ -962,6 +1162,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         if let Some(err) = self.startup_error.take() {
             self.show_notice(format!("settings not applied: {err}"), true);
+            self.config_error = Some(err);
         } else {
             self.check_font();
         }
@@ -1065,7 +1266,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.renaming.is_some() && self.rename_key(&event) {
                     return;
                 }
-                if self.picker_key(&event) {
+                if self.picker_key(&event) || self.settings_key(&event) {
                     return;
                 }
                 if self.shortcut(&event) {
@@ -1098,6 +1299,17 @@ impl ApplicationHandler<UserEvent> for App {
                 self.on_mouse_button(state, button);
                 if self.close_requested {
                     event_loop.exit();
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } if self.settings.is_some() => {
+                let Some(r) = self.renderer.as_mut() else { return };
+                let pixels = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => -y * 3.0 * r.cell_height(),
+                    MouseScrollDelta::PixelDelta(p) => -p.y as f32,
+                };
+                if r.settings_contains(self.mouse.x as f32, self.mouse.y as f32) {
+                    r.scroll_settings(pixels);
+                    r.window().request_redraw();
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -1225,8 +1437,10 @@ fn main() {
         menu: None,
         themes,
         current,
-        picked: None,
         picker: None,
+        settings: None,
+        written: None,
+        config_error: None,
         mods: ModifiersState::empty(),
         option_keys: (false, false),
         config_path,

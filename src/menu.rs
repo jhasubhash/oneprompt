@@ -27,10 +27,11 @@ pub enum Action {
     FlipAppearance,
     Themes,
     Settings,
+    SettingsFile,
 }
 
 impl Action {
-    const ALL: [Action; 14] = [
+    const ALL: [Action; 15] = [
         Action::Copy,
         Action::Paste,
         Action::SelectAll,
@@ -45,6 +46,7 @@ impl Action {
         Action::FlipAppearance,
         Action::Themes,
         Action::Settings,
+        Action::SettingsFile,
     ];
 
     fn id(self) -> String {
@@ -104,6 +106,7 @@ impl ContextMenu {
             &item(Action::Themes, "Themes…", Some(Accelerator::new(Modifiers::META | Modifiers::ALT, Code::KeyT))),
             &PredefinedMenuItem::separator(),
             &item(Action::Settings, "Settings…", cmd(Code::Comma)),
+            &item(Action::SettingsFile, "Edit Settings File…", None),
         ]);
         Self { menu, copy, flip, close }
     }

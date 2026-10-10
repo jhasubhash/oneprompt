@@ -260,15 +260,16 @@ pub struct Controls {
     pub colors: [[u8; 3]; 3],
 }
 
-/// Shape kinds the framework draws (rect.wgsl).
+/// Shape kinds the framework draws (shapes_stage.wgsl).
 pub const FILL: f32 = 0.0;
 pub const DISC: f32 = 1.0;
 pub const RING: f32 = 2.0;
 pub const CROSS: f32 = 3.0;
+pub const ROUNDED: f32 = 4.0;
 /// The first kind a theme draws itself, in its `theme_shape`.
 pub const CUSTOM: f32 = 16.0;
 
-/// A box drawn by rect.wgsl: a filled rectangle, a framework shape, or one
+/// A box drawn by shapes_stage.wgsl: a filled rectangle, a framework shape, or one
 /// of the theme's own (`kind` from [`CUSTOM`] up).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -290,6 +291,15 @@ impl Shape {
     pub fn round(kind: f32, cx: f32, cy: f32, radius: f32, rgb: [u8; 3], alpha: f32) -> Self {
         let d = radius * 2.0 + 2.0;
         Self::new(cx - d / 2.0, cy - d / 2.0, d, d, rgb, alpha).kind(kind)
+    }
+
+    /// A box with rounded corners, filled, or outlined when `stroke` > 0.
+    pub fn rounded(rect: [f32; 4], radius: f32, stroke: f32, rgb: [u8; 3], alpha: f32) -> Self {
+        let [x, y, w, h] = rect;
+        let mut s = Self::new(x, y, w, h, rgb, alpha).kind(ROUNDED);
+        s.params[1] = radius;
+        s.params[2] = stroke;
+        s
     }
 
     pub fn kind(mut self, kind: f32) -> Self {

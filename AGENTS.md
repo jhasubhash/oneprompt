@@ -54,10 +54,10 @@ cargo clippy --release         # keep it warning-free
 - Look and feel belongs in a theme (`src/themes/<name>/`), never in the framework. Themes
   use only `crate::theme` (the API) and never each other (`themes::tests` checks it); what
   a theme needs that the API lacks goes into the API. CONTRIBUTING.md says how to add one.
-- Theme settings are declared by the theme (`Theme::params`); the settings template and
-  validation are generated from them.
-- New settings: validate their range, apply them live, add them to the template, document
-  them in README.md.
+- Theme settings are declared by the theme (`Theme::params`); the settings template,
+  validation and settings panel rows are generated from them.
+- New settings: validate their range, apply them live, add them to the template and a row
+  in the settings panel (`settings::items`), document them in README.md.
 
 ## Git
 

@@ -5,6 +5,8 @@
 //   1 disc   (params.y = brush roughness, params.w = seed)
 //   2 ring   (params.z = stroke width in px)
 //   3 cross  (an "x", params.z = stroke width in px)
+//   4 rounded box (params.y = corner radius, params.z = stroke width in
+//     px, 0 filled)
 //   16 and up: the theme's own, drawn by its `theme_shape`
 
 struct Instance {
@@ -53,6 +55,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     }
     if (kind >= 16u) {
         return theme_shape(ShapeIn(in.color, in.local, in.size, in.params));
+    }
+    if (kind == 4u) {
+        let half = in.size * 0.5;
+        let r = min(in.params.y, min(half.x, half.y));
+        let q = abs(in.local - half) - (half - vec2<f32>(r));
+        var d = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
+        if (in.params.z > 0.0) {
+            d = abs(d + in.params.z * 0.5) - in.params.z * 0.5;
+        }
+        return vec4<f32>(in.color.rgb, in.color.a * clamp(0.5 - d, 0.0, 1.0));
     }
 
     let p = in.local - in.size * 0.5;

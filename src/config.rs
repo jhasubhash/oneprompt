@@ -1,8 +1,11 @@
 //! Settings file: `~/.config/oneprompt/config.toml` (or `$XDG_CONFIG_HOME`).
 //!
-//! Cmd+, opens it in the default editor (creating it from `template()` first),
-//! and a watcher thread reloads it whenever it is saved, so every setting
-//! applies live. Everything is optional; a missing file means defaults.
+//! Cmd+, opens the settings panel (settings.rs), which writes its changes
+//! here with `apply_edits`, keeping the user's comments and layout; Cmd+O in
+//! the panel opens the file itself in the default editor (creating it from
+//! `template()` first). A watcher thread reloads it whenever it is saved, so
+//! every setting applies live, however it was changed. Everything is
+//! optional; a missing file means defaults.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -331,41 +334,96 @@ fn apply_fonts(theme: &mut Variant, family: &Option<String>, size: Option<f32>, 
     }
 }
 
-/// Makes `id` the theme in the settings file: replaces its `theme = ...`
-/// line, or adds one before the first setting, keeping everything else as
-/// the user wrote it. A missing file is created from the template.
-pub fn save_theme(path: &Path, id: &str) -> std::io::Result<()> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => template(),
-        Err(err) => return Err(err),
-    };
-    let line = format!("theme = \"{id}\"");
-    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
-    // Only top-level lines count: before the first [section].
-    let top = lines.iter().position(|l| l.trim_start().starts_with('[')).unwrap_or(lines.len());
-    let is_theme = |l: &String| l.split('=').next().is_some_and(|k| k.trim() == "theme") && l.contains('=');
-    match lines[..top].iter().position(is_theme) {
-        Some(i) => lines[i] = line,
-        None => {
-            let first = lines[..top].iter().position(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'));
-            lines.insert(first.unwrap_or(top), line);
+/// A value the settings panel writes.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Value {
+    Str(String),
+    Num(f64),
+    Bool(bool),
+}
+
+/// One setting changed in the settings panel: top-level (`section` None)
+/// or in a variant's `[themes.<section>]`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Edit {
+    pub section: Option<String>,
+    pub key: String,
+    pub value: Value,
+}
+
+/// The settings file's text, or the template when there is none yet.
+pub fn read_or_template(path: &Path) -> std::io::Result<String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(template()),
+        Err(err) => Err(err),
+    }
+}
+
+/// `text` with `edits` made, keeping everything else as the user wrote it:
+/// comments (also the one after a changed value), spacing and order. A
+/// setting not in the file yet is added to its table; a variant's section
+/// is found however it is spelled (`[themes."Tsushima Light"]`) or added.
+pub fn apply_edits(text: &str, edits: &[Edit]) -> Result<String, String> {
+    use toml_edit::{DocumentMut, Item, Table};
+    let mut doc: DocumentMut = text.parse().map_err(|e: toml_edit::TomlError| e.message().trim().to_string())?;
+    for edit in edits {
+        let table: &mut dyn toml_edit::TableLike = match &edit.section {
+            None => doc.as_table_mut(),
+            Some(section) => {
+                if !doc.contains_key("themes") {
+                    let mut themes = Table::new();
+                    themes.set_implicit(true);
+                    doc.insert("themes", Item::Table(themes));
+                }
+                let themes = doc["themes"].as_table_like_mut().ok_or("`themes` in the settings file is not a table")?;
+                let name = themes
+                    .iter()
+                    .map(|(name, _)| name.to_string())
+                    .find(|name| key(name) == key(section))
+                    .unwrap_or_else(|| key(section));
+                if !themes.contains_key(&name) {
+                    themes.insert(&name, Item::Table(Table::new()));
+                }
+                themes
+                    .get_mut(&name)
+                    .and_then(Item::as_table_like_mut)
+                    .ok_or_else(|| format!("[themes.{name}] in the settings file is not a table"))?
+            }
+        };
+        let mut value = match &edit.value {
+            Value::Str(s) => toml_edit::Value::from(s.as_str()),
+            // Whole numbers are written as integers, as in the template.
+            Value::Num(n) if n.fract() == 0.0 && n.abs() < 1e9 => toml_edit::Value::from(*n as i64),
+            Value::Num(n) => toml_edit::Value::from(*n),
+            Value::Bool(b) => toml_edit::Value::from(*b),
+        };
+        match table.get_mut(&edit.key).and_then(Item::as_value_mut) {
+            Some(old) => {
+                *value.decor_mut() = old.decor().clone();
+                *old = value;
+            }
+            None => {
+                table.insert(&edit.key, Item::Value(value));
+            }
         }
     }
+    Ok(doc.to_string())
+}
+
+/// Writes the settings file, creating its folder if needed.
+pub fn write(path: &Path, text: &str) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(path, lines.join("\n") + "\n")
+    std::fs::write(path, text)
 }
 
 /// Creates the settings file from the template if needed, then opens it in
 /// the system's default text editor.
 pub fn open_in_editor(path: &Path) -> std::io::Result<()> {
     if !path.exists() {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(path, template())?;
+        write(path, &template())?;
     }
     #[cfg(target_os = "macos")]
     let mut command = {
@@ -507,22 +565,42 @@ mod tests {
     }
 
     #[test]
-    fn saving_a_theme_keeps_the_rest_of_the_file() {
-        let dir = std::env::temp_dir().join(format!("oneprompt-save-theme-{}", std::process::id()));
-        let path = dir.join("config.toml");
-        // No file: the template, with the theme set.
-        save_theme(&path, "chalkboard").unwrap();
-        assert_eq!(Config::load(&path).unwrap().theme.as_deref(), Some("chalkboard"));
-        // An existing line is replaced; a file without one gets one on top.
-        save_theme(&path, "tsushima").unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(text.matches("theme = ").count(), 1);
-        std::fs::write(&path, "# mine\nappearance = \"dark\"\n[themes.tsushima-dark]\nnib = 2\n").unwrap();
-        save_theme(&path, "chalkboard").unwrap();
-        let config = Config::load(&path).unwrap();
-        assert_eq!((config.theme.as_deref(), config.appearance), (Some("chalkboard"), Appearance::Dark));
-        assert!(std::fs::read_to_string(&path).unwrap().starts_with("# mine\ntheme = \"chalkboard\"\n"));
-        std::fs::remove_dir_all(&dir).unwrap();
+    fn edits_keep_the_rest_of_the_file() {
+        let edit = |section: Option<&str>, key: &str, value| Edit { section: section.map(str::to_string), key: key.into(), value };
+        let text = apply_edits(
+            &template(),
+            &[
+                edit(None, "animation_speed", Value::Num(2.5)),
+                edit(None, "animation", Value::Bool(false)),
+                edit(Some("Tsushima Light"), "nib", Value::Num(3.0)),
+                edit(Some("chalkboard-slate"), "font_family", Value::Str("Menlo".into())),
+            ],
+        )
+        .unwrap();
+        // The comment after the changed value stays, and so does the rest.
+        assert!(text.contains("animation_speed = 2.5        # 2 = twice as fast"), "{text}");
+        assert_eq!(text.lines().count(), template().lines().count());
+        let config = Config::parse(&text).unwrap();
+        assert_eq!(config.animation(), (false, 2.5, 500.0));
+        let themes = config.themes();
+        let light = themes.iter().find(|v| v.key() == "tsushima-light").unwrap();
+        assert_eq!(light.param("nib"), 3.0);
+        assert!(text.contains("\nnib = 3\n"));
+
+        // Settings and sections not in the file yet are added, wherever the
+        // section is and however it is spelled.
+        let text = apply_edits(
+            "# mine\n[themes.\"Tsushima Dark\"]\nbleed = 1\n",
+            &[edit(Some("tsushima-dark"), "nib", Value::Num(0.5)), edit(Some("chalkboard-stone"), "grit", Value::Num(0.25)), edit(None, "theme", Value::Str("chalkboard".into()))],
+        )
+        .unwrap();
+        let config = Config::parse(&text).unwrap();
+        assert_eq!(config.theme.as_deref(), Some("chalkboard"));
+        let themes = config.themes();
+        let get = |k: &str, p: &str| themes.iter().find(|v| v.key() == k).unwrap().param(p);
+        assert_eq!((get("tsushima-dark", "bleed"), get("tsushima-dark", "nib"), get("chalkboard-stone", "grit")), (1.0, 0.5, 0.25));
+        assert!(text.contains("# mine\n[themes.\"Tsushima Dark\"]\nbleed = 1\nnib = 0.5\n"), "{text}");
+        assert!(apply_edits("x = = 1", &[]).is_err());
     }
 
     #[test]

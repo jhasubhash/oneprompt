@@ -107,8 +107,8 @@ the theme API in `src/theme/mod.rs` (a test checks that no theme reaches past it
 another theme). A theme implements the `Theme` trait:
 
 - **Variants**: colours, palette, fonts, window controls, and values for its settings.
-- **Settings** it declares (name, range, description): the settings file, its template and
-  its validation are generated from them.
+- **Settings** it declares (name, range, description): the settings file, its template,
+  its validation and the theme's rows in the settings panel are generated from them.
 - **Stages** in WGSL, each a function the framework calls: `surface` (the sheet),
   `theme_ink` (how the ink layer lands on it, with the framework's hand-writing state),
   `theme_shape` (its own shapes: Tsushima's brush dab and sword slash, Chalkboard's chalk
@@ -145,7 +145,7 @@ Milestone 1, a working terminal:
 
 | Key | Action |
 |---|---|
-| Cmd+, | open settings |
+| Cmd+, | settings panel (Cmd+O in it: the settings file) |
 | Cmd+T | new tab (tabs show in the title strip; click one to switch, double-click to rename) |
 | Cmd+1 … Cmd+9 | go to tab 1 … 8, Cmd+9 the last |
 | Cmd+Shift+] / Cmd+Shift+[ | next / previous tab |
@@ -188,10 +188,21 @@ splits.
 
 ## Settings
 
-Cmd+, opens `~/.config/oneprompt/config.toml` in your default text editor, creating it
-with every option set to its built-in value. Saving applies changes immediately; a
-note at the bottom of the window confirms it, or says what is wrong and keeps the previous
-settings.
+Cmd+, (or Settings… in the right-click menu) opens the **settings panel**, a sheet of the
+current theme's own surface down the right of the window, so the terminal stays in view
+and every change shows as you make it. It has the theme and appearance, the variant on
+screen's font, size, weight and line height and its theme's own settings (each theme
+brings its own rows: Tsushima's bleed and nib, Chalkboard's grit and dust, ...), then
+animation and terminal settings. Arrow keys move between rows and change them (Shift for
+fine steps), Return flips a toggle, the pointer clicks and drags, Esc or a click beside it
+closes; Cmd+Shift+L shows the other variant's rows.
+
+Everything the panel changes is written to `~/.config/oneprompt/config.toml`, keeping your
+comments and layout, and the panel always shows what the file says, so you can use either.
+The panel shows where the file is; Cmd+O there (or Edit Settings File… in the menu) opens
+it in your default text editor, creating it with every option set to its built-in value.
+Saving it applies changes immediately; a note at the bottom of the window confirms it, or
+says what is wrong and keeps the previous settings (the panel says so too).
 
 ```toml
 theme = "tsushima"            # tsushima | chalkboard (the picker sets it)
@@ -230,8 +241,9 @@ src/terminal.rs             PTY + alacritty_terminal grid, resize, scroll, paste
 src/input.rs                key presses -> xterm byte sequences
 src/boxdraw.rs              box-drawing and block characters as rectangles
 src/chrome.rs               theme-drawn window controls: layout and hit testing
-src/config.rs               settings file: parsing, theme overrides, live reload
-src/renderer.rs             the passes and each theme's stages: ink layer, surface + cells + ink, transition; the picker
+src/config.rs               settings file: parsing, theme overrides, edits that keep comments, live reload
+src/settings.rs             settings panel: its rows, from the settings and the theme's own, and what changing them writes
+src/renderer.rs             the passes and each theme's stages: ink layer, surface + cells + ink, transition; the picker and settings panel
 src/picker.rs               theme picker: card layout and hit testing
 src/animation.rs            per-cell write times (reading order, scroll-aware) and window transitions
 src/strike.rs               names on screen whose files were deleted, to strike out

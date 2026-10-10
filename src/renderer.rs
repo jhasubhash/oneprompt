@@ -33,6 +33,7 @@ use crate::color;
 use crate::trace::{self, GlyphKey, Slot, Tracer};
 use crate::chrome::{self, Control};
 use crate::picker;
+use crate::settings::{self, Control as Setting, Hit, Item, Part};
 use crate::strike::{Strikes, Struck};
 use crate::terminal::GridSize;
 use crate::theme::{
@@ -432,6 +433,35 @@ struct PickerCard {
     about: Buffer,
 }
 
+/// What the settings panel shows (settings.rs builds the rows).
+pub struct SettingsPanel {
+    pub items: Vec<Item>,
+    /// The row the keyboard is on.
+    pub focus: usize,
+    /// Where the settings file is, as shown.
+    pub path: String,
+    /// Why the settings file could not be read, if it could not.
+    pub error: Option<String>,
+}
+
+/// The settings panel as drawn: what it shows, how far it is scrolled, its
+/// text, and where its controls were in the last frame (for clicks).
+struct SettingsView {
+    panel: SettingsPanel,
+    scroll: f32,
+    /// The row last scrolled into view, and the height it was shown in, so
+    /// the keyboard's row is brought into view once (again if the panel's
+    /// header grows), and scrolling by hand is not undone.
+    shown_focus: Option<(usize, u32)>,
+    texts: Vec<Buffer>,
+    targets: Vec<([f32; 4], Hit)>,
+    /// The panel's box, and the height of its scrolling part and of what
+    /// is in it.
+    bounds: [f32; 4],
+    visible: f32,
+    content: f32,
+}
+
 /// The pipeline that draws pictures (picker previews) into boxes.
 fn picker_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat) -> (wgpu::BindGroupLayout, wgpu::RenderPipeline) {
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -568,6 +598,11 @@ pub struct Renderer {
     picker_text: TextRenderer,
     /// Drawing a picker preview rather than the live screen.
     thumbnail: bool,
+    /// The settings panel, while it is open.
+    settings: Option<SettingsView>,
+    settings_buffer: wgpu::Buffer,
+    /// Installed monospace font families, sorted, once asked for.
+    monospace: Option<Vec<String>>,
 
     font_system: FontSystem,
     swash_cache: SwashCache,
@@ -687,6 +722,7 @@ impl Renderer {
         let picker_text = TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let (picker_layout, picker_pipeline) = picker_pipeline(&device, format);
         let picker_buffer = Self::create_rect_buffer(&device, 64);
+        let settings_buffer = Self::create_rect_buffer(&device, 256);
         let mut text = Buffer::new(&mut font_system, Metrics::new(16.0, 22.0));
         text.borrow_with(&mut font_system).set_wrap(Wrap::None);
         let mut notice_text = Buffer::new(&mut font_system, Metrics::new(12.0, 16.0));
@@ -729,6 +765,9 @@ impl Renderer {
             picker_buffer,
             picker_text,
             thumbnail: false,
+            settings: None,
+            settings_buffer,
+            monospace: None,
             font_system,
             swash_cache,
             viewport,
@@ -1034,6 +1073,34 @@ impl Renderer {
         }
     }
 
+    /// The installed monospace font families, sorted, without the system's
+    /// hidden ones.
+    pub fn monospace_families(&mut self) -> Vec<String> {
+        if let Some(families) = &self.monospace {
+            return families.clone();
+        }
+        let mut families: Vec<String> = self
+            .font_system
+            .db()
+            .faces()
+            .filter(|face| face.monospaced)
+            .filter_map(|face| face.families.first().map(|(name, _)| name.clone()))
+            .filter(|name| !name.starts_with('.'))
+            .collect();
+        families.sort_by_key(|name| name.to_lowercase());
+        families.dedup();
+        self.monospace = Some(families.clone());
+        families
+    }
+
+    /// The weights of `family`'s upright faces, lightest first.
+    pub fn font_weights(&mut self, family: &str) -> Vec<u16> {
+        let mut weights = self.family_info(family).map(|info| info.weights).unwrap_or_default();
+        weights.sort_unstable();
+        weights.dedup();
+        weights
+    }
+
     /// Why a theme's font would not render as a proper grid, if it would not.
     pub fn font_problem(&mut self, family: &str) -> Option<String> {
         match self.family_info(family) {
@@ -1205,6 +1272,7 @@ impl Renderer {
         self.layout(variant, term, strikes);
         self.draw(variant, &view);
         self.draw_picker(variant, &view);
+        self.draw_settings(variant, &view);
         self.queue.present(frame);
         self.atlas.trim();
     }
@@ -1415,6 +1483,373 @@ impl Renderer {
         }
         self.queue.submit(Some(encoder.finish()));
         self.picker = Some(picker);
+    }
+
+    /// Opens the settings panel showing `panel`, updates it, or closes it
+    /// (None). It stays scrolled where it was.
+    pub fn set_settings(&mut self, panel: Option<SettingsPanel>) {
+        let Some(panel) = panel else {
+            self.settings = None;
+            return;
+        };
+        match self.settings.as_mut() {
+            Some(view) => view.panel = panel,
+            None => {
+                self.settings = Some(SettingsView {
+                    panel,
+                    scroll: 0.0,
+                    shown_focus: None,
+                    texts: Vec::new(),
+                    targets: Vec::new(),
+                    bounds: [0.0; 4],
+                    visible: 0.0,
+                    content: 0.0,
+                })
+            }
+        }
+    }
+
+    /// What in the settings panel is at (x, y), physical pixels.
+    pub fn settings_hit(&self, x: f32, y: f32) -> Option<Hit> {
+        let view = self.settings.as_ref()?;
+        let inside = |[bx, by, bw, bh]: [f32; 4]| x >= bx && x < bx + bw && y >= by && y < by + bh;
+        // Later targets sit on top of earlier ones (a row's control on the row).
+        view.targets.iter().rev().find(|(rect, _)| inside(*rect)).map(|(_, hit)| *hit)
+    }
+
+    /// Whether (x, y) is on the settings panel.
+    pub fn settings_contains(&self, x: f32, y: f32) -> bool {
+        self.settings.as_ref().is_some_and(|v| {
+            let [bx, by, bw, bh] = v.bounds;
+            x >= bx && x < bx + bw && y >= by && y < by + bh
+        })
+    }
+
+    /// Scrolls the settings panel by `pixels` (positive: further down).
+    pub fn scroll_settings(&mut self, pixels: f32) {
+        if let Some(view) = self.settings.as_mut() {
+            view.scroll = (view.scroll + pixels).clamp(0.0, (view.content - view.visible).max(0.0));
+        }
+    }
+
+    /// The settings panel down the right of the window: the current look's
+    /// surface, a row per setting in its font and inks, the settings file's
+    /// place at the top and the keys at the bottom. The rows scroll between
+    /// those two.
+    fn draw_settings(&mut self, variant: &Variant, view: &wgpu::TextureView) {
+        let Some(mut panel) = self.settings.take() else { return };
+        let s = self.window.scale_factor() as f32;
+        let (w, h) = (self.config.width as f32, self.config.height as f32);
+        let panel_w = (w * 0.46).clamp(400.0 * s, 560.0 * s).min(w);
+        let left = w - panel_w;
+        let pad = 28.0 * s;
+        let (x0, width) = (left + pad, panel_w - 2.0 * pad);
+        let (ink, accent, surface, quiet) = (variant.ink, variant.cursor, variant.surface_rgb(), variant.palette[8]);
+        let family = variant.font_family.clone();
+        let regular = self.weight_for(&family, variant.font_weight.min(500));
+        let bold = self.weight_for(&family, 700);
+        let attrs = |rgb: [u8; 3], weight: u16| {
+            let [r, g, b] = rgb;
+            Attrs::new().family(Family::Name(&family)).weight(Weight(weight)).color(Color::rgb(r, g, b))
+        };
+
+        // Text is laid out first, as its size decides where things go.
+        // `put` shapes one piece into the next free buffer and returns it
+        // with its width and height.
+        let fs = &mut self.font_system;
+        let texts = &mut panel.texts;
+        let mut used = 0;
+        let mut put = |spans: &[(&str, Attrs)], size: f32, wrap_width: Option<f32>| {
+            if used == texts.len() {
+                texts.push(Buffer::new(fs, Metrics::new(12.0, 16.0)));
+            }
+            let line = (size * 1.35 * s).round();
+            let mut b = texts[used].borrow_with(fs);
+            b.set_metrics(Metrics::new(size * s, line));
+            b.set_wrap(if wrap_width.is_some() { Wrap::Word } else { Wrap::None });
+            b.set_size(Some(wrap_width.unwrap_or(w)), None);
+            b.set_rich_text(spans.iter().map(|(t, a)| (*t, a.clone())), &spans[0].1, Shaping::Advanced, None);
+            b.shape_until_scroll(false);
+            let (mut text_w, mut lines) = (0.0f32, 0);
+            for run in b.layout_runs() {
+                text_w = text_w.max(run.line_w);
+                lines += 1;
+            }
+            used += 1;
+            (used - 1, text_w, lines.max(1) as f32 * line)
+        };
+        // Pieces of text placed: buffer, corner, and whether it scrolls.
+        let mut placed: Vec<(usize, f32, f32, bool)> = Vec::new();
+        // The panel is a fresh piece of the surface (drawn in the pass
+        // below), calmed a little so its words read.
+        let mut fixed = vec![
+            Shape::new(left, 0.0, panel_w, h, surface, 0.45),
+            Shape::new(left, 0.0, (1.0 * s).max(1.0), h, quiet, 0.35),
+        ];
+        let mut targets = Vec::new();
+
+        // The header: the title, the button that opens the file, and where
+        // the file is.
+        let mut y = TITLE_STRIP * s + 12.0 * s;
+        let (title, _, title_h) = put(&[("Settings", attrs(ink, bold))], 20.0, None);
+        placed.push((title, x0, y, false));
+        let (open, open_w, open_h) = put(&[("Open the file", attrs(ink, regular))], 11.5, None);
+        let button = [x0 + width - open_w - 20.0 * s, y + (title_h - open_h) / 2.0 - 4.0 * s, open_w + 20.0 * s, open_h + 8.0 * s];
+        fixed.push(Shape::rounded(button, 5.0 * s, 1.0 * s, quiet, 0.8));
+        placed.push((open, button[0] + 10.0 * s, button[1] + 4.0 * s, false));
+        targets.push((button, Hit::OpenFile));
+        y += title_h + 6.0 * s;
+        let path = panel.panel.path.clone();
+        let (info, _, info_h) = put(
+            &[
+                ("Saved in ", attrs(quiet, regular)),
+                (&path, attrs(ink, regular)),
+                (". Edit it directly if you prefer: what you save there shows up here.", attrs(quiet, regular)),
+            ],
+            11.5,
+            Some(width),
+        );
+        placed.push((info, x0, y, false));
+        y += info_h;
+        if let Some(error) = panel.panel.error.clone() {
+            y += 6.0 * s;
+            let red = variant.palette[1];
+            let text = format!("The file has a mistake, so it is not applied: {error}");
+            let (e, _, e_h) = put(&[(&text, attrs(red, regular))], 11.5, Some(width));
+            placed.push((e, x0, y, false));
+            y += e_h;
+        }
+        y += 12.0 * s;
+        fixed.push(Shape::new(x0, y - 1.0 * s, width, (1.0 * s).max(1.0), quiet, 0.3));
+        let top = y;
+
+        // The footer: the keys.
+        let (keys, keys_w, keys_h) = put(
+            &[("\u{2191}\u{2193} choose    \u{2190}\u{2192} change    \u{2318}O the file    esc close", attrs(quiet, regular))],
+            11.0,
+            None,
+        );
+        let bottom = h - keys_h - 22.0 * s;
+        placed.push((keys, left + (panel_w - keys_w) / 2.0, h - keys_h - 14.0 * s, false));
+        fixed.push(Shape::new(x0, bottom, width, (1.0 * s).max(1.0), quiet, 0.3));
+
+        // The rows, from y = 0 at the top of the scrolling part.
+        let control_w = (width * 0.48).min(230.0 * s);
+        let control_h = 26.0 * s;
+        let text_w = width - control_w - 18.0 * s;
+        let cx = x0 + width - control_w;
+        let mut scrolled = Vec::new();
+        let mut row_targets: Vec<([f32; 4], Hit)> = Vec::new();
+        let mut focus_box = None;
+        let mut y = 4.0 * s;
+        let focus = panel.panel.focus;
+        for (index, item) in panel.panel.items.iter().enumerate() {
+            match item {
+                Item::Heading { title, note } => {
+                    if index > 0 {
+                        y += 18.0 * s;
+                    }
+                    let (t, t_w, t_h) = put(&[(title, attrs(ink, bold))], 12.5, None);
+                    placed.push((t, x0, y, true));
+                    y += t_h;
+                    // The note beside the heading, or under it if it does not fit.
+                    if !note.is_empty() {
+                        let (n, n_w, n_h) = put(&[(note, attrs(quiet, regular))], 11.0, Some(width));
+                        if t_w + 10.0 * s + n_w <= width && n_h < t_h * 1.2 {
+                            placed.push((n, x0 + t_w + 10.0 * s, y - t_h + (t_h - n_h) / 2.0 + 1.0 * s, true));
+                        } else {
+                            placed.push((n, x0, y + 1.0 * s, true));
+                            y += n_h + 1.0 * s;
+                        }
+                    }
+                    y += 4.0 * s;
+                }
+                Item::Row(row) => {
+                    let focused = index == focus;
+                    // The label and control on one line, what it does below.
+                    let row_top = y;
+                    let cy = row_top + 8.0 * s;
+                    let (l, _, l_h) = put(&[(&row.label, attrs(if focused { accent } else { ink }, regular))], 13.0, Some(text_w));
+                    placed.push((l, x0, cy + (control_h - l_h) / 2.0, true));
+                    let mut row_h = control_h + 16.0 * s;
+                    if !row.about.is_empty() {
+                        let (a, _, a_h) = put(&[(&row.about, attrs(quiet, regular))], 11.0, Some(width));
+                        placed.push((a, x0, cy + control_h + 3.0 * s, true));
+                        row_h += a_h + 3.0 * s;
+                    }
+                    let row_box = [x0 - 10.0 * s, row_top, width + 20.0 * s, row_h];
+                    if focused {
+                        scrolled.push(Shape::rounded(row_box, 8.0 * s, 0.0, accent, 0.08));
+                        focus_box = Some((row_top, row_top + row_h));
+                    }
+                    row_targets.push((row_box, Hit::Row(index, Part::Label)));
+                    let line = (11.5 * 1.35 * s).round();
+                    let text_y = cy + (control_h - line) / 2.0;
+                    let control = [cx, cy, control_w, control_h];
+                    match &row.control {
+                        Setting::Choice { labels, index: chosen, .. } if labels.len() <= settings::SEGMENTS => {
+                            scrolled.push(Shape::rounded(control, 6.0 * s, 1.0 * s, quiet, 0.7));
+                            let segment = control_w / labels.len() as f32;
+                            for (i, text) in labels.iter().enumerate() {
+                                let on = i == *chosen;
+                                let sx = cx + i as f32 * segment;
+                                if on {
+                                    let b = [sx + 2.5 * s, cy + 2.5 * s, segment - 5.0 * s, control_h - 5.0 * s];
+                                    scrolled.push(Shape::rounded(b, 4.5 * s, 0.0, ink, 0.9));
+                                }
+                                let (t, t_w, _) = put(&[(text, attrs(if on { surface } else { ink }, regular))], 11.5, None);
+                                placed.push((t, sx + (segment - t_w) / 2.0, text_y, true));
+                                row_targets.push(([sx, cy, segment, control_h], Hit::Row(index, Part::Option(i))));
+                            }
+                        }
+                        Setting::Choice { .. } => {
+                            scrolled.push(Shape::rounded(control, 6.0 * s, 1.0 * s, quiet, 0.7));
+                            let arrow = 28.0 * s;
+                            let (p, p_w, _) = put(&[("\u{2039}", attrs(ink, regular))], 13.0, None);
+                            let (n, n_w, _) = put(&[("\u{203a}", attrs(ink, regular))], 13.0, None);
+                            let arrow_y = cy + (control_h - (13.0 * 1.35 * s).round()) / 2.0;
+                            placed.push((p, cx + (arrow - p_w) / 2.0, arrow_y, true));
+                            placed.push((n, cx + control_w - (arrow + n_w) / 2.0, arrow_y, true));
+                            let (v, v_w, _) = put(&[(&row.value_text(), attrs(ink, regular))], 11.5, None);
+                            placed.push((v, cx + (control_w - v_w.min(control_w - 2.0 * arrow)) / 2.0, text_y, true));
+                            row_targets.push((control, Hit::Row(index, Part::Next)));
+                            row_targets.push(([cx, cy, arrow, control_h], Hit::Row(index, Part::Previous)));
+                        }
+                        &Setting::Toggle(on) => {
+                            let (tw, th) = (38.0 * s, 22.0 * s);
+                            let (tx, ty) = (cx + control_w - tw, cy + (control_h - th) / 2.0);
+                            let knob = th / 2.0 - 3.5 * s;
+                            if on {
+                                scrolled.push(Shape::rounded([tx, ty, tw, th], th / 2.0, 0.0, accent, 1.0));
+                                scrolled.push(Shape::round(DISC, tx + tw - th / 2.0, ty + th / 2.0, knob, surface, 1.0));
+                            } else {
+                                scrolled.push(Shape::rounded([tx, ty, tw, th], th / 2.0, 1.2 * s, quiet, 0.9));
+                                scrolled.push(Shape::round(DISC, tx + th / 2.0, ty + th / 2.0, knob, quiet, 0.9));
+                            }
+                            row_targets.push((control, Hit::Row(index, Part::Toggle)));
+                        }
+                        &Setting::Slider { value, min, max, .. } => {
+                            let value_w = 50.0 * s;
+                            let track_w = control_w - value_w - 10.0 * s;
+                            let along = ((value - min) / (max - min).max(1e-6)).clamp(0.0, 1.0);
+                            let mid = cy + control_h / 2.0;
+                            let track_h = 3.0 * s;
+                            scrolled.push(Shape::rounded([cx, mid - track_h / 2.0, track_w, track_h], track_h / 2.0, 0.0, quiet, 0.45));
+                            scrolled.push(Shape::rounded(
+                                [cx, mid - track_h / 2.0, track_w * along, track_h],
+                                track_h / 2.0,
+                                0.0,
+                                accent,
+                                0.9,
+                            ));
+                            scrolled.push(Shape::round(DISC, cx + track_w * along, mid, 7.0 * s, accent, 1.0));
+                            let (v, v_w, _) = put(&[(&row.value_text(), attrs(ink, regular))], 11.5, None);
+                            placed.push((v, cx + control_w - v_w, text_y, true));
+                            row_targets.push((
+                                [cx - 10.0 * s, cy, track_w + 20.0 * s, control_h],
+                                Hit::Row(index, Part::Slider(cx, track_w)),
+                            ));
+                        }
+                    }
+                    y += row_h;
+                }
+            }
+        }
+        let content = y + 12.0 * s;
+
+        // Scroll: the keyboard's row into view when it moves, then keep
+        // within the rows.
+        let visible = bottom - top;
+        if panel.shown_focus != Some((focus, visible as u32)) {
+            if let Some((a, b)) = focus_box {
+                if a < panel.scroll {
+                    panel.scroll = a - 8.0 * s;
+                } else if b > panel.scroll + visible {
+                    panel.scroll = b - visible + 8.0 * s;
+                }
+            }
+            panel.shown_focus = Some((focus, visible as u32));
+        }
+        panel.scroll = panel.scroll.clamp(0.0, (content - visible).max(0.0));
+        let shift = top - panel.scroll;
+        for shape in &mut scrolled {
+            shape.rect[1] += shift;
+        }
+        if content > visible {
+            let bar_h = (visible * visible / content).max(24.0 * s);
+            let bar_y = top + (visible - bar_h) * panel.scroll / (content - visible);
+            fixed.push(Shape::rounded([w - 7.0 * s, bar_y, 3.0 * s, bar_h], 1.5 * s, 0.0, quiet, 0.4));
+        }
+        // Click targets: only what can be seen, cut to the scrolling part.
+        panel.targets = targets;
+        for ([tx, ty, tw, th], hit) in row_targets {
+            let (a, b) = ((ty + shift).max(top), (ty + th + shift).min(bottom));
+            if b > a {
+                panel.targets.push(([tx, a, tw, b - a], hit));
+            }
+        }
+        panel.bounds = [left, 0.0, panel_w, h];
+        (panel.visible, panel.content) = (visible, content);
+
+        let n_fixed = fixed.len() as u32;
+        let shapes: Vec<Shape> = fixed.into_iter().chain(scrolled).collect();
+        let needed = (shapes.len() * std::mem::size_of::<Shape>()) as u64;
+        if needed > self.settings_buffer.size() {
+            self.settings_buffer = Self::create_rect_buffer(&self.device, shapes.len().next_power_of_two());
+        }
+        self.queue.write_buffer(&self.settings_buffer, 0, bytemuck::cast_slice(&shapes));
+
+        let all = TextBounds { left: left as i32, top: 0, right: w as i32, bottom: h as i32 };
+        let rows = TextBounds { left: left as i32, top: top as i32, right: w as i32, bottom: bottom as i32 };
+        let areas = placed.iter().map(|&(i, x, y, scrolls)| TextArea {
+            buffer: &panel.texts[i],
+            left: x,
+            top: if scrolls { y + shift } else { y },
+            scale: 1.0,
+            bounds: if scrolls { rows } else { all },
+            default_color: Color::rgb(0, 0, 0),
+            custom_glyphs: &[],
+        });
+        self.picker_text
+            .prepare(&self.device, &self.queue, &mut self.font_system, &mut self.atlas, &self.viewport, areas, &mut self.swash_cache)
+            .expect("prepare settings text");
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("settings") });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("settings"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            let stages = &self.stages[variant.theme.id()];
+            let panel_x = left.max(0.0) as u32;
+            pass.set_bind_group(0, &self.frame_group, &[]);
+            pass.set_scissor_rect(panel_x, 0, self.config.width - panel_x.min(self.config.width), self.config.height);
+            pass.set_pipeline(&stages.surface);
+            pass.draw(0..3, 0..1);
+            pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
+            pass.set_vertex_buffer(0, self.settings_buffer.slice(..needed));
+            pass.set_pipeline(&stages.shapes);
+            pass.draw(0..4, 0..n_fixed);
+            let (sx, sy) = (panel_x, top.max(0.0) as u32);
+            let (sw, sh) = (panel_w as u32, (bottom - top).max(0.0) as u32);
+            if sw > 0 && sh > 0 && sx + sw <= self.config.width && sy + sh <= self.config.height {
+                pass.set_scissor_rect(sx, sy, sw, sh);
+                pass.draw(0..4, n_fixed..shapes.len() as u32);
+                pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
+            }
+            self.picker_text.render(&self.atlas, &self.viewport, &mut pass).expect("render settings text");
+        }
+        self.queue.submit(Some(encoder.finish()));
+        self.settings = Some(panel);
     }
 
     /// Renders `frames` stills of a light / dark switch from `from` to `to`,
