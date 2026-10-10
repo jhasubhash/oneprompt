@@ -73,6 +73,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
     <key>LSMinimumSystemVersion</key><string>11.0</string>
     <key>NSHighResolutionCapable</key><true/>
+$(cat scripts/usage-strings.plist)
     <key>NSHumanReadableCopyright</key><string>Copyright 2026 Subhash Jha</string>
 </dict>
 </plist>

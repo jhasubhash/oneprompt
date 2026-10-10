@@ -3,15 +3,17 @@
 # launching from Spotlight, Launchpad or the Dock.
 #
 # The app's executable is a symlink to this checkout's release build, so it
-# never needs remaking: every `cargo build --release` is what the app runs
-# next time it opens. Rerun this only to move the app or change its icon.
+# never needs remaking: every scripts/build.sh is what the app runs next time
+# it opens (build.sh signs it, so macOS keeps the permissions granted to it;
+# a plain `cargo build --release` works too but loses them). Rerun this only
+# to move the app, change its icon or its Info.plist.
 set -e
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
 dest=${1:-$HOME/Applications}
 app="$dest/oneprompt.app"
 
-cargo build --release --manifest-path "$repo/Cargo.toml"
+"$repo/scripts/build.sh"
 
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
@@ -43,6 +45,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <key>CFBundleVersion</key><string>1</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
     <key>NSHighResolutionCapable</key><true/>
+$(cat "$repo/scripts/usage-strings.plist")
 </dict>
 </plist>
 PLIST

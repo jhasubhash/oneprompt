@@ -1,0 +1,15 @@
+    <!-- What macOS shows when a program run in oneprompt asks for access
+         (Claude Code, a script reading Photos, ...): the terminal is the
+         app asking, as with Terminal and iTerm. -->
+    <key>NSPhotoLibraryUsageDescription</key><string>A program running in oneprompt wants to use your photos.</string>
+    <key>NSDesktopFolderUsageDescription</key><string>A program running in oneprompt wants to use files on your Desktop.</string>
+    <key>NSDocumentsFolderUsageDescription</key><string>A program running in oneprompt wants to use files in Documents.</string>
+    <key>NSDownloadsFolderUsageDescription</key><string>A program running in oneprompt wants to use files in Downloads.</string>
+    <key>NSRemovableVolumesUsageDescription</key><string>A program running in oneprompt wants to use files on a removable volume.</string>
+    <key>NSNetworkVolumesUsageDescription</key><string>A program running in oneprompt wants to use files on a network volume.</string>
+    <key>NSAppleEventsUsageDescription</key><string>A program running in oneprompt wants to control another app.</string>
+    <key>NSCameraUsageDescription</key><string>A program running in oneprompt wants to use the camera.</string>
+    <key>NSMicrophoneUsageDescription</key><string>A program running in oneprompt wants to use the microphone.</string>
+    <key>NSContactsUsageDescription</key><string>A program running in oneprompt wants to use your contacts.</string>
+    <key>NSCalendarsUsageDescription</key><string>A program running in oneprompt wants to use your calendars.</string>
+    <key>NSRemindersUsageDescription</key><string>A program running in oneprompt wants to use your reminders.</string>

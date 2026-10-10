@@ -8,7 +8,7 @@ pitch; docs/GUIDE.md describes every feature, setting and the source layout.
 ## Build and check
 
 ```sh
-cargo build --release          # the build everything runs; always release
+scripts/build.sh               # cargo build --release, signed so macOS keeps the app's permissions
 cargo test --release
 cargo clippy --release         # keep it warning-free
 ```
@@ -31,7 +31,11 @@ cargo clippy --release         # keep it warning-free
    pkill -x oneprompt; open ~/Applications/oneprompt.app
    ```
    The bundle's executable links to `target/release/oneprompt` (`scripts/make-app.sh`), so
-   it never needs remaking after a build.
+   it never needs remaking after a build. Build with `scripts/build.sh`, not a bare
+   `cargo build --release`: it signs the binary with the Developer ID certificate and a fixed
+   identifier, and macOS keys the permissions programs ask for in the terminal (Photos,
+   folders) on that signature; an ad-hoc build is a new app to it, and every permission is
+   asked for again.
 
 4. **Keep the docs current**: update docs/GUIDE.md whenever the code changes make it stale
    (features, settings, source layout, build steps), in the same change. Keep README.md

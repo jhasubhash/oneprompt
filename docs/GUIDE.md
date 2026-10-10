@@ -290,7 +290,10 @@ scripts/make-app.sh            # ~/Applications/oneprompt.app; pass another fold
 ```
 
 The bundle's executable is a symlink to `target/release/oneprompt`, so it always runs the
-latest `cargo build --release`: no need to remake it after changes.
+latest build: no need to remake it after changes. Build with `scripts/build.sh`: it signs
+the binary with your Developer ID certificate under a fixed identifier, so macOS remembers
+the permissions programs in the terminal ask for (Photos, folders, ...) from one build to
+the next. A plain `cargo build --release` is ad-hoc signed, a new app to macOS each time.
 
 To make a release, `scripts/release.sh` builds a self-contained universal app and a
 signed, notarized `target/dist/oneprompt-<version>.dmg` (setup steps are at the top of
