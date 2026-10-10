@@ -597,6 +597,10 @@ impl App {
                 let text = arboard::Clipboard::new().and_then(|mut c| c.get_text());
                 if let (Ok(text), Some(t)) = (text, self.terminal()) {
                     t.paste(&text);
+                    let chars = text.chars().count();
+                    if let Some(r) = self.renderer.as_mut() {
+                        r.pasted(chars);
+                    }
                 }
             }
             Action::SelectAll => {
@@ -1090,6 +1094,7 @@ impl App {
             r.set_idle(config.idle_scene.unwrap_or(true).then(|| config.idle_after.unwrap_or(60.0)));
             r.set_effects(config.close_effect.unwrap_or(true), config.clear_effect.unwrap_or(true));
             r.set_cursor_life(config.cursor_trail.unwrap_or(true), config.cursor_pulse.unwrap_or(true));
+            r.set_splash(config.paste_splash.unwrap_or(true));
         }
         // ONEPROMPT_SEED (used for screenshots) wins over the file.
         if std::env::var_os("ONEPROMPT_SEED").is_none()

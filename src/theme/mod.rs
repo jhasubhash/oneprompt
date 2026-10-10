@@ -124,6 +124,14 @@ pub trait Theme: Sync + 'static {
     /// Draws what happens on the window while nobody is using it (see
     /// [`IdleSpan`]), until a key or a click sweeps it away.
     fn draw_idle(&self, _variant: &Variant, _ctx: &Ctx, _span: &IdleSpan, _out: &mut Vec<Shape>) {}
+    /// How long a paste's splash (see [`Theme::draw_splash`]) lasts,
+    /// seconds at speed 1; 0: the theme has none.
+    fn splash_time(&self) -> f32 {
+        0.0
+    }
+    /// Draws the splash of ink pasted text lands with, at `span.cell` (the
+    /// cursor where it was pasted), `span.age` seconds in.
+    fn draw_splash(&self, _variant: &Variant, _ctx: &Ctx, _span: &SplashSpan, _out: &mut Vec<Shape>) {}
     /// How long a stamp takes to land (see [`Theme::draw_stamp`]), seconds
     /// at speed 1.
     fn stamp_time(&self) -> f32 {
@@ -258,6 +266,18 @@ pub fn plain_stamp(variant: &Variant, ctx: &Ctx, span: &CommandSpan, out: &mut V
     let r = h * 0.42 * (1.4 - 0.4 * span.progress);
     let rgb = if span.failed { variant.palette[1] } else { variant.cursor };
     out.push(Shape::round(RING, x + w * 1.5, y + h * 0.5, r, rgb, 0.9 * span.progress).stroke(2.0 * ctx.scale));
+}
+
+/// A paste landing.
+#[derive(Clone, Copy, Debug)]
+pub struct SplashSpan {
+    /// The cursor's cell where the text was pasted (x, y, w, h), physical
+    /// pixels, and how many cells of text it brought (a rough reach).
+    pub cell: [f32; 4],
+    pub reach: f32,
+    /// Seconds since the paste, at speed 1.
+    pub age: f32,
+    pub seed: f32,
 }
 
 /// The idle scene as it stands.

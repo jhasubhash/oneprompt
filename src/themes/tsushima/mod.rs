@@ -12,7 +12,7 @@ mod brush;
 
 use crate::theme::{
     self, CommandSpan, ControlStyle, Controls, Ctx, Cursor, CursorKind, DividerSpan, IdleSpan, Param, Plan, Rng, Shape,
-    Shaders, Strike, StrikeSpan, Theme, Variant, CUSTOM, DISC,
+    Shaders, SplashSpan, Strike, StrikeSpan, Theme, Variant, CUSTOM, DISC,
 };
 
 use brush::{Brush, PlanData};
@@ -27,6 +27,8 @@ const SLASH: f32 = CUSTOM + 1.0;
 const CUT: f32 = CUSTOM + 2.0;
 const SEAL: f32 = CUSTOM + 3.0;
 const LEAF: f32 = CUSTOM + 4.0;
+/// A paste's splash soaks into the paper over this long, at speed 1.
+const SPLASH_TIME: f32 = 1.0;
 /// Leaves that fall onto an idle window, one about every LEAF_GAP seconds.
 const LEAVES: usize = 9;
 const LEAF_GAP: f32 = 2.4;
@@ -330,6 +332,38 @@ impl Theme for Tsushima {
 
     fn stamp_time(&self) -> f32 {
         STAMP_TIME
+    }
+
+    fn splash_time(&self) -> f32 {
+        SPLASH_TIME
+    }
+
+    /// Pasted text lands as a splash of sumi: a burst of drops thrown out
+    /// from where it lands, along the line it fills, that hit the paper and
+    /// soak in as the letters appear out of the wet.
+    fn draw_splash(&self, v: &Variant, _ctx: &Ctx, span: &SplashSpan, out: &mut Vec<Shape>) {
+        let [x, y, cw, ch] = span.cell;
+        let mut rng = Rng::new(span.seed.to_bits() as u64 * 0x51_7cc1 + 9);
+        let length = (span.reach.min(60.0) * cw).max(cw * 4.0);
+        let drops = 10 + (span.reach.min(60.0) / 3.0) as usize;
+        let soak = (span.age / SPLASH_TIME).clamp(0.0, 1.0);
+        for _ in 0..drops {
+            let along = rng.unit();
+            let throw = rng.range(0.15, 0.65);
+            let angle = rng.range(-2.6, 2.6);
+            let reach = ch * rng.range(0.2, 1.4);
+            let r = ch * rng.range(0.06, 0.24);
+            let flight = 0.08 + throw * 0.12;
+            let u = (span.age / flight).clamp(0.0, 1.0);
+            let eased = 1.0 - (1.0 - u) * (1.0 - u);
+            let (cx, cy) = (x + along * length + angle.cos() * reach * eased, y + ch * 0.5 + angle.sin() * reach * eased);
+            // Soaking in: the ink stage firms up faint ink, so it fades early.
+            let alpha = 0.75 * (1.0 - soak).powf(1.6);
+            out.push(Shape::round(DISC, cx, cy, r * (0.6 + 0.4 * u) * (1.0 + 0.5 * soak), v.ink, alpha).rough(0.4, span.seed + along * 13.0));
+        }
+        // The wash the text lands in, soaking away.
+        let wash = 0.3 * (1.0 - soak);
+        out.push(dab(x - cw * 0.3, y - ch * 0.1, length + cw * 0.6, ch * 1.2, v.ink, wash).rough(1.0, span.seed));
     }
 
     fn idle_time(&self) -> f32 {

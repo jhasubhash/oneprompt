@@ -91,6 +91,8 @@ pub struct Config {
     /// while it is still. Default on.
     pub cursor_trail: Option<bool>,
     pub cursor_pulse: Option<bool>,
+    /// Pasted text lands at once, as a splash of ink. Default on.
+    pub paste_splash: Option<bool>,
     /// Closing a tab or the window, and clearing the screen (Cmd+K), the
     /// theme's way. Default on.
     pub close_effect: Option<bool>,
@@ -170,6 +172,10 @@ ink_aging = 0.3
 # a heart, so it is easy to find.
 cursor_trail = true
 cursor_pulse = true
+
+# Pasted text lands all at once, as a splash of ink that settles into the
+# letters (a puff of chalk on the Chalkboard), instead of being written in.
+paste_splash = true
 
 # Closing a tab or the window burns its sheet away in Tsushima and wipes it off
 # the Chalkboard. Clearing the screen (Cmd+K) cuts it in two with a sword in

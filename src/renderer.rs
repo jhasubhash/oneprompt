@@ -56,6 +56,8 @@ const PADDING: f32 = 24.0;
 const FULL_SCREEN_MIN: (usize, usize) = (80, 24);
 /// Text shrinks to no less than this share of its size.
 const MIN_FIT: f32 = 0.5;
+/// Output this soon after a paste is the pasted text (seconds at speed 1).
+const PASTE_LANDS: f32 = 0.4;
 /// A jumping cursor's trail fades over this long; a still one starts
 /// beating after PULSE_AFTER, once every PULSE_PERIOD (seconds at speed 1).
 const TRAIL_TIME: f32 = 0.5;
@@ -623,6 +625,11 @@ pub struct Renderer {
     trail_until: f32,
     /// The focused pane's cursor is beating (the app wakes for it).
     pulsing: bool,
+    /// The last paste: the pane, the cursor's cell then, how long the text
+    /// was, and when; whether pastes splash at all.
+    paste: Option<(u64, [f32; 4], f32, f32)>,
+    splash: bool,
+    splash_until: f32,
     /// Whether struck names fling blood.
     splatter: bool,
     /// Every pane's grid and writing state, by pane id, and the one being
@@ -632,6 +639,8 @@ pub struct Renderer {
     pane: u64,
     pane_rect: [f32; 4],
     pane_focused: bool,
+    /// The pane with the keyboard, as last drawn.
+    focused_pane: u64,
     /// Drawn over every pane's ink with the last one: a veil over the
     /// panes without the keyboard.
     after_ink: Vec<Shape>,
@@ -846,11 +855,15 @@ impl Renderer {
             cursor_life: (true, true),
             trail_until: f32::NEG_INFINITY,
             pulsing: false,
+            paste: None,
+            splash: true,
+            splash_until: f32::NEG_INFINITY,
             splatter: true,
             panes: HashMap::new(),
             pane: 0,
             pane_rect: [0.0, 0.0, config_size.0, config_size.1],
             pane_focused: true,
+            focused_pane: 0,
             after_ink: Vec::new(),
             chrome_ink: Vec::new(),
             divider_births: HashMap::new(),
@@ -1300,6 +1313,20 @@ impl Renderer {
         self.cursor_life = (trail, pulse);
     }
 
+    /// Whether pasted text lands as a splash of ink.
+    pub fn set_splash(&mut self, on: bool) {
+        self.splash = on;
+    }
+
+    /// `chars` characters were pasted into the focused pane: they land at
+    /// once, with the theme's splash.
+    pub fn pasted(&mut self, chars: usize) {
+        if !self.splash || !self.animation.0 {
+            return;
+        }
+        self.paste = Some((self.focused_pane, self.cursor_cell, chars as f32, self.now()));
+    }
+
     /// The cursor is beating: the app should wake now and then to draw it.
     pub fn is_pulsing(&self) -> bool {
         self.pulsing && self.window.has_focus()
@@ -1334,6 +1361,7 @@ impl Renderer {
             || now < self.marks_until
             || now < self.idle_until
             || now < self.trail_until
+            || now < self.splash_until
             || (self.animation.0
                 && self.panes.values().any(|p| now - p.animator.latest_birth() < (write_time * 4.0).max(settle_time)))
     }
@@ -2918,6 +2946,7 @@ impl Renderer {
         let ctx = self.ctx();
         if cursor_line >= 0 && !self.thumbnail && self.pane_focused {
             self.cursor_cell = [cell_x(cursor_col), cell_y(cursor_line as usize), cw, ch];
+            self.focused_pane = self.pane;
         }
         if cursor_line >= 0 && cursor_shape != CursorShape::Hidden {
             let kind = match cursor_shape {
@@ -2975,6 +3004,18 @@ impl Renderer {
                 overlay.push(Shape::new(cell_x(col), y, cw * len as f32, (ch * 0.07).max(1.0), variant.cursor, 1.0));
             }
         }
+        // A paste's splash, where it landed.
+        if let Some((pane, cell, chars, at)) = self.paste
+            && pane == self.pane
+        {
+            let time = variant.theme.splash_time();
+            let age = (self.now() - at) * self.animation.1;
+            if age < time {
+                self.splash_until = self.splash_until.max(at + time / self.animation.1);
+                let span = api::SplashSpan { cell, reach: chars.min(columns as f32 * 3.0), age, seed: (at * 7.31).fract() * 89.0 + 1.0 };
+                variant.theme.draw_splash(variant, &ctx, &span, &mut overlay);
+            }
+        }
         // Commands marked at their prompts, as the theme marks them: a
         // failure beside it, a stamp after a long one.
         if let Some(commands) = self.commands.get(&self.pane) {
@@ -3028,6 +3069,8 @@ impl Renderer {
             speed: self.writing_speed,
             max_duration: MAX_WRITE / self.animation.1,
             instant: term.mode().contains(TermMode::ALT_SCREEN),
+            // Text pasted in the last moment lands together, as one splash.
+            together: self.paste.is_some_and(|(pane, _, _, at)| pane == self.pane && (now - at) * self.animation.1 < PASTE_LANDS),
         };
         // A preview shows the screen as it is: no writing in, and it leaves
         // the live screen's record of what was written alone.

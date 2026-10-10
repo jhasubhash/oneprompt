@@ -345,6 +345,12 @@ pub fn items(config: &Config, variant: &Variant, fonts: &Fonts) -> Vec<Item> {
         "cursor_pulse",
     ));
     items.push(top(
+        "Paste splash",
+        "Pasted text lands at once, as a splash of ink that settles into letters.",
+        Control::Toggle(config.paste_splash.unwrap_or(true)),
+        "paste_splash",
+    ));
+    items.push(top(
         "Closing",
         "A closed tab or window burns away, or is wiped off the board.",
         Control::Toggle(config.close_effect.unwrap_or(true)),

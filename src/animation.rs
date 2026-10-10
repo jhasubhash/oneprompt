@@ -28,6 +28,8 @@ pub struct Writing {
     pub max_duration: f32,
     /// Full-screen apps (vim, htop, ...): no writing, everything at once.
     pub instant: bool,
+    /// Just pasted: everything new lands at once, wet (a splash of ink).
+    pub together: bool,
 }
 
 #[derive(Default)]
@@ -91,7 +93,7 @@ impl TextAnimator {
                 let per = (1.0 / writing.speed.max(1.0)).min(writing.max_duration / steps.max(1.0));
                 let mut t = now;
                 for (k, &(i, col)) in written.iter().enumerate() {
-                    if k > 0 {
+                    if k > 0 && !writing.together {
                         let new_line = written[k - 1].0 != i;
                         t += per * if new_line { 1.0 + LINE_PAUSE } else { 1.0 };
                     }
@@ -207,7 +209,7 @@ mod tests {
             .collect()
     }
 
-    const WRITE: Writing = Writing { enabled: true, speed: 100.0, max_duration: 1.5, instant: false };
+    const WRITE: Writing = Writing { enabled: true, speed: 100.0, max_duration: 1.5, instant: false, together: false };
 
     #[test]
     fn first_frame_is_settled() {

@@ -97,6 +97,9 @@ light or dark palette.
   Chalkboard; left still for two seconds it beats gently, like a heart (a double beat
   every 1.4 s), so it is easy to find. The beat redraws 20 times a second, only while the
   window has focus. `cursor_trail = false` and `cursor_pulse = false` turn them off.
+- **Paste splashes**: pasted text lands all at once, as a splash of sumi thrown out along
+  the line it fills that soaks into the paper as the letters appear (a puff of chalk dust
+  on the Chalkboard), instead of being written in. `paste_splash = false` turns it off.
 - **Closing burns the sheet**: closing a tab or the window takes its sheet away the theme's
   way. Tsushima sets it alight near a corner: a ragged front of fire spreads across it,
   browning and charring the paper ahead and leaving ash and embers, the next tab showing
@@ -169,7 +172,8 @@ another theme). A theme implements the `Theme` trait:
   `cursor`, `strike` / `draw_strike` (a deleted name),
   `draw_divider` (the line between split panes, drawn in when the split is made), and
   `mark_time` / `draw_failure` (a command that failed, beside its prompt) and
-  `stamp_time` / `draw_stamp` (a long command that finished), and `idle_time` /
+  `stamp_time` / `draw_stamp` (a long command that finished), `splash_time` /
+  `draw_splash` (pasted text landing), and `idle_time` /
   `draw_idle` (what happens on a window nobody is using).
 
 Adding a theme is a folder with a `mod.rs` and its shaders, and a line in
@@ -292,6 +296,7 @@ drying_time = 4               # seconds
 ink_aging = 0.3               # how far ink an hour old fades, 0..1
 cursor_trail = true           # the cursor flicks a trail when it jumps
 cursor_pulse = true           # a still cursor beats gently
+paste_splash = true           # pasted text lands as a splash of ink
 close_effect = true           # closing burns / wipes the sheet away
 clear_effect = true           # Cmd+K cuts the screen in two / sweeps it
 idle_scene = true             # leaves fall / dust settles on an idle window

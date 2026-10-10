@@ -9,7 +9,7 @@
 
 use crate::theme::{
     self, CommandSpan, ControlStyle, Controls, Ctx, Cursor, CursorKind, DividerSpan, IdleSpan, Param, Plan, Rng, Shape,
-    Shaders, Strike, StrikeSpan, Theme, Variant, CUSTOM, DISC, RING,
+    Shaders, SplashSpan, Strike, StrikeSpan, Theme, Variant, CUSTOM, DISC, RING,
 };
 
 pub static CHALKBOARD: Chalkboard = Chalkboard;
@@ -28,6 +28,8 @@ const TICK_TIME: f32 = 0.55;
 /// Motes of chalk dust that settle on an idle board, over this long.
 const MOTES: usize = 70;
 const SETTLING: f32 = 24.0;
+/// A paste's puff of dust settles over this long.
+const PUFF_TIME: f32 = 0.8;
 /// A new divider between panes is ruled in this fast, at speed 1.
 const RULE_TIME: f32 = 0.45;
 
@@ -270,6 +272,27 @@ impl Theme for Chalkboard {
 
     fn stamp_time(&self) -> f32 {
         TICK_TIME
+    }
+
+    fn splash_time(&self) -> f32 {
+        PUFF_TIME
+    }
+
+    /// Pasted text lands in a puff of chalk dust that billows out along the
+    /// line and settles.
+    fn draw_splash(&self, v: &Variant, ctx: &Ctx, span: &SplashSpan, out: &mut Vec<Shape>) {
+        let [x, y, cw, ch] = span.cell;
+        let mut rng = Rng::new(span.seed.to_bits() as u64 + 77);
+        let length = (span.reach.min(60.0) * cw).max(cw * 4.0);
+        let t = (span.age / PUFF_TIME).clamp(0.0, 1.0);
+        for _ in 0..40 {
+            let along = rng.unit();
+            let (dx, dy) = (rng.range(-1.0, 1.0), rng.range(-1.0, 1.0));
+            let spread = ch * (0.3 + 1.2 * t) * rng.range(0.3, 1.0);
+            let r = rng.range(0.8, 2.2) * ctx.scale * (1.0 + t);
+            let (cx, cy) = (x + along * length + dx * spread, y + ch * 0.5 + dy * spread * 0.7 + t * ch * 0.3);
+            out.push(Shape::round(DISC, cx, cy, r, v.ink, 0.45 * (1.0 - t)));
+        }
     }
 
     fn idle_time(&self) -> f32 {
