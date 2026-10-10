@@ -1,6 +1,6 @@
 [package]
 name = "oneprompt"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 edition = "2024"
 authors = ["Subhash Jha <subhashjha.mail@gmail.com>"]
 license = "Apache-2.0"
