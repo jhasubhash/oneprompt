@@ -138,7 +138,7 @@ struct App {
     /// Set by Cmd+W or the close control; the event handler then exits.
     close_requested: bool,
     /// The window is closing the theme's way; the app quits when it is done.
-    leaving: bool,
+
     /// A settings error found before the window existed, shown once it does.
     startup_error: Option<String>,
 }
@@ -469,7 +469,7 @@ impl App {
         if shown {
             let theme = self.themes[self.current].clone();
             if let Some(r) = self.renderer.as_mut() {
-                r.start_close(&theme, false);
+                r.start_close(&theme);
             }
         }
         true
@@ -478,16 +478,9 @@ impl App {
     /// The window goes: the way the theme closes it, then the app quits
     /// (at once with animations off).
     fn leave(&mut self, event_loop: &ActiveEventLoop) {
-        if self.leaving {
-            return;
-        }
-        let theme = self.themes[self.current].clone();
-        if self.renderer.as_mut().is_some_and(|r| r.start_close(&theme, true)) {
-            self.leaving = true;
-            self.redraw();
-        } else {
-            event_loop.exit();
-        }
+        // Closing the window is meant at once: no effect to wait for (tabs
+        // and panes closing inside it still have theirs).
+        event_loop.exit();
     }
 
     /// Tells the renderer the tab labels and sets the window title. Labels
@@ -2158,9 +2151,6 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
                 self.draw_frame();
-                if self.leaving && self.renderer.as_ref().is_none_or(|r| r.transition_done()) {
-                    event_loop.exit();
-                }
             }
             _ => {}
         }
@@ -2343,7 +2333,6 @@ fn main() {
         scroll_px: 0.0,
         mouse: Mouse::default(),
         close_requested: false,
-        leaving: false,
     };
     event_loop.run_app(&mut app).expect("run event loop");
 }

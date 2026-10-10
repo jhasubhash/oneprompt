@@ -647,7 +647,7 @@ pub struct Renderer {
     sweep: Option<(f32, f32)>,
     idle_until: f32,
     /// The window is going: its last transition shows nothing after.
-    closing: bool,
+
     /// The theme's effects for closing and for clearing, on or off.
     effects: (bool, bool),
     /// Per pane, where its cursor was and is, and when it moved there; the
@@ -906,7 +906,6 @@ impl Renderer {
             last_activity: 0.0,
             sweep: None,
             idle_until: f32::NEG_INFINITY,
-            closing: false,
             effects: (true, true),
             cursor_moves: HashMap::new(),
             cursor_life: (true, true),
@@ -1351,17 +1350,15 @@ impl Renderer {
         }
     }
 
-    /// Starts the way `variant`'s theme closes a sheet, over the last frame
-    /// shown: a tab (the next one is drawn beneath) or, with `window`, the
-    /// window. Returns false if there is nothing to show (no animation, or
-    /// the theme has none).
-    pub fn start_close(&mut self, variant: &Variant, window: bool) -> bool {
+    /// Starts the way `variant`'s theme closes a tab's sheet, over the last
+    /// frame shown, the next tab drawn beneath. Returns false if there is
+    /// nothing to show (no animation, or the theme has none).
+    pub fn start_close(&mut self, variant: &Variant) -> bool {
         if !self.animation.0 || !self.effects.0 {
             return false;
         }
         let aspect = self.aspect();
         let Some(plan) = variant.theme.close(variant, &mut self.rng, aspect) else { return false };
-        self.closing = window;
         self.start_over_last(plan);
         self.events.push(api::SoundEvent::Close);
         true
@@ -3728,7 +3725,9 @@ impl Renderer {
             time: now,
             speed: self.animation.1,
             progress,
-            closing: if self.closing { 1.0 } else { 0.0 },
+            // The window itself closes at once, so its last sheet is never
+            // shown going (the shaders still handle it).
+            closing: 0.0,
             from_color,
             grid_origin: [pad, top],
             cell: [self.cell_width, self.cell_height],

@@ -211,11 +211,11 @@ show_progress = true
 sounds = false
 sound_volume = 0.4
 
-# Closing a tab or the window burns its sheet away in Tsushima and wipes it off
-# the Chalkboard; a closed pane is slashed to pieces (Tsushima), torn out
-# (Logbook) or slides off (Chalkboard). Clearing the screen (Cmd+K, or `clear`
-# in the shell) burns it away from where it was typed; on the Chalkboard the
-# chalk drifts off as dust.
+# Closing a tab burns its sheet away in Tsushima and wipes it off the
+# Chalkboard (the window itself closes at once); a closed pane is slashed to
+# pieces (Tsushima), torn out (Logbook) or slides off (Chalkboard). Clearing
+# the screen (Cmd+K, or `clear` in the shell) writes it out backwards in
+# Tsushima, burns it in Logbook, and blows the chalk off the Chalkboard.
 close_effect = true
 clear_effect = true
 

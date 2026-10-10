@@ -125,10 +125,11 @@ light or dark palette.
   smudges and ghosts of old lessons. A new tab starts on a fresh sheet. `paper_aging =
   false` keeps every sheet new; `ONEPROMPT_PAPER_RATE=<n>` ages them n times faster, to
   see a worn one now.
-- **Closing burns the sheet**: closing a tab or the window takes its sheet away the theme's
-  way. Tsushima sets it alight near a corner: a ragged front of fire spreads across it,
-  browning and charring the paper ahead and leaving ash and embers, the next tab showing
-  through (closing the window leaves only ash). Chalkboard wipes it off with the eraser.
+- **Closing burns the sheet**: closing a tab takes its sheet away the theme's way. Tsushima
+  sets it alight near a corner: a ragged front of fire spreads across it, browning and
+  charring the paper ahead and leaving ash and embers, the next tab showing through.
+  Chalkboard wipes it off with the eraser, Logbook turns the page. Closing the window
+  (its last tab) quits at once, with no effect to wait for.
   Closing a pane: Tsushima slashes it through twice and its four pieces fall away;
   Logbook tears the page out of the log as from a notebook, down along the binding, the
   page swinging away and falling, a ragged stub left behind for a moment; the
