@@ -28,6 +28,7 @@ use crate::boxdraw;
 use crate::color;
 use crate::trace::{self, GlyphKey, Slot, Tracer};
 use crate::chrome::{self, Control};
+use crate::strike::{Strikes, Struck};
 use crate::terminal::GridSize;
 use crate::theme::{ControlStyle, Theme};
 
@@ -173,6 +174,14 @@ const SHAPE_DISC: f32 = 1.0;
 const SHAPE_RING: f32 = 2.0;
 const SHAPE_CROSS: f32 = 3.0;
 const SHAPE_DAB: f32 = 4.0;
+const SHAPE_SLASH: f32 = 5.0;
+
+/// How long the sword takes to cut through a deleted name, at speed 1, and
+/// how much later each further mention of it is cut.
+const STRIKE_TIME: f32 = 0.22;
+const STRIKE_STAGGER: f32 = 0.04;
+/// How far struck text fades towards the paper.
+const STRIKE_FADE: f32 = 0.45;
 
 impl Rect {
     fn new(x: f32, y: f32, w: f32, h: f32, rgb: [u8; 3], alpha: f32) -> Self {
@@ -205,6 +214,14 @@ impl Rect {
     fn stroke(mut self, width: f32) -> Self {
         self.params[2] = width;
         self
+    }
+
+    /// A sword cut through the box (x, y, w, h), drawn in up to `progress`
+    /// (0..1) of the way across.
+    fn slash(x: f32, y: f32, w: f32, h: f32, rgb: [u8; 3], progress: f32, seed: f32) -> Self {
+        let mut rect = Self::new(x, y, w, h, rgb, 1.0);
+        rect.params = [SHAPE_SLASH, progress, 0.0, seed];
+        rect
     }
 }
 
@@ -361,6 +378,8 @@ pub struct Renderer {
     writing_speed: f32,
     /// Map program-chosen colours onto the sheet (see color.rs).
     harmonize: bool,
+    /// Until when a sword is still cutting through a deleted name.
+    strikes_until: f32,
     animator: TextAnimator,
     transition: Option<Transition>,
     /// Makes up the brushwork for reveals.
@@ -743,6 +762,7 @@ impl Renderer {
             bleed_time: 0.0,
             writing_speed: 500.0,
             harmonize: true,
+            strikes_until: f32::NEG_INFINITY,
             animator: TextAnimator::default(),
             transition: None,
             rng: animation::Rng::new(random_seed()),
@@ -970,6 +990,7 @@ impl Renderer {
         // Ink is wet for a few write times; its bleed creeps for longer.
         let bleed_time = self.bleed_time / self.animation.1;
         self.transition.is_some_and(|t| !t.done(now))
+            || now < self.strikes_until
             || (self.animation.0 && now - self.animator.latest_birth() < (write_time * 4.0).max(bleed_time))
     }
 
@@ -1194,7 +1215,9 @@ impl Renderer {
         size
     }
 
-    pub fn render<L: EventListener>(&mut self, theme: &Theme, term: &Term<L>) {
+    /// Draws a frame; `strikes`, when given, finds names of deleted files on
+    /// screen to strike out.
+    pub fn render<L: EventListener>(&mut self, theme: &Theme, term: &Term<L>, strikes: Option<&mut Strikes>) {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
@@ -1209,7 +1232,7 @@ impl Renderer {
             _ => return,
         };
         let view = frame.texture.create_view(&Default::default());
-        self.layout(theme, term);
+        self.layout(theme, term, strikes);
         self.draw(theme, &view);
         self.queue.present(frame);
         self.atlas.trim();
@@ -1256,7 +1279,7 @@ impl Renderer {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        self.layout(theme, term);
+        self.layout(theme, term, None);
         self.draw(theme, &texture.create_view(&Default::default()));
 
         // Rows in a texture-to-buffer copy must be 256-byte aligned.
@@ -1318,9 +1341,47 @@ impl Renderer {
             .expect("write snapshot png");
     }
 
+    /// The mentions of deleted paths on screen, each with how far its cut has
+    /// got (0..1). Full-screen apps draw their own screens, so none there.
+    fn find_struck(
+        &mut self,
+        cells: &[Indexed<&Cell>],
+        display_offset: usize,
+        strikes: Option<&mut Strikes>,
+        full_screen: bool,
+    ) -> Vec<(Struck, f32)> {
+        let Some(strikes) = strikes.filter(|_| !full_screen) else { return Vec::new() };
+        let (columns, lines) = (self.targets.grid.0 as usize, self.targets.grid.1 as usize);
+        let mut chars = vec![' '; columns * lines];
+        for indexed in cells {
+            let line = indexed.point.line.0 + display_offset as i32;
+            let col = indexed.point.column.0;
+            if line >= 0 && (line as usize) < lines && col < columns {
+                chars[line as usize * columns + col] = cell_char(indexed.cell.c);
+            }
+        }
+        let now = self.now();
+        let duration = STRIKE_TIME / self.animation.1;
+        let mut found = strikes.find(&chars, columns, now);
+        // Mentions of one deletion are cut one after another, in reading order.
+        let mut order: HashMap<u32, usize> = HashMap::new();
+        found
+            .drain(..)
+            .map(|s| {
+                let k = order.entry(s.born.to_bits()).or_default();
+                let start = s.born + (*k as f32 * STRIKE_STAGGER / self.animation.1).min(0.5);
+                *k += 1;
+                self.strikes_until = self.strikes_until.max(start + duration);
+                let progress = if self.animation.0 { ((now - start) / duration).clamp(0.0, 1.0) } else { 1.0 };
+                (s, progress)
+            })
+            .filter(|&(_, progress)| progress > 0.0)
+            .collect()
+    }
+
     /// Turns the visible part of the grid into styled text runs plus
     /// rectangles for backgrounds, decorations and the cursor.
-    fn layout<L: EventListener>(&mut self, theme: &Theme, term: &Term<L>) {
+    fn layout<L: EventListener>(&mut self, theme: &Theme, term: &Term<L>, strikes: Option<&mut Strikes>) {
         let content = term.renderable_content();
         let (pad, top) = self.padding();
         let (cw, ch) = (self.cell_width, self.cell_height);
@@ -1368,6 +1429,15 @@ impl Renderer {
             self.loose_metrics = metrics_key;
         }
         let canvas = if self.harmonize { canvas_color(&cells, columns * lines) } else { None };
+        let full_screen = term.mode().contains(TermMode::ALT_SCREEN);
+        let struck = self.find_struck(&cells, content.display_offset, strikes, full_screen);
+        // How far each cell's strike has got (0: not struck), to fade it.
+        let mut struck_cells = vec![0.0f32; columns * lines];
+        for &(s, progress) in &struck {
+            for col in s.col..(s.col + s.len).min(columns) {
+                struck_cells[s.line * columns + col] = progress;
+            }
+        }
         for indexed in cells {
             let line = (indexed.point.line.0 + content.display_offset as i32) as usize;
             let col = indexed.point.column.0;
@@ -1424,6 +1494,11 @@ impl Renderer {
             }
             if flags.contains(Flags::DIM) {
                 fg = mix(fg, bg.unwrap_or(theme.surface_rgb()), 0.4);
+            }
+            if let Some(&progress) = struck_cells.get(line * columns + col)
+                && progress > 0.0
+            {
+                fg = mix(fg, bg.unwrap_or(theme.surface_rgb()), STRIKE_FADE * progress);
             }
             // Selected text is reversed out of a block of ink: the letters
             // take the paper's colour.
@@ -1521,6 +1596,12 @@ impl Renderer {
                 ]),
                 _ => self.ink_rects.push(Rect::dab(x, y + ch * 0.04, cw, ch * 0.92, c, 0.95).rough(1.0, seed)),
             }
+        }
+        // Deleted names are cut through in seal ink, a little past each end.
+        for &(s, progress) in &struck {
+            let (x, y) = (cell_x(s.col) - cw * 0.3, cell_y(s.line));
+            let seed = s.col as f32 * 3.71 + s.line as f32 * 1.93 + s.born;
+            overlay.push(Rect::slash(x, y, cw * (s.len as f32 + 0.6), ch, theme.cursor, progress, seed));
         }
         self.ink_rects.extend(overlay);
         self.layout_controls(theme, term.is_focused);

@@ -99,6 +99,10 @@ pub struct Terminal {
     pub term: Arc<FairMutex<Term<Listener>>>,
     sender: EventLoopSender,
     size: GridSize,
+    /// A handle on the PTY, to ask which process is in the foreground (the
+    /// shell at its prompt, or the command it runs) and follow its working
+    /// directory. The PTY's child is `login`, not the shell, on macOS.
+    pub pty: Option<std::fs::File>,
 }
 
 impl Terminal {
@@ -117,6 +121,7 @@ impl Terminal {
             env: HashMap::new(),
         };
         let pty = tty::new(&options, size.window_size(), 0)?;
+        let pty_handle = pty.file().try_clone().ok();
         let listener = Listener(proxy, id);
         let term = Arc::new(FairMutex::new(Term::new(
             Config::default(),
@@ -126,7 +131,7 @@ impl Terminal {
         let event_loop = EventLoop::new(term.clone(), listener, pty, options.drain_on_exit, false)?;
         let sender = event_loop.channel();
         event_loop.spawn();
-        Ok(Self { term, sender, size })
+        Ok(Self { term, sender, size, pty: pty_handle })
     }
 
     pub fn write(&self, bytes: impl Into<Cow<'static, [u8]>>) {

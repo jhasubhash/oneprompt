@@ -12,6 +12,7 @@ alacritty_terminal = "0.26"
 arboard = { version = "3", default-features = false }
 bytemuck = { version = "1", features = ["derive"] }
 glyphon = "0.12"
+libc = "0.2"
 muda = { version = "0.21", default-features = false }
 png = "0.18"
 pollster = "0.4"

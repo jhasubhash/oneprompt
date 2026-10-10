@@ -52,6 +52,11 @@ light or dark palette.
   droplet like watercolour on damp paper: quick at first and slowing, its front fingering
   and blooming, pigment pooling in a tide line and settling into the grain, the paper
   ahead darkening as the water reaches it. No two are alike.
+- **Deleted names are struck out**: when a file or folder named on screen is deleted (`rm`,
+  a script, the Finder, ...), every mention of it, in `ls` output, the command that
+  deleted it, anywhere, is cut through with a quick sword stroke in seal ink and fades.
+  Words are looked up relative to the shell's working directory; a name that comes back
+  is no longer struck. `strike_deleted = false` turns it off.
 - `animation = false` turns it off, `animation_speed` scales it. The app only redraws while
   something is moving.
 
@@ -147,6 +152,7 @@ animation = true              # hand-written text, window reveals
 animation_speed = 1.0
 writing_speed = 500           # characters per second for output
 harmonize_colors = true       # program-chosen colours as inks on the sheet
+strike_deleted = true         # strike out names of deleted files on screen
 option_as_meta = "left"       # left | both | none
 seed = 11                     # pin the paper; unset = new sheet each session
 
@@ -177,6 +183,7 @@ src/chrome.rs               theme-drawn window controls: layout and hit testing
 src/config.rs               settings file: parsing, theme overrides, live reload
 src/renderer.rs             ink pass (text, line art, controls), main pass (surface, cells, ink composite), present pass
 src/animation.rs            per-cell write times (reading order, scroll-aware) and window reveals
+src/strike.rs               names on screen whose files were deleted, to strike out
 src/trace.rs                pen paths: per-glyph stroke order for the hand-writing reveal
 src/color.rs                program-chosen colours mapped onto the sheet (OKLab)
 src/theme.rs                themes as plain data

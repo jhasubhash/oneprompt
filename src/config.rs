@@ -79,6 +79,9 @@ pub struct Config {
     /// Map colours programs pick themselves (truecolor, 256-colour) onto the
     /// sheet as inks. Default on.
     pub harmonize_colors: Option<bool>,
+    /// Strike out names of files and folders deleted while on screen.
+    /// Default on.
+    pub strike_deleted: Option<bool>,
     /// Font settings for every theme (per-theme sections win).
     pub font_family: Option<String>,
     pub font_size: Option<f32>,
@@ -119,6 +122,10 @@ writing_speed = 500
 # for a plain black screen. This keeps their hues but turns them into inks
 # that read on the sheet. false shows them exactly as sent.
 harmonize_colors = true
+
+# When a file or folder named on screen is deleted (rm, a script, the
+# Finder, ...), every mention of it is struck through with a sword cut.
+strike_deleted = true
 
 # The light and dark variants, set to their built-in values; change any of them.
 # Fonts must be monospace. font_weight snaps to the weights the font has

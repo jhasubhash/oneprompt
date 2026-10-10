@@ -1512,6 +1512,7 @@ dependencies = [
  "arboard",
  "bytemuck",
  "glyphon",
+ "libc",
  "muda",
  "objc2-core-graphics",
  "objc2-quartz-core 0.3.2",

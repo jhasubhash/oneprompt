@@ -20,6 +20,7 @@ mod config;
 mod input;
 mod menu;
 mod renderer;
+mod strike;
 mod terminal;
 mod theme;
 mod trace;
@@ -100,6 +101,15 @@ struct Tab {
     title: Option<String>,
     /// Given by the user (Rename Tab); wins over the title.
     name: Option<String>,
+    /// Names on its screen whose files were deleted.
+    strikes: strike::Strikes,
+}
+
+impl Tab {
+    fn new(id: TabId, terminal: Terminal) -> Self {
+        let strikes = strike::Strikes::new(terminal.pty.as_ref().and_then(|f| f.try_clone().ok()));
+        Self { id, terminal, title: None, name: None, strikes }
+    }
 }
 
 #[derive(Default)]
@@ -155,7 +165,7 @@ impl App {
         let id = self.next_tab;
         self.next_tab += 1;
         let terminal = Terminal::spawn(self.proxy.clone(), id, renderer.grid_size(&theme), self.command.clone())?;
-        self.tabs.push(Tab { id, terminal, title: None, name: None });
+        self.tabs.push(Tab::new(id, terminal));
         self.switch_tab(self.tabs.len() - 1);
         Ok(())
     }
@@ -794,7 +804,7 @@ impl ApplicationHandler<UserEvent> for App {
         let id = self.next_tab;
         self.next_tab += 1;
         match Terminal::spawn(self.proxy.clone(), id, size, self.command.clone()) {
-            Ok(terminal) => self.tabs.push(Tab { id, terminal, title: None, name: None }),
+            Ok(terminal) => self.tabs.push(Tab::new(id, terminal)),
             Err(err) => {
                 eprintln!("oneprompt: could not start shell: {err}");
                 event_loop.exit();
@@ -997,9 +1007,10 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
                 let theme = self.themes[self.current].clone();
-                if let (Some(r), Some(t)) = (self.renderer.as_mut(), self.tabs.get(self.active).map(|t| &t.terminal)) {
-                    let term = t.term.lock();
-                    r.render(&theme, &term);
+                let strike = self.config.strike_deleted.unwrap_or(true);
+                if let (Some(r), Some(tab)) = (self.renderer.as_mut(), self.tabs.get_mut(self.active)) {
+                    let term = tab.terminal.term.lock();
+                    r.render(&theme, &term, strike.then_some(&mut tab.strikes));
                     drop(term);
                     // Keep drawing while ink is still being brushed in or a
                     // reveal is running; vsync paces it, idle costs nothing.
