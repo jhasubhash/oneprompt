@@ -316,7 +316,8 @@ at it.
 
 The settings panel comes in the theme's way: Tsushima unrolls it like a hanging scroll on
 a dark wooden roller, Logbook turns it in like a page, the Chalkboard slides it in on its
-rails with the board's wooden frame along its edge. The settings are in sections: the
+rails with the board's wooden frame along its edge. Closing plays it backwards (rolled up,
+turned back, slid off); opened again on the way out, it comes back from where it got to. The settings are in sections: the
 theme and appearance always open, the rest (the look on screen, Animation, Ink and paper,
 Effects, Commands, Sound, Terminal) folded until opened with a click on the heading, or
 Return / → on it (← closes). Sections stay as left while the app runs.

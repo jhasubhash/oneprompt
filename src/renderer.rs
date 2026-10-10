@@ -484,8 +484,10 @@ struct SettingsView {
     shown_focus: Option<(usize, u32)>,
     texts: Vec<Buffer>,
     targets: Vec<([f32; 4], Hit)>,
-    /// When it opened, for the theme's entrance.
+    /// When it opened, for the theme's entrance, and when it began to close
+    /// (the entrance played backwards).
     opened: f32,
+    closing: Option<f32>,
     /// The panel's box, and the height of its scrolling part and of what
     /// is in it.
     bounds: [f32; 4],
@@ -694,6 +696,8 @@ pub struct Renderer {
     /// Drawing a picker preview rather than the live screen.
     thumbnail: bool,
     /// The settings panel, while it is open.
+    /// How long the current theme's panel takes to come in, seconds at speed 1.
+    settings_duration: f32,
     settings: Option<SettingsView>,
     settings_buffer: wgpu::Buffer,
     /// Installed monospace font families, sorted, once asked for.
@@ -912,6 +916,7 @@ impl Renderer {
             picker_buffer,
             picker_text,
             thumbnail: false,
+            settings_duration: 0.25,
             settings: None,
             settings_buffer,
             monospace: None,
@@ -1500,7 +1505,7 @@ impl Renderer {
             || now < self.trail_until
             || now < self.splash_until
             || now < self.progress_until
-            || self.settings.as_ref().is_some_and(|v| now < v.opened + SETTINGS_ENTRANCE_MAX / self.animation.1)
+            || self.settings.as_ref().is_some_and(|v| v.closing.is_some() || now < v.opened + SETTINGS_ENTRANCE_MAX / self.animation.1)
             || (self.animation.0
                 && self.panes.values().any(|p| now - p.animator.latest_birth() < (write_time * 4.0).max(settle_time)))
     }
@@ -2118,7 +2123,7 @@ impl Renderer {
     /// matches there are.
     fn draw_search(&mut self, variant: &Variant, view: &wgpu::TextureView) {
         let Some(bar) = self.search.clone() else { return };
-        if self.picker.is_some() || self.settings.is_some() {
+        if self.picker.is_some() || self.settings_shown() {
             return;
         }
         let s = self.window.scale_factor() as f32;
@@ -2251,7 +2256,7 @@ impl Renderer {
     /// composing text, the part being converted more heavily, and a caret.
     fn draw_preedit(&mut self, variant: &Variant, view: &wgpu::TextureView) {
         let Some((text, selected)) = self.preedit.clone() else { return };
-        if self.picker.is_some() || self.settings.is_some() {
+        if self.picker.is_some() || self.settings_shown() {
             return;
         }
         let s = self.window.scale_factor() as f32;
@@ -2340,13 +2345,28 @@ impl Renderer {
     /// Opens the settings panel showing `panel`, updates it, or closes it
     /// (None). It stays scrolled where it was.
     pub fn set_settings(&mut self, panel: Option<SettingsPanel>) {
+        let now = self.now();
         let Some(panel) = panel else {
-            self.settings = None;
+            // It goes the way it came, backwards; at once without animation.
+            match self.settings.as_mut() {
+                Some(view) if self.animation.0 && view.closing.is_none() => view.closing = Some(now),
+                Some(_) if self.animation.0 => {}
+                _ => self.settings = None,
+            }
             return;
         };
-        let now = self.now();
+        // Opened again while going: it comes back from where it got to.
+        let reopened = self.settings.as_ref().and_then(|v| v.closing.map(|c| (v.opened, c))).map(|(opened, closing)| {
+            now - self.settings_progress(opened, Some(closing), now) * self.settings_duration_now()
+        });
         match self.settings.as_mut() {
-            Some(view) => view.panel = panel,
+            Some(view) => {
+                if let Some(opened) = reopened {
+                    view.closing = None;
+                    view.opened = opened;
+                }
+                view.panel = panel;
+            }
             None => {
                 self.settings = Some(SettingsView {
                     panel,
@@ -2355,6 +2375,7 @@ impl Renderer {
                     texts: Vec::new(),
                     targets: Vec::new(),
                     opened: now,
+                    closing: None,
                     bounds: [0.0; 4],
                     visible: 0.0,
                     content: 0.0,
@@ -2363,9 +2384,33 @@ impl Renderer {
         }
     }
 
+    /// The panel is open (not gone, nor going).
+    fn settings_shown(&self) -> bool {
+        self.settings.as_ref().is_some_and(|v| v.closing.is_none())
+    }
+
+    /// Seconds (on the clock) the current theme's panel takes to come in.
+    fn settings_duration_now(&self) -> f32 {
+        self.settings_duration.max(0.05) / self.animation.1
+    }
+
+    /// How far in the panel is at `now`, 0..1 (before easing): coming in
+    /// since `opened`, or going out since `closing`.
+    fn settings_progress(&self, opened: f32, closing: Option<f32>, now: f32) -> f32 {
+        if !self.animation.0 || self.thumbnail {
+            return if closing.is_some() { 0.0 } else { 1.0 };
+        }
+        let d = self.settings_duration_now();
+        match closing {
+            // Going out from wherever it had got to coming in.
+            Some(c) => (((c - opened) / d).clamp(0.0, 1.0) - (now - c) / d).clamp(0.0, 1.0),
+            None => ((now - opened) / d).clamp(0.0, 1.0),
+        }
+    }
+
     /// What in the settings panel is at (x, y), physical pixels.
     pub fn settings_hit(&self, x: f32, y: f32) -> Option<Hit> {
-        let view = self.settings.as_ref()?;
+        let view = self.settings.as_ref().filter(|v| v.closing.is_none())?;
         let inside = |[bx, by, bw, bh]: [f32; 4]| x >= bx && x < bx + bw && y >= by && y < by + bh;
         // Later targets sit on top of earlier ones (a row's control on the row).
         view.targets.iter().rev().find(|(rect, _)| inside(*rect)).map(|(_, hit)| *hit)
@@ -2373,7 +2418,7 @@ impl Renderer {
 
     /// Whether (x, y) is on the settings panel.
     pub fn settings_contains(&self, x: f32, y: f32) -> bool {
-        self.settings.as_ref().is_some_and(|v| {
+        self.settings.as_ref().filter(|v| v.closing.is_none()).is_some_and(|v| {
             let [bx, by, bw, bh] = v.bounds;
             x >= bx && x < bx + bw && y >= by && y < by + bh
         })
@@ -2398,11 +2443,12 @@ impl Renderer {
         let left = w - panel_w;
         // The theme's entrance: how far in the panel is, eased.
         let (entrance, duration) = variant.theme.panel_entrance();
-        let raw = if self.animation.0 && !self.thumbnail {
-            ((self.now() - panel.opened) * self.animation.1 / duration.clamp(0.05, SETTINGS_ENTRANCE_MAX)).clamp(0.0, 1.0)
-        } else {
-            1.0
-        };
+        self.settings_duration = duration.clamp(0.05, SETTINGS_ENTRANCE_MAX);
+        let raw = self.settings_progress(panel.opened, panel.closing, self.now());
+        // Gone back out: it is closed.
+        if panel.closing.is_some() && raw <= 0.0 {
+            return;
+        }
         let eased = 1.0 - (1.0 - raw).powi(3);
         // A sliding panel moves; the others stay put and are uncovered.
         let dx = if entrance == api::Entrance::Slide { panel_w * (1.0 - eased) } else { 0.0 };
