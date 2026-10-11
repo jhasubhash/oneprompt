@@ -1,6 +1,6 @@
 <div align="center">
 
-# oneprompt
+# OnePrompt
 
 **A terminal drawn like an ink painting.**
 
