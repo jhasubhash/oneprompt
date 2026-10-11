@@ -314,12 +314,13 @@ pub struct PlanData {
 }
 
 impl PlanData {
-    /// The text of a pane written out again backwards, for clearing it:
+    /// The text of a pane crumbling to dust, for clearing it:
     /// `grid` is its first cell's corner and a cell's size (physical
     /// pixels), `columns` x `lines` the cells with text, `area` the pane
-    /// (0..1 of the window) (`front.w` = 3).
-    pub fn unwrite(grid: [f32; 4], columns: f32, lines: f32, area: [f32; 4], seed: f32) -> Self {
-        let mut data = Self { edge: [0.0; 4], info: [0.0, 0.0, seed, 0.0], cut: [0.0; 4], front: [0.0, 0.0, 0.0, 3.0], marks: [[0.0; 4]; 3 * MAX_MARKS] };
+    /// (0..1 of the window), `glow` how the ink glows as embers (`cut.x`)
+    /// (`front.w` = 3).
+    pub fn crumble(grid: [f32; 4], columns: f32, lines: f32, area: [f32; 4], glow: f32, seed: f32) -> Self {
+        let mut data = Self { edge: [0.0; 4], info: [0.0, 0.0, seed, 0.0], cut: [glow, 0.0, 0.0, 0.0], front: [0.0, 0.0, 0.0, 3.0], marks: [[0.0; 4]; 3 * MAX_MARKS] };
         data.marks[0] = grid;
         data.marks[1] = area;
         data.marks[2] = [columns, lines, 0.0, 0.0];

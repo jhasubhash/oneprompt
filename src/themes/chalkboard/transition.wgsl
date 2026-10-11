@@ -15,6 +15,7 @@ struct Plan {
     at_y: f32,
     _pad: f32,
     area: vec4<f32>, // the pane (x, y, w, h, 0..1 of the window)
+    text: vec4<f32>, // the text blown away: top left, bottom right, physical pixels
 };
 
 @group(0) @binding(2) var<uniform> plan: Plan;
@@ -28,7 +29,7 @@ fn theme_transition(px: vec2<f32>, now_in: vec4<f32>, before: vec4<f32>) -> vec4
         if (plan.mode > 1.5) {
             return slide(px, now_in);
         }
-        return blown(px, now_in);
+        return blown(px, now_in, before);
     }
     // The window closing: the board is wiped clean before it goes.
     var now = now_in;
@@ -83,34 +84,22 @@ fn theme_transition(px: vec2<f32>, now_in: vec4<f32>, before: vec4<f32>) -> vec4
     return vec4<f32>(color.rgb, 1.0);
 }
 
-// Clearing: the chalk is blown off the board. The marks break up into
-// specks of dust that drift away, downwards and out from where the cursor
-// was, fading as they go; those nearest it go first. The chalk is what the
-// old frame has that the clean board (`scene`) doesn't, so the board itself
-// stays put.
-fn blown(px: vec2<f32>, now: vec4<f32>) -> vec4<f32> {
-    let res = frame.resolution;
+// Clearing: the chalk is blown off the board (`dust`, the transition
+// stage). A front sweeps across the writing from the right; behind it the
+// marks crumble into specks of chalk dust that are blown away up and to
+// the right, thinning as they go. The board itself stays put.
+fn blown(px: vec2<f32>, now: vec4<f32>, before: vec4<f32>) -> vec4<f32> {
     let scale = max(frame.scale, 1.0);
-    let t = frame.progress;
-    let at = vec2<f32>(plan.at_x, plan.at_y) * res;
-    var sum = vec3<f32>(0.0);
-    // A few specks may have drifted onto this pixel from where they were.
-    for (var k = 0; k < 3; k++) {
-        let seed = vec2<f32>(plan.seed + f32(k) * 7.1, f32(k) * 3.3);
-        // Where the dust here came from: further back the longer it has
-        // been going, its start delayed by the distance from the cursor.
-        let away = normalize(px - at + vec2<f32>(0.001, 0.0));
-        let delay = clamp(length(px - at) / length(res) * 1.2, 0.0, 0.6);
-        let go = clamp((t - delay) / 0.5, 0.0, 1.0);
-        let drift = (away * 0.5 + vec2<f32>((noise(px * 0.01 + seed) - 0.5) * 1.2, 1.0)) * go * go * 140.0 * scale;
-        let src = clamp(px - drift, vec2<f32>(0.0), res - 1.0);
-        let old = textureLoad(previous, vec2<i32>(src), 0).rgb;
-        let clean = textureLoad(scene, vec2<i32>(src), 0).rgb;
-        // The chalk breaks into specks, fewer and fewer as it goes.
-        let speck = step(go * 0.95, hash(floor(src / (1.5 * scale)) + seed));
-        sum += (old - clean) * speck * (1.0 - go);
+    let pane_hi = (plan.area.xy + plan.area.zw) * frame.resolution;
+    let hi = min(plan.text.zw, pane_hi);
+    let a = DustArea(plan.text.xy, hi, 2.0 * scale, (hi.x - plan.text.x) * 0.35 + 120.0 * scale, plan.seed);
+    let d = dust(px, a);
+    if (d.intact > 0.5) {
+        return before;
     }
-    return vec4<f32>(clamp(now.rgb + sum / 1.5, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    // Fresh dust is a puff, a little brighter than the chalk it was.
+    let puff = mix(d.ink, d.ink * 1.3, d.heat);
+    return vec4<f32>(clamp(now.rgb + puff, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }
 
 // Closing a pane: its board slides up (or down) out of the frame, quickly

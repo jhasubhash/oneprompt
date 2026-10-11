@@ -25,7 +25,8 @@
 //!   [`Shape`] kinds (from [`CUSTOM`] up).
 //! - transition: `fn theme_transition(px: vec2<f32>, now: vec4<f32>, before:
 //!   vec4<f32>) -> vec4<f32>`: the window revealed over what was there, while
-//!   `frame.progress` < 1.
+//!   `frame.progress` < 1. `dust` (transition_stage.wgsl) crumbles the
+//!   writing of the frame before into specks blown away, for clears.
 //!
 //! A theme's values reach its shaders through `@group(0) @binding(1)` (the
 //! bytes [`Theme::data`] returns, up to [`DATA_SIZE`]) and, in the transition,

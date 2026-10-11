@@ -38,7 +38,6 @@ const RULE_TIME: f32 = 0.45;
 const REVEAL_TIME: f32 = 1.3;
 const SWITCH_TIME: f32 = 1.8;
 const CLOSE_TIME: f32 = 1.1;
-const FLOW_TIME: f32 = 1.4;
 const SLIDE_TIME: f32 = 0.9;
 /// Fresh chalk sheds dust this long.
 const SETTLE_TIME: f32 = 1.0;
@@ -51,6 +50,7 @@ const PARAMS: &[Param] = &[
     Param { key: "dust", about: "the haze of chalk dust around strokes, 0..1", min: 0.0, max: 1.0 },
     Param { key: "smudges", about: "old eraser swirls and dust on the board: 1 built-in, 0 none, up to 3", min: 0.0, max: 3.0 },
     Param { key: "ghosts", about: "faint traces of old writing: 1 built-in, 0 none, up to 3", min: 0.0, max: 3.0 },
+    Param { key: "dust_time", about: "seconds clearing takes, the chalk crumbling to dust and blown away", min: 0.8, max: 4.0 },
 ];
 
 /// What common.wgsl reads (its `Chalkboard` struct).
@@ -80,6 +80,9 @@ struct PlanData {
     at: [f32; 2],
     _pad: f32,
     area: [f32; 4],
+    /// The text that blows away (mode 1): its top left and bottom right,
+    /// physical pixels.
+    text: [f32; 4],
 }
 
 impl Theme for Chalkboard {
@@ -128,8 +131,8 @@ impl Theme for Chalkboard {
                 font_weight: 400,
                 line_height: 24.0,
                 controls: Controls { style: ControlStyle::Ring, colors: [[168, 72, 46], [112, 109, 104], [112, 109, 104]] },
-                //       grit dust smudges ghosts
-                params: vec![0.4, 0.4, 1.0, 1.0],
+                //       grit dust smudges ghosts dust_time
+                params: vec![0.4, 0.4, 1.0, 1.0, 1.8],
             },
             Variant {
                 theme: self,
@@ -162,7 +165,7 @@ impl Theme for Chalkboard {
                 font_weight: 400,
                 line_height: 24.0,
                 controls: Controls { style: ControlStyle::Ring, colors: [[236, 132, 132], [240, 214, 120], [160, 212, 142]] },
-                params: vec![0.55, 0.45, 1.0, 1.0],
+                params: vec![0.55, 0.45, 1.0, 1.0, 1.8],
             },
         ]
     }
@@ -202,20 +205,22 @@ impl Theme for Chalkboard {
         Some(wipe(rng, 3.0, 5.0, SWITCH_TIME))
     }
 
-    /// Clearing the board blows the chalk off it: the marks break up into
-    /// dust and drift away, from where the cursor was outwards, the clean
-    /// board beneath.
-    fn clear(&self, _v: &Variant, rng: &mut Rng, _aspect: f32, span: &ClearSpan) -> Option<Plan> {
+    /// Clearing the board blows the chalk off it: a front sweeps across the
+    /// writing from the right, crumbling it into dust that is blown away up
+    /// and to the right, the clean board beneath.
+    fn clear(&self, v: &Variant, rng: &mut Rng, _aspect: f32, span: &ClearSpan) -> Option<Plan> {
         let (area, at) = (span.area, span.at);
-        let data = PlanData { passes: 1.0, angle: 0.0, seed: rng.unit() * 100.0, upward: 0.0, mode: 1.0, at, _pad: 0.0, area };
-        Some(Plan { duration: FLOW_TIME, ease: 1.0, data: theme::bytes(&data) })
+        let [x, y, w, h] = span.grid;
+        let text = [x, y, x + w * span.columns.max(1.0), y + h * span.lines.max(1.0)];
+        let data = PlanData { passes: 1.0, angle: 0.0, seed: rng.unit() * 100.0, upward: 0.0, mode: 1.0, at, _pad: 0.0, area, text };
+        Some(Plan { duration: v.param("dust_time"), ease: 1.0, data: theme::bytes(&data) })
     }
 
     /// A closed pane's board slides up or down out of the frame, the panes
     /// taking its place behind it.
     fn close_pane(&self, _v: &Variant, rng: &mut Rng, _aspect: f32, area: [f32; 4]) -> Option<Plan> {
         let upward = if rng.unit() < 0.5 { 1.0 } else { 0.0 };
-        let data = PlanData { passes: 1.0, angle: 0.0, seed: rng.unit() * 100.0, upward, mode: 2.0, at: [0.5, 0.5], _pad: 0.0, area };
+        let data = PlanData { passes: 1.0, angle: 0.0, seed: rng.unit() * 100.0, upward, mode: 2.0, at: [0.5, 0.5], _pad: 0.0, area, text: [0.0; 4] };
         Some(Plan { duration: SLIDE_TIME, ease: 1.0, data: theme::bytes(&data) })
     }
 
@@ -463,6 +468,7 @@ fn wipe(rng: &mut Rng, lo: f32, hi: f32, duration: f32) -> Plan {
         at: [0.5, 0.5],
         _pad: 0.0,
         area: [0.0, 0.0, 1.0, 1.0],
+        text: [0.0; 4],
     };
     Plan { duration, ease: 1.3, data: theme::bytes(&data) }
 }

@@ -43,7 +43,6 @@ const CUT_TIME: f32 = 0.32;
 const REVEAL_TIME: f32 = 1.6;
 const SWITCH_TIME: f32 = 2.8;
 const BURN_TIME: f32 = 1.5;
-const UNWRITE_TIME: f32 = 1.2;
 const SHRED_TIME: f32 = 1.3;
 
 /// A failed command's stroke is dragged down the margin this fast.
@@ -79,6 +78,8 @@ const PARAMS: &[Param] = &[
     Param { key: "texture", about: "paper texture (mottling, relief, fibers): 1 built-in, 0 flat, up to 3", min: 0.0, max: 3.0 },
     Param { key: "stains", about: "water-stain tide lines: 1 built-in, 0 none, up to 3", min: 0.0, max: 3.0 },
     Param { key: "splatter", about: "ink flecks in the top-right corner: 1 built-in, 0 none, up to 3", min: 0.0, max: 3.0 },
+    Param { key: "dust_time", about: "seconds clearing takes, the writing crumbling to dust and blown away", min: 0.8, max: 4.0 },
+    Param { key: "dust_glow", about: "how the ink glows like embers as it crumbles, 0..1 (0 = no glow)", min: 0.0, max: 1.0 },
 ];
 
 /// Per variant: the tone the paper darkens towards, and the colour of the
@@ -151,8 +152,8 @@ impl Theme for Tsushima {
                 font_weight: 700,
                 line_height: 24.0,
                 controls: Controls { style: ControlStyle::Brush, colors: [[158, 28, 32], [70, 64, 58], [70, 64, 58]] },
-                //       bleed variation time nib grain edge absorb texture stains splatter
-                params: vec![0.7, 0.35, 2.5, 1.2, 0.22, 0.7, 0.7, 1.0, 1.0, 1.0],
+                //       bleed variation time nib grain edge absorb texture stains splatter dust_time dust_glow
+                params: vec![0.7, 0.35, 2.5, 1.2, 0.22, 0.7, 0.7, 1.0, 1.0, 1.0, 1.8, 1.0],
             },
             Variant {
                 theme: self,
@@ -185,7 +186,7 @@ impl Theme for Tsushima {
                 font_weight: 700,
                 line_height: 24.0,
                 controls: Controls { style: ControlStyle::Brush, colors: [[196, 44, 46], [150, 144, 134], [150, 144, 134]] },
-                params: vec![0.7, 0.35, 2.5, 1.2, 0.25, 0.6, 0.7, 1.0, 1.0, 1.0],
+                params: vec![0.7, 0.35, 2.5, 1.2, 0.25, 0.6, 0.7, 1.0, 1.0, 1.0, 1.8, 1.0],
             },
         ]
     }
@@ -266,15 +267,13 @@ impl Theme for Tsushima {
         Some(Plan { duration: SHRED_TIME, ease: 1.0, data: theme::bytes(&data) })
     }
 
-    /// Clearing takes the writing away the way it came, backwards: line by
-    /// line from the cursor's up to the top, each right to left, every
-    /// letter lifting off along the brush's stroke, the paper left as it
-    /// was.
-    fn clear(&self, _v: &Variant, rng: &mut Rng, _aspect: f32, span: &ClearSpan) -> Option<Plan> {
-        let data = PlanData::unwrite(span.grid, span.columns, span.lines, span.area, rng.unit() * 100.0);
-        // Quick for a few lines, never long for a full screen.
-        let duration = (0.35 + span.lines * 0.05).min(UNWRITE_TIME);
-        Some(Plan { duration, ease: 1.0, data: theme::bytes(&data) })
+    /// Clearing crumbles the writing to ash: a front sweeps across it from
+    /// the right, the ink smouldering as it nears, and breaks it into
+    /// specks that glow as they break off and are blown away; the paper
+    /// stays as it was.
+    fn clear(&self, v: &Variant, rng: &mut Rng, _aspect: f32, span: &ClearSpan) -> Option<Plan> {
+        let data = PlanData::crumble(span.grid, span.columns, span.lines, span.area, v.param("dust_glow"), rng.unit() * 100.0);
+        Some(Plan { duration: v.param("dust_time"), ease: 1.0, data: theme::bytes(&data) })
     }
 
     /// The bleed keeps creeping for `bleed_time`.

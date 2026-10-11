@@ -16,7 +16,8 @@
 // along it and settling into the grain behind it, and the paper just ahead
 // darkened by the water reaching it first.
 
-// Closing a sheet, or clearing one, burns it away (brush.rs,
+// Clearing a sheet crumbles its writing to dust (`crumbled`). Closing a
+// sheet burns it away (brush.rs,
 // `PlanData::burn`): a fire lit
 // at marks[0].xy spreads to marks[0].z by the end, its front ragged and
 // fingering out along the paper, the sheet ahead of it browning and
@@ -178,7 +179,7 @@ fn arrival(q: vec2<f32>) -> Hit {
 
 fn theme_transition(px: vec2<f32>, now: vec4<f32>, before_in: vec4<f32>) -> vec4<f32> {
     if (plan.front.w > 2.5) {
-        return unwritten(px, now, before_in);
+        return crumbled(px, now, before_in);
     }
     if (plan.front.w > 1.5) {
         return shred(px, now, before_in);
@@ -406,40 +407,33 @@ fn shred(px: vec2<f32>, now: vec4<f32>, before: vec4<f32>) -> vec4<f32> {
     return color;
 }
 
-// Clearing: the writing taken away the way it came, backwards. The grid is
-// marks[0] (first cell's corner, cell size, physical pixels), its columns
-// and the lines with text marks[2].xy, the pane marks[1]. Cells go in
-// reverse reading order, from the last line up and each line right to left,
-// overlapping a little; each cell's ink lifts off along the brush's stroke
-// (the sweep the writing uses), from the end of the stroke back to its
-// start, its edge ragged. What has gone shows the cleared screen; the
-// paper is the same in both.
-fn unwritten(px: vec2<f32>, now: vec4<f32>, before: vec4<f32>) -> vec4<f32> {
+// Clearing: the writing crumbles to ash and is blown away (`dust`, the
+// transition stage). The grid is marks[0] (first cell's corner, cell size,
+// physical pixels), its columns and the lines with text marks[2].xy, the
+// pane marks[1], the glow (setting `dust_glow`) cut.x. The ink smoulders as the front nears it and each speck
+// glows like an ember as it breaks off, cooling to the ink's own colour as
+// it flies; the paper is the same before and after.
+fn crumbled(px: vec2<f32>, now: vec4<f32>, before: vec4<f32>) -> vec4<f32> {
     let area = plan.marks[1];
     let uv = px / frame.resolution;
     if (any(uv < area.xy) || any(uv > area.xy + area.zw)) {
         return now;
     }
-    let origin = plan.marks[0].xy;
-    let cell = max(plan.marks[0].zw, vec2<f32>(1.0));
-    let columns = max(plan.marks[2].x, 1.0);
-    let lines = max(plan.marks[2].y, 1.0);
-    let g = (px - origin) / cell;
-    // Outside the text: nothing written there.
-    if (any(g < vec2<f32>(0.0)) || g.x >= columns || g.y >= lines) {
-        return now;
+    let grid = plan.marks[0];
+    let pane_hi = (area.xy + area.zw) * frame.resolution;
+    let hi = min(grid.xy + grid.zw * vec2<f32>(max(plan.marks[2].x, 1.0), max(plan.marks[2].y, 1.0)), pane_hi);
+    let scale = max(frame.scale, 1.0);
+    let a = DustArea(grid.xy, hi, 2.5 * scale, (hi.x - grid.x) * 0.35 + 120.0 * scale, plan.info.z);
+    let d = dust(px, a);
+    let dark_sheet = dot(frame.surface.rgb, vec3<f32>(0.3, 0.59, 0.11)) < 0.5;
+    let ember = select(vec3<f32>(0.92, 0.36, 0.08), vec3<f32>(1.0, 0.55, 0.18), dark_sheet);
+    if (d.intact > 0.5) {
+        // Ink about to go smoulders, from its edges in.
+        let inked = clamp(distance(before.rgb, now.rgb) * 3.0, 0.0, 1.0);
+        let flicker = 0.7 + 0.3 * noise(px * 0.15 + vec2<f32>(frame.time * 5.0, plan.info.z));
+        return vec4<f32>(mix(before.rgb, ember, d.near * d.near * inked * flicker * 0.75 * plan.cut.x), 1.0);
     }
-    let c = floor(g);
-    let total = columns * lines;
-    let order = ((lines - 1.0 - c.y) * columns + (columns - 1.0 - c.x)) / total;
-    // Each cell takes a share of the time, a few cells' worth overlapping.
-    let span = clamp(8.0 / total, 0.004, 0.4);
-    let u = clamp((frame.progress * (1.0 + span) - order) / span, 0.0, 1.0);
-    // Along the brush through the cell: left to right and slightly rising,
-    // as it was written; it lifts from the stroke's end back to its start.
-    let along = dot(fract(g) - 0.5, vec2<f32>(0.94, -0.34)) + 0.5;
-    let sp = px + vec2<f32>(plan.info.z * 13.0, plan.info.z * 7.0);
-    let ragged = along + (noise(sp * 0.4) - 0.5) * 0.3 + (noise(rotate(sp, 0.35) * vec2<f32>(0.08, 0.9)) - 0.5) * 0.2;
-    let gone = clamp((u * 1.45 - (1.0 - ragged)) * 9.0, 0.0, 1.0);
-    return mix(before, now, gone);
+    var rgb = clamp(now.rgb + d.ink, vec3<f32>(0.0), vec3<f32>(1.0));
+    rgb = mix(rgb, ember, d.heat * 0.85 * plan.cut.x);
+    return vec4<f32>(rgb, 1.0);
 }

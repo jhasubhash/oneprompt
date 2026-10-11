@@ -137,11 +137,13 @@ light or dark palette.
   Chalkboard's board slides up or down out of the frame. The panes taking its place show
   beneath. `close_effect = false` closes at once.
 - **Clearing takes the writing away**: Cmd+K, or `clear` (or Ctrl+L) in the shell. In
-  Tsushima the writing goes the way it came, backwards: line by line from the cursor's up,
-  each right to left, every letter lifting off along the brush's stroke, the paper left as
-  it was. Logbook sets the old page alight where `clear` was typed, the fire spreading
-  across the pane to clean paper. On the Chalkboard the chalk breaks up
-  into dust that drifts off the board. Only the pane cleared changes. A full-screen app
+  Tsushima the writing crumbles to ash: a ragged front sweeps across it from the right,
+  the ink smouldering as it nears, and breaks it into specks that glow like embers as they
+  break off and are blown away up and to the right, the paper left as it was. Logbook sets
+  the old page alight where `clear` was typed, the fire spreading across the pane to clean
+  paper. On the Chalkboard the chalk crumbles the same way into dust blown off the board.
+  Each variant's `dust_time` (0.8 to 4 s, 1.8 built in) sets how long the crumbling takes,
+  and Tsushima's `dust_glow` (0 to 1) how brightly the ink glows as embers. Only the pane cleared changes. A full-screen app
   erasing its own screen doesn't count. The shell's output waits (at most 150 ms) until
   the old frame is kept, so the fire burns what was there. `clear_effect = false` clears
   at once.
@@ -200,7 +202,8 @@ another theme). A theme implements the `Theme` trait:
   `theme_ink` (how the ink layer lands on it, with the framework's hand-writing state and
   each cell's `wetness` and `aged`),
   `theme_shape` (its own shapes: Tsushima's brush dab and sword slash, Chalkboard's chalk
-  stick and line) and `theme_transition` (its reveals). Each gets a shared prelude (the
+  stick and line) and `theme_transition` (its reveals; `dust` crumbles the old frame's
+  writing into specks blown away, for a theme to colour its own way). Each gets a shared prelude (the
   frame: size, time, seed, grid, colours; and `hash`, `noise`, `rotate`) plus its own data
   from Rust (`Theme::data`, given the `Ctx`: scale, cell size, speed and the sheet's `wear`). A stage it leaves out gets a plain default. A test compiles every stage.
 - **Events**: `reveal` (the window opens), `switch` (switching to it, from its other
@@ -362,7 +365,7 @@ sound_volume = 0.4
 paper_aging = true            # a tab's sheet yellows and creases with use
 paper_aging_hours = 8         # hours for a sheet to wear out
 close_effect = true           # closing burns / wipes the sheet away
-clear_effect = true           # Cmd+K / `clear` burns the screen away / blows the chalk off
+clear_effect = true           # Cmd+K / `clear` crumbles the writing to dust / burns the page
 idle_scene = true             # leaves fall / dust settles on an idle window
 idle_after = 60               # seconds without a key or click
 shell_integration = true      # the shell marks its prompts (new shells)
@@ -374,8 +377,9 @@ seed = 11                     # pin the paper; unset = new sheet each session
 
 [themes.tsushima-light]       # each variant: fonts and line_height, then the theme's own
 font_family = "Courier New"   # settings (Tsushima: bleed, nib, grain, edge, absorb, texture,
-                              # stains, splatter; Chalkboard: grit, dust, smudges, ghosts;
-                              # Logbook: rules, foxing, feather, rose)
+                              # stains, splatter, dust_time, dust_glow; Chalkboard: grit,
+                              # dust, smudges, ghosts, dust_time; Logbook: rules, foxing,
+                              # feather, rose)
 font_weight = 700
 bleed_variation = 0.5         # per-letter bleed: 0.5 to 1.5 times `bleed`
 bleed_time = 4                # seconds the bleed keeps spreading
