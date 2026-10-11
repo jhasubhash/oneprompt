@@ -123,7 +123,8 @@ light or dark palette.
   up creases from being folded, a long fold across and one down and smaller ones around
   them, a shaded valley beside a ridge catching the light, and the writing they cross is
   rubbed thin and shaded with the crease; the Chalkboard collects eraser
-  smudges and ghosts of old lessons. A new tab starts on a fresh sheet. `paper_aging =
+  smudges and ghosts of old lessons. A new tab starts on a fresh sheet, and typing into a worn one (over a minute of wear)
+  slowly turns it into a fresh sheet again, over about six seconds. `paper_aging =
   false` keeps every sheet new; `ONEPROMPT_PAPER_RATE=<n>` ages them n times faster, to
   see a worn one now (snapshots too).
 - **Closing burns the sheet**: closing a tab takes its sheet away the theme's way. Tsushima

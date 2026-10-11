@@ -65,6 +65,10 @@ use theme::Variant;
 /// How long snapshot mode lets the command run before capturing.
 const SNAPSHOT_DELAY: Duration = Duration::from_millis(1500);
 /// A beating cursor is drawn this often, and a busy progress stroke this often.
+/// Typing on a worn sheet freshens it over this long, and only when it has
+/// worn for at least RENEW_MIN_AGE seconds.
+const RENEW_TIME: f32 = 6.0;
+const RENEW_MIN_AGE: f32 = 60.0;
 const PULSE_FRAME: Duration = Duration::from_millis(50);
 const BUSY_FRAME: Duration = Duration::from_millis(33);
 
@@ -170,6 +174,9 @@ struct Tab {
     name: Option<String>,
     /// When it was opened: its sheet ages from then.
     opened: Instant,
+    /// Typing into a worn sheet freshens it: when that began, and how old the
+    /// sheet was then, in seconds of wear.
+    renewing: Option<(Instant, f32)>,
 }
 
 /// A shell in a tab.
@@ -209,7 +216,32 @@ fn content_rects(tab: &Tab, window: [f32; 4], scale: f32) -> Vec<(PaneId, [f32; 
 
 impl Tab {
     fn new(pane: Pane) -> Self {
-        Self { layout: panes::Layout::Pane(pane.id), focus: pane.id, panes: vec![pane], name: None, opened: Instant::now() }
+        Self { layout: panes::Layout::Pane(pane.id), focus: pane.id, panes: vec![pane], name: None, opened: Instant::now(), renewing: None }
+    }
+
+    /// How old the sheet is, in seconds of wear. While it is being freshened
+    /// it grows young again, easing out, and starts over when that is done.
+    fn sheet_age(&mut self, rate: f32) -> f32 {
+        let Some((start, from)) = self.renewing else {
+            return self.opened.elapsed().as_secs_f32() * rate;
+        };
+        let t = (start.elapsed().as_secs_f32() / RENEW_TIME).min(1.0);
+        if t >= 1.0 {
+            self.opened = Instant::now();
+            self.renewing = None;
+            return 0.0;
+        }
+        from * (1.0 - t * t * (3.0 - 2.0 * t))
+    }
+
+    /// Starts freshening the sheet if it is noticeably worn.
+    fn renew_sheet(&mut self, rate: f32) {
+        if self.renewing.is_none() {
+            let age = self.sheet_age(rate);
+            if age > RENEW_MIN_AGE {
+                self.renewing = Some((Instant::now(), age));
+            }
+        }
     }
 
     /// The pane with the keyboard.
@@ -1454,7 +1486,8 @@ impl App {
         let theme = self.themes[self.current].clone();
         let strike = self.config.strike_deleted.unwrap_or(true);
         if let (Some(r), Some(tab)) = (self.renderer.as_mut(), self.tabs.get_mut(self.active)) {
-            r.set_sheet_age(tab.opened.elapsed().as_secs_f32() * self.wear_rate);
+            r.set_sheet_age(tab.sheet_age(self.wear_rate));
+            let renewing = tab.renewing.is_some();
             let window = r.window_rect();
             let scale = r.window().scale_factor() as f32;
             let laid = content_rects(tab, window, scale);
@@ -1517,7 +1550,7 @@ impl App {
             }
             // Keep drawing while ink is still being brushed in or a
             // reveal is running; vsync paces it, idle costs nothing.
-            if r.is_animating() {
+            if r.is_animating() || renewing {
                 r.window().request_redraw();
             }
         }
@@ -2155,6 +2188,12 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(bytes) = bytes {
                     t.clear_selection();
                     t.input(bytes);
+                    // Writing on an old sheet slowly turns it into a fresh one.
+                    let rate = self.wear_rate;
+                    if let Some(tab) = self.tabs.get_mut(self.active) {
+                        tab.renew_sheet(rate);
+                    }
+                    self.redraw();
                     let theme = self.themes[self.current].theme;
                     if let Some(sound) = theme.sound(theme::SoundEvent::Key) {
                         self.sounds.play(sound);
