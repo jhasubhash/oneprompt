@@ -1789,8 +1789,10 @@ impl App {
             self.relayout();
             let theme = self.themes[i].clone();
             let name = theme.name.to_lowercase().replace(' ', "-");
-            if let (Some(r), Some(t)) = (self.renderer.as_mut(), self.tabs.get(self.active).map(|t| &t.pane().terminal)) {
-                let term = t.term.lock();
+            if let (Some(r), Some(tab)) = (self.renderer.as_mut(), self.tabs.get(self.active)) {
+                // With ONEPROMPT_PAPER_RATE the sheet is as worn as it would be by now.
+                r.set_sheet_age(tab.opened.elapsed().as_secs_f32() * self.wear_rate);
+                let term = tab.pane().terminal.term.lock();
                 r.snapshot(&theme, &term, &dir.join(format!("{name}.png")));
             }
         }

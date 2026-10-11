@@ -18,6 +18,8 @@
 //            dulls as it dries to sumi's matte black
 //   age    - ink an hour old (`aged`) has faded a little and browned, as old
 //            sumi does on washi
+//   folds  - where the worn sheet is creased (`folds`, common.wgsl), the ink
+//            is rubbed thin and shaded with the crease
 
 const TAPS: i32 = 12;
 const NIB_TAPS: i32 = 3;
@@ -185,5 +187,11 @@ fn theme_ink(px: vec2<f32>) -> vec4<f32> {
     } else {
         rgb = mix(rgb, frame.surface.rgb, old * 0.3);
     }
-    return vec4<f32>(rgb * faded, faded);
+    // Folds in a worn sheet run through the writing too: the ink is rubbed
+    // thin along them, and takes the crease's shadow and light like the
+    // paper beside it.
+    let fold = folds(px / frame.resolution);
+    let rubbed = faded * (1.0 - 0.6 * fold.rub);
+    rgb = clamp(rgb * (1.0 + clamp(fold.relief, -1.0, 1.0) * 0.35), vec3<f32>(0.0), vec3<f32>(1.0));
+    return vec4<f32>(rgb * rubbed, rubbed);
 }

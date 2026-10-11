@@ -39,3 +39,50 @@ fn tooth(p: vec2<f32>) -> f32 {
 fn sheet_offset() -> vec2<f32> {
     return vec2<f32>(fract(frame.seed * 0.137) * 400.0, fract(frame.seed * 0.291) * 400.0);
 }
+
+// The folds worn into the sheet (`look.wear`): a long one across and one
+// down, at places of the sheet's own, then smaller creases, each appearing
+// as the wear passes its own point. The surface draws them; the ink, lying
+// on the same sheet, is rubbed off along them.
+struct Folds {
+    relief: f32, // > 0 on a ridge catching the light, < 0 in a valley's shadow
+    rub: f32,    // how worn the sheet is along a fold here, 0..1
+};
+
+fn folds(uv: vec2<f32>) -> Folds {
+    var out = Folds(0.0, 0.0);
+    let wear = look.wear;
+    if (wear <= 0.0) {
+        return out;
+    }
+    let aspect = vec2<f32>(frame.resolution.x / frame.resolution.y, 1.0);
+    let s = vec2<f32>(fract(frame.seed * 0.371), fract(frame.seed * 0.613));
+    for (var k = 0; k < 6; k++) {
+        let fk = f32(k);
+        let due = select(0.15 + fk * 0.13, fk * 0.25, k < 2);
+        let strength = smoothstep(due, due + 0.2, wear);
+        if (strength <= 0.0) {
+            continue;
+        }
+        let origin = vec2<f32>(fract(s.x + fk * 0.618), fract(s.y + fk * 0.382));
+        let angle = select(hash(vec2<f32>(fk, 3.0)) * 3.1416, select(1.5708, 0.0, k == 0) + (s.x - 0.5) * 0.3, k < 2);
+        let dir = vec2<f32>(cos(angle), sin(angle));
+        let q = (uv - origin) * aspect;
+        let along = dot(q, dir);
+        let reach = select(0.35 + 0.3 * hash(vec2<f32>(fk, 9.0)), 2.0, k < 2);
+        let wobble = (noise(vec2<f32>(along * 6.0, fk * 7.0)) - 0.5) * 0.02;
+        let across = dot(q, vec2<f32>(-dir.y, dir.x)) + wobble;
+        let fade = 1.0 - smoothstep(reach * 0.6, reach, abs(along));
+        let weight = strength * fade * select(1.0, 0.55, k >= 2);
+        // A valley in shadow on one side, a ridge catching the light on the other.
+        let w = 0.0035;
+        let valley = exp(-pow((across + w) / w, 2.0));
+        let ridge = exp(-pow((across - w) / w, 2.0));
+        out.relief += (ridge * 0.7 - valley) * weight;
+        // Handling rubs the sheet along the fold a little either side of
+        // it, unevenly: worse where the fold was pressed hardest.
+        let patchy = 0.55 + 0.45 * noise(vec2<f32>(along * 40.0, fk * 3.0));
+        out.rub = max(out.rub, exp(-pow(across / (w * 2.2), 2.0)) * weight * patchy);
+    }
+    return out;
+}
