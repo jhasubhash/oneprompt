@@ -37,10 +37,11 @@ and notarized, Apple silicon and Intel, macOS 11+. It's an alpha: expect rough e
 |---|---|
 | ✍️ **Written by hand** | New text is traced along each letter's pen path; the ink bleeds, dries and ages. |
 | ⚔️ **Strikes what you delete** | `rm` a file and every mention of it on screen is cut through. |
-| 🔥 **Undoes what you clear** | `clear` takes the writing back off the page, or burns it away. |
+| 🔥 **Undoes what you clear** | `clear` crumbles the writing to dust and blows it away, or burns the page. |
 | 🩸 **Marks failures** | A failed command gets a stroke of seal ink; a long one is stamped with a hanko. |
 | 📜 **Every theme, its own way** | Openings, theme switches, split dividers, closing panes, the settings panel. |
 | 🍁 **Alive when idle** | Leaves fall onto a window left alone; the cursor has a heartbeat. |
+| 🗂️ **A file browser** | Cmd+B lists the shell's folder beside it; open Markdown, pictures and text right in the terminal. |
 | 🖼️ **Pictures and Markdown** | `imgcat photo.png` shows it inline; `md notes.md` shows Markdown styled in the theme's inks. |
 | 🖥️ **A real terminal** | Tabs, splits, find with regex, clickable links, IME, true colour, mouse, Claude Code-friendly. |
 

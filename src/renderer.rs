@@ -32,6 +32,9 @@ use glyphon::{
 };
 use winit::window::Window;
 
+mod browser;
+pub use browser::BrowserHit;
+
 use crate::animation::{self, TextAnimator, Transition, Writing};
 use crate::boxdraw;
 use crate::color;
@@ -410,6 +413,8 @@ pub struct PaneView<'a, L: EventListener> {
     pub strikes: Option<&'a mut Strikes>,
     pub rect: [f32; 4],
     pub focused: bool,
+    /// The pane's file browser and its strip beside the pane, when open.
+    pub browser: Option<(&'a crate::browser::Browser, [f32; 4])>,
 }
 
 impl Targets {
@@ -728,6 +733,12 @@ pub struct Renderer {
     settings_duration: f32,
     settings: Option<SettingsView>,
     settings_buffer: wgpu::Buffer,
+    /// Each pane's file browser as drawn (renderer/browser.rs).
+    browsers: HashMap<u64, browser::BrowserLook>,
+    /// The pane being drawn has its browser open: its text joins the ink.
+    browser_pane: Option<u64>,
+    /// A browser is coming in or going out: keep drawing.
+    browsers_moving: bool,
     /// Installed monospace font families, sorted, once asked for.
     monospace: Option<Vec<String>>,
     /// Text being composed in an input method, and its selected range.
@@ -951,6 +962,9 @@ impl Renderer {
             settings_duration: 0.25,
             settings: None,
             settings_buffer,
+            browsers: HashMap::new(),
+            browser_pane: None,
+            browsers_moving: false,
             monospace: None,
             preedit: None,
             preedit_text,
@@ -1086,6 +1100,7 @@ impl Renderer {
         self.full_screen.remove(&id);
         self.pane_metrics.remove(&id);
         self.divider_births.remove(&id);
+        self.browsers.remove(&id);
     }
 
     /// Starts the pen-path atlas over when the glyphs would come out
@@ -1592,6 +1607,7 @@ impl Renderer {
         self.transition.as_ref().is_some_and(|t| !t.done(now))
             || now < self.strikes_until
             || now < self.dividers_until
+            || self.browsers_moving
             || now < self.marks_until
             || now < self.idle_until
             || now < self.trail_until
@@ -2002,6 +2018,7 @@ impl Renderer {
         self.idle_shapes(variant, &mut idle);
         self.progress_shapes(variant, &mut idle);
         self.chrome_ink.extend(idle);
+        self.keep_browsers(panes);
         for (i, pane) in panes.iter_mut().enumerate() {
             let last = i + 1 == n;
             self.set_pane(pane.id, pane.rect, None);
@@ -2010,6 +2027,15 @@ impl Renderer {
             self.after_ink = if last { std::mem::take(&mut after) } else { Vec::new() };
             let struck = if strikes { pane.strikes.as_deref_mut() } else { None };
             self.layout(variant, pane.term, struck, last);
+            // The pane's browser: its marks on the surface with the pane's,
+            // its text in the pane's ink.
+            self.browser_pane = None;
+            if let Some((browser, rect)) = pane.browser {
+                let (shapes, edges) = self.lay_out_browser(variant, pane.id, browser, rect, pane.focused);
+                self.rects.extend(shapes);
+                self.after_ink.extend(edges);
+                self.browser_pane = Some(pane.id);
+            }
             self.draw(variant, view, i == 0, last);
         }
         self.after_ink.clear();
@@ -2973,7 +2999,7 @@ impl Renderer {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        let mut panes = [PaneView { id: self.pane, term, strikes: None, rect: self.pane_rect, focused: true }];
+        let mut panes = [PaneView { id: self.pane, term, strikes: None, rect: self.pane_rect, focused: true, browser: None }];
         self.chrome_ink.clear();
         self.draw_panes(variant, &mut panes, &[], &texture.create_view(&Default::default()), false);
 
@@ -3795,6 +3821,19 @@ impl Renderer {
                     scale: 1.0,
                     bounds,
                     default_color: Color::rgb(*r, *g, *b),
+                    custom_glyphs: &[],
+                });
+            }
+        }
+        if let Some(look) = self.browser_pane.and_then(|id| self.browsers.get(&id)) {
+            for &(i, left, top, bounds) in &look.placed {
+                areas.push(TextArea {
+                    buffer: &look.texts[i],
+                    left,
+                    top,
+                    scale: 1.0,
+                    bounds,
+                    default_color: Color::rgb(r, g, b),
                     custom_glyphs: &[],
                 });
             }

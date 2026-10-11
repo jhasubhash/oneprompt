@@ -260,6 +260,25 @@ while you type.
   no file) shows headings, emphasis, inline and fenced code, lists and task lists, quotes,
   tables, rules and links (Cmd+click them) in the theme's own inks, wrapped to the
   terminal's width, with local images inline. Piped, it prints plain text.
+- File browser (Cmd+B): a column down the right of the pane listing the folder its shell is
+  in, and following the shell as it moves (`cd` elsewhere and it goes there). Folders first,
+  then files, in natural order (file2 before file10), marked as `ls -F` marks them in the
+  theme's inks, with sizes; the folders above as crumbs at the top (click one to go there),
+  and the chosen entry's size and age at the bottom. It refreshes when the folder changes.
+  The terminal narrows to make room. Arrows move (← up a folder, → into one), typing
+  filters (a leading `.` finds hidden names), Return opens: a folder goes in, Markdown is
+  rendered in the terminal (`oneprompt md`), pictures shown inline (`oneprompt img`), other
+  text opened in `less`, anything else in its app. Space shows it in Quick Look. The browser
+  also copies paths, puts them at the prompt (Tab, or drag an entry onto the terminal), sends
+  the shell into a folder (Cmd+Return), edits in `$EDITOR`, reveals in the Finder, makes
+  folders and files, renames, and moves to the Trash; right-click an entry for all of it.
+  Commands are typed at the prompt only when the shell is at it, never into a running
+  program. Esc goes back through the folders it went through, and closes it in the folder it
+  opened on (or the shell's latest); a click in the terminal gives the keyboard back, Cmd+B
+  takes it again, and closes the browser when it has it. It is written in the terminal's own
+  font. It comes in and goes the theme's way, as the settings panel does: unrolled with
+  Tsushima's roller, turned in like a Logbook page, slid in on the Chalkboard's frame. Each
+  pane has its own.
 - Input methods (IME): Chinese, Japanese, Korean and accents typed as two keys are composed
   at the cursor, underlined, with the system's candidate window beside it
 - Box-drawing and block characters drawn as shapes, so borders and bars join without seams; bullet dots (Claude Code's ⏺, ●, •) drawn as ink dots, not
@@ -278,6 +297,7 @@ while you type.
 | Cmd+D / Cmd+Shift+D | split the pane side by side / one above the other (drag a divider to resize) |
 | Cmd+Option+arrows, Cmd+] / Cmd+[ | the pane that way, the next / previous pane; a click in a pane also gives it the keyboard |
 | Cmd+F | find; Return / Shift+Return older / newer match, Cmd+R regular expression / text, Esc closes |
+| Cmd+B | file browser beside the pane: opens it, gives it the keyboard, closes it (keys below) |
 | Cmd+click | open the link under the pointer (hold Cmd to see it underlined) |
 | Cmd+Shift+L | flip between light and dark |
 | Cmd+Option+T | theme picker |
@@ -285,13 +305,33 @@ while you type.
 | drag top strip | move the window; double-click it to zoom |
 | Cmd+= / Cmd+- / Cmd+0 | bigger / smaller / actual-size text |
 | Cmd+A / Cmd+K | select all (scrollback too) / clear screen and scrollback |
-| right-click | menu: copy, paste, select all, clear, find, tabs, splits, text size, light / dark, themes, settings (Shift+right-click when an app has the mouse) |
+| right-click | menu: copy, paste, select all, clear, find, tabs, splits, file browser, text size, light / dark, themes, settings (Shift+right-click when an app has the mouse) |
 | Cmd+C | copy selection |
 | Cmd+V | paste (bracketed when the app asks for it) |
 | drag / double / triple click | select text / word / line |
 | Shift+drag | select even when an app has taken the mouse |
 | left Option+key | Meta (Alt+B, Alt+F, Alt+. ...); Option+←/→ moves by word |
 | scroll | scrollback, arrow keys in less/vim, or wheel events if the app wants the mouse |
+
+In the file browser, while it has the keyboard:
+
+| Key | Action |
+|---|---|
+| ↑ / ↓, Ctrl+P / Ctrl+N, Page Up / Down, Option+↑ / ↓ | move; to the first / last |
+| → / ← (Cmd+↑), Backspace | into the chosen folder / up to the one above |
+| Return, Cmd+↓, double-click | open: into a folder, or show the file in the terminal (Markdown rendered, pictures inline, text in `less`, the rest in its app) |
+| typing | filter the list; Backspace takes a letter off, Option+Backspace all, Esc clears |
+| Esc | back to the folder before; in the one it opened on, close the browser |
+| Space | Quick Look |
+| Tab, drag onto the terminal | put the path at the prompt (relative to the shell's folder) |
+| Cmd+Return | `cd` the shell into the chosen folder (or the one shown) |
+| Cmd+C / Cmd+Option+C / Cmd+Shift+C | copy the path / the path relative to the shell's folder / the name |
+| Cmd+O / Cmd+R / Cmd+E | open in its app / reveal in the Finder / edit in `$EDITOR` |
+| Cmd+Shift+N / Cmd+Option+N | new folder / new file (type its name, Return) |
+| Cmd+Backspace twice | move to the Trash |
+| Cmd+Shift+. | show / hide hidden files |
+| right-click | all of the above, and Rename… |
+| Ctrl+C / Ctrl+G, a click in the terminal | give the keyboard back to the terminal |
 
 ```sh
 cargo run                                       # your login shell
@@ -421,6 +461,9 @@ src/config.rs               settings file: parsing, theme overrides, edits that 
 src/settings.rs             settings panel: its rows, from the settings and the theme's own, and what changing them writes
 src/renderer.rs             the passes and each theme's stages: ink layer, surface + cells + ink a pane at a time, transition; the picker, settings panel, find bar and composed input
 src/picker.rs               theme picker: card layout and hit testing
+src/browser.rs              file browser: the folder's entries, filter, naming, what opens how, the Trash
+src/browse.rs               file browser in the app: its keys, clicks, drags, menu items, following the shell
+src/renderer/browser.rs     file browser laid out beside the pane, its text in the pane's ink
 src/animation.rs            per-cell write times (reading order, scroll-aware) and window transitions
 src/strike.rs               names on screen whose files were deleted, to strike out
 src/sound.rs                the themes' sounds, made from noise and tones, played with afplay

@@ -20,6 +20,8 @@
 
 mod animation;
 mod boxdraw;
+mod browse;
+mod browser;
 mod chrome;
 mod color;
 mod config;
@@ -178,13 +180,31 @@ struct Pane {
     title: Option<String>,
     /// Names on its screen whose files were deleted.
     strikes: strike::Strikes,
+    /// Its file browser, while open (Cmd+B).
+    browser: Option<browser::Browser>,
 }
 
 impl Pane {
     fn new(id: PaneId, terminal: Terminal) -> Self {
         let strikes = strike::Strikes::new(terminal.pty.as_ref().and_then(|f| f.try_clone().ok()));
-        Self { id, terminal, title: None, strikes }
+        Self { id, terminal, title: None, strikes, browser: None }
     }
+}
+
+/// A tab's panes in `window`: each terminal's box, and its browser's beside
+/// it when it has one open.
+fn content_rects(tab: &Tab, window: [f32; 4], scale: f32) -> Vec<(PaneId, [f32; 4], Option<[f32; 4]>)> {
+    tab.layout
+        .rects(window)
+        .into_iter()
+        .map(|(id, rect)| match tab.panes.iter().find(|p| p.id == id).and_then(|p| p.browser.as_ref()) {
+            Some(_) => {
+                let (term, strip) = browser::split(rect, scale);
+                (id, term, Some(strip))
+            }
+            None => (id, rect, None),
+        })
+        .collect()
 }
 
 impl Tab {
@@ -227,6 +247,11 @@ struct Mouse {
     last_tab_click: Option<(Instant, usize)>,
     /// The divider between panes being dragged.
     divider: Option<panes::Divider>,
+    /// Last click on a browser's entry, for double-click to open.
+    last_browser_click: Option<(Instant, PaneId, usize)>,
+    /// An entry pressed in a browser: it may be dragged onto a terminal,
+    /// which then gets its path. From where it was pressed.
+    browser_drag: Option<(PathBuf, f64, f64)>,
 }
 
 /// Clicks closer together than this count as a double/triple click.
@@ -246,7 +271,8 @@ impl App {
     /// pixels, in reading order.
     fn pane_rects(&self) -> Vec<(PaneId, [f32; 4])> {
         let (Some(r), Some(tab)) = (self.renderer.as_ref(), self.tabs.get(self.active)) else { return Vec::new() };
-        tab.layout.rects(r.window_rect())
+        let scale = r.window().scale_factor() as f32;
+        content_rects(tab, r.window_rect(), scale).into_iter().map(|(id, rect, _)| (id, rect)).collect()
     }
 
     /// The box of the active tab's focused pane.
@@ -270,8 +296,9 @@ impl App {
         let theme = self.themes[self.current].clone();
         let Some(renderer) = self.renderer.as_mut() else { return };
         let window = renderer.window_rect();
+        let scale = renderer.window().scale_factor() as f32;
         for tab in &mut self.tabs {
-            for (id, rect) in tab.layout.rects(window) {
+            for (id, rect, _) in content_rects(tab, window, scale) {
                 let size = renderer.grid_size(&theme, id, rect);
                 if let Some(pane) = tab.panes.iter_mut().find(|p| p.id == id) {
                     pane.terminal.resize(size);
@@ -598,6 +625,7 @@ impl App {
             dark: self.themes[self.current].dark,
             tabs: self.tabs.len(),
             panes: self.tabs.get(self.active).map_or(1, |t| t.panes.len()),
+            browser: self.tabs.get(self.active).is_some_and(|t| t.pane().browser.is_some()),
         };
         if let (Some(m), Some(r)) = (&self.menu, &self.renderer) {
             m.show(r.window(), state);
@@ -715,6 +743,21 @@ impl App {
                     self.show_notice(format!("could not open the settings file: {err}"), true);
                 }
             }
+            Action::Browser => self.toggle_browser(true),
+            Action::BrowserOpen
+            | Action::BrowserOpenApp
+            | Action::BrowserReveal
+            | Action::BrowserEdit
+            | Action::BrowserCd
+            | Action::BrowserInsert
+            | Action::BrowserCopyPath
+            | Action::BrowserCopyName
+            | Action::BrowserCopyRelative
+            | Action::BrowserNewFolder
+            | Action::BrowserNewFile
+            | Action::BrowserRename
+            | Action::BrowserTrash
+            | Action::BrowserHidden => self.browser_action(action),
         }
         self.redraw();
     }
@@ -1035,6 +1078,10 @@ impl App {
             "a" => Some(Action::SelectAll),
             "k" => Some(Action::Clear),
             "f" => Some(Action::Find),
+            "b" => {
+                self.toggle_browser(false);
+                return true;
+            }
             _ => None,
         };
         if let Some(action) = action {
@@ -1247,6 +1294,7 @@ impl App {
                     }
                     rename.text.push_str(&text);
                     self.update_tabs();
+                } else if self.browser_text(&text) {
                 } else if self.picker.is_none()
                     && self.settings.is_none()
                     && let Some(t) = self.terminal()
@@ -1408,8 +1456,9 @@ impl App {
         if let (Some(r), Some(tab)) = (self.renderer.as_mut(), self.tabs.get_mut(self.active)) {
             r.set_sheet_age(tab.opened.elapsed().as_secs_f32() * self.wear_rate);
             let window = r.window_rect();
-            let rects = tab.layout.rects(window);
             let scale = r.window().scale_factor() as f32;
+            let laid = content_rects(tab, window, scale);
+            let rects: Vec<(PaneId, [f32; 4])> = laid.iter().map(|&(id, rect, _)| (id, rect)).collect();
             // Dividers start below the title strip, which runs across.
             let strip = renderer::TITLE_STRIP * scale;
             let dividers: Vec<renderer::Divider> = tab
@@ -1429,18 +1478,20 @@ impl App {
             // Every pane's screen, held still while it is drawn.
             let mut held = Vec::new();
             for pane in tab.panes.iter_mut() {
-                let Some(&(_, rect)) = rects.iter().find(|(id, _)| *id == pane.id) else { continue };
-                let Pane { id, terminal, strikes, .. } = pane;
-                held.push((*id, rect, terminal.term.lock(), strike.then_some(strikes)));
+                let Some(&(_, rect, strip)) = laid.iter().find(|(id, ..)| *id == pane.id) else { continue };
+                let Pane { id, terminal, strikes, browser, .. } = pane;
+                let browser = browser.as_ref().zip(strip);
+                held.push((*id, rect, terminal.term.lock(), strike.then_some(strikes), browser));
             }
             let mut views: Vec<renderer::PaneView<_>> = held
                 .iter_mut()
-                .map(|(id, rect, term, strikes)| renderer::PaneView {
+                .map(|(id, rect, term, strikes, browser)| renderer::PaneView {
                     id: *id,
                     term: &**term,
                     strikes: strikes.as_deref_mut(),
                     rect: *rect,
                     focused: *id == focus,
+                    browser: *browser,
                 })
                 .collect();
             // In reading order, the focused pane last so the window's
@@ -1641,6 +1692,14 @@ impl App {
         if self.on_chrome_button(pressed, button) {
             return;
         }
+        // An entry dragged out of a browser and let go.
+        if !pressed && button == MouseButton::Left && self.browser_drop() {
+            return;
+        }
+        if let Some(id) = self.renderer.as_ref().and_then(|r| r.browser_at(self.mouse.x as f32, self.mouse.y as f32)) {
+            self.browser_click(id, pressed, button);
+            return;
+        }
         // Dividers between panes are dragged; a click in a pane gives it
         // the keyboard, and then acts in it as usual.
         if button == MouseButton::Left && !pressed && self.mouse.divider.take().is_some() {
@@ -1657,6 +1716,14 @@ impl App {
                 && self.tabs.get(self.active).is_some_and(|t| t.focus != id)
             {
                 self.focus_pane(id);
+            }
+            // A click in the terminal takes the keyboard from its browser.
+            if self.pane_under_pointer().is_some()
+                && let Some(b) = self.browser_mut()
+                && b.keys
+            {
+                b.keys = false;
+                self.redraw();
             }
         }
         // Right-click opens the menu, unless the program wants the mouse
@@ -1731,6 +1798,9 @@ impl App {
                 self.picker = Some(card);
                 self.update_picker();
             }
+            return;
+        }
+        if self.browser_dragging() {
             return;
         }
         if let Some(divider) = self.mouse.divider.clone() {
@@ -1925,6 +1995,17 @@ impl ApplicationHandler<UserEvent> for App {
             let next = self.pulse_at + every;
             wake = Some(wake.map_or(next, |w| w.min(next)));
         }
+        // Browsers that have gone out are taken away; open ones look at
+        // their folders and shells now and then.
+        self.finish_browsers();
+        if let Some(due) = self.browsers_due() {
+            if Instant::now() >= due && self.tick_browsers() {
+                self.redraw();
+            }
+            if let Some(next) = self.browsers_due() {
+                wake = Some(wake.map_or(next, |w| w.min(next)));
+            }
+        }
         event_loop.set_control_flow(wake.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 
@@ -2058,7 +2139,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.renaming.is_some() && self.rename_key(&event) {
                     return;
                 }
-                if self.picker_key(&event) || self.settings_key(&event) || self.search_key(&event) {
+                if self.picker_key(&event) || self.settings_key(&event) || self.search_key(&event) || self.browser_key(&event) {
                     return;
                 }
                 if self.shortcut(&event) {
@@ -2108,6 +2189,18 @@ impl ApplicationHandler<UserEvent> for App {
                     r.scroll_settings(pixels);
                     r.window().request_redraw();
                 }
+            }
+            WindowEvent::MouseWheel { delta, .. }
+                if self.renderer.as_ref().and_then(|r| r.browser_at(self.mouse.x as f32, self.mouse.y as f32)).is_some() =>
+            {
+                let Some(r) = self.renderer.as_mut() else { return };
+                let Some(id) = r.browser_at(self.mouse.x as f32, self.mouse.y as f32) else { return };
+                let pixels = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => -y * 3.0 * r.cell_height(),
+                    MouseScrollDelta::PixelDelta(p) => -p.y as f32,
+                };
+                r.scroll_browser(id, pixels);
+                r.window().request_redraw();
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 // The pane under the pointer scrolls, keyboard or not.
